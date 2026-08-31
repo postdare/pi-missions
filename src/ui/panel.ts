@@ -38,6 +38,10 @@ const TIER_DESC: Array<{ id: string; desc: string }> = [
 	{ id: "complex", desc: "里程碑 + 独立验证 + 逐里程碑回归" },
 ];
 
+const TIER_ORDER = TIER_DESC.map((t) => t.id);
+
+type TierId = "quick" | "standard" | "complex";
+
 function relTime(ts: number, now: number): string {
 	const mins = Math.max(0, Math.round((now - ts) / 60_000));
 	if (mins < 1) return "刚刚";
@@ -127,6 +131,8 @@ function clip(line: string, width: number): string {
 export interface PanelCallbacks {
 	/** ⏎ / r:恢复选中的 mission(面板先关闭) */
 	onResume: (missionId: string) => void;
+	/** n:用当前选中的档位开新任务(面板关闭,编辑器着色 + 预填命令) */
+	onSelectTier: (tier: TierId) => void;
 }
 
 export async function openMissionsPanel(ctx: any, l: RepoLayout, cb: PanelCallbacks): Promise<void> {
@@ -149,6 +155,7 @@ export async function openMissionsPanel(ctx: any, l: RepoLayout, cb: PanelCallba
 			let missions = scanMissions(l);
 			let selected = 0;
 			let detail = false;
+			let tierIdx = 1; // 默认 standard
 			let closed = false;
 
 			const refresh = () => {
@@ -182,7 +189,7 @@ export async function openMissionsPanel(ctx: any, l: RepoLayout, cb: PanelCallba
 					};
 
 					const title = " Missions ";
-					const hint = " ↑↓ 选择 · ⏎ 恢复 · d 详情 · q 退出 ";
+					const hint = " ←/→ 档位 · n 新建 · ↑↓ 选择 · ⏎ 恢复 · d 详情 · q 退出 ";
 					const lines: string[] = [
 						t.bg(
 							"customMessageBg",
@@ -194,11 +201,15 @@ export async function openMissionsPanel(ctx: any, l: RepoLayout, cb: PanelCallba
 						),
 					];
 
-					// 新建入口(三档说明)
-					lines.push(row(`${t.fg("accent", "+")} ${t.bold("新建任务")}`));
+					// 新建入口(三档说明,←/→ 选择档位,高亮显示)
+					lines.push(row(`${t.fg("accent", "+")} ${t.bold("新建任务")}  ${t.fg("dim", "←/→ 选择档位 · n 开始")}`));
 					for (const td of TIER_DESC) {
-						const cmd = td.id === "quick" ? "/mission quick <任务>" : `/mission new <目标>${td.id === "complex" ? " --tier=complex" : ""}`;
-						lines.push(row(`    ${t.fg("accent", td.id.padEnd(9))}${t.fg("dim", td.desc)}  ${t.fg("dim", cmd)}`));
+						const active = td.id === TIER_ORDER[tierIdx];
+						const cmd =
+							td.id === "quick" ? "/mission quick <任务>" : `/mission new <目标>${td.id === "complex" ? " --tier=complex" : ""}`;
+						const sel = active ? t.fg("accent", t.bold("▶")) : " ";
+						const name = active ? t.fg("accent", t.bold(td.id)) : t.fg("dim", td.id);
+						lines.push(row(`    ${sel} ${name.padEnd(9)}${t.fg("dim", td.desc)}  ${t.fg("dim", cmd)}`));
 					}
 					lines.push(row(t.fg("dim", "─".repeat(Math.min(56, inner - 8)))));
 
@@ -232,9 +243,17 @@ export async function openMissionsPanel(ctx: any, l: RepoLayout, cb: PanelCallba
 						detail = !detail;
 						return tui.requestRender();
 					}
+					if (matchesKey(input, Key.right) || matchesKey(input, "l")) {
+						tierIdx = (tierIdx + 1) % TIER_ORDER.length;
+						return tui.requestRender();
+					}
+					if (matchesKey(input, Key.left) || matchesKey(input, "h")) {
+						tierIdx = (tierIdx - 1 + TIER_ORDER.length) % TIER_ORDER.length;
+						return tui.requestRender();
+					}
 					if (matchesKey(input, "n")) {
 						close();
-						ctx.ui.notify("运行 /mission new <目标> 或 /mission quick <任务>", "info");
+						cb.onSelectTier(TIER_ORDER[tierIdx] as TierId);
 						return;
 					}
 					if (matchesKey(input, Key.enter) || matchesKey(input, "r")) {

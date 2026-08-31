@@ -47,7 +47,8 @@ Node ≥ 22.6(core 单测用 `node --test` + type stripping)。
 | `/missions` | 主面板:顶部新建,下方历史(从 `missions/state/*/STATE.json` 扫描重建) |
 | `/mission new <目标> [--tier=standard\|complex]` | 新建并进入 PLAN 相位 |
 | `/mission quick <任务> [--verify "<命令>"]` | 单任务快捷档,不落盘 |
-| `/mission status` | 当前任务详情卡片 |
+| `/mission status` | 当前任务详情(页签浮层:概览/任务/验收/日志) |
+| `/mission tier <quick\|standard\|complex\|off>` | 设定/清除待用档位:编辑器边框随档位换色,输入框预填命令 |
 | `/mission next` | 换脑:创建干净会话继续(唯一解除 pendingHandoff 的出口) |
 | `/mission verify` | do 相位手动触发一次 CHECK |
 | `/mission escalate --level=2\|3` | 人工升级 |

@@ -12,6 +12,7 @@ import { planPaths, statePaths } from "./store/paths.ts";
 import { readLog } from "./store/log.ts";
 import { latestEvidenceResults } from "./store/evidence.ts";
 import { openStatusView, statusFallbackText, type StatusViewData } from "./ui/status-view.ts";
+import { applyTierSelection, clearTierIndicator } from "./ui/tier-indicator.ts";
 import { openMissionsPanel } from "./ui/panel.ts";
 
 type Ctx = any;
@@ -23,6 +24,11 @@ export function registerCommands(pi: any, getRuntime: GetRuntime): void {
 		handler: async (_args: string, ctx: Ctx) => {
 			await openMissionsPanel(ctx, getRuntime(ctx).layout, {
 				onResume: (id) => pi.sendUserMessage(`/mission resume ${id}`, { deliverAs: "followUp" }),
+				onSelectTier: (tier) => {
+					const rt = getRuntime(ctx);
+					rt.pendingTier = tier;
+					applyTierSelection(ctx, tier);
+				},
 			});
 		},
 	});
@@ -44,8 +50,25 @@ export function registerCommands(pi: any, getRuntime: GetRuntime): void {
 			if (ATTACH_FIRST.has(sub)) await rt.ensureAttached(ctx);
 
 			switch (sub) {
+				case "tier": {
+					// 手动设定/清除档位指示(不经面板)
+					const t = rest.trim();
+					if (t === "off" || t === "clear" || t === "") {
+						rt.pendingTier = null;
+						clearTierIndicator(ctx);
+						ctx.ui.notify("已清除档位选择", "info");
+						return;
+					}
+					if (t !== "quick" && t !== "standard" && t !== "complex") {
+						return notifyUsage(ctx, "用法:/mission tier quick|standard|complex|off");
+					}
+					rt.pendingTier = t;
+					applyTierSelection(ctx, t);
+					return;
+				}
+
 				case "new": {
-					const tier = flags.tier ?? "standard";
+					const tier = flags.tier ?? rt.consumePendingTier() ?? "standard";
 					if (tier !== "standard" && tier !== "complex") {
 						ctx.ui.notify(`未知档位 --tier=${tier}(可选 standard|complex;单任务请用 /mission quick)`, "error");
 						return;
@@ -53,6 +76,7 @@ export function registerCommands(pi: any, getRuntime: GetRuntime): void {
 					if (!rest) return notifyUsage(ctx, "用法:/mission new <目标> [--tier=standard|complex]");
 					const r = await rt.startNew(ctx, rest, tier);
 					if ("error" in r) return notifyUsage(ctx, r.error);
+					clearTierIndicator(ctx); // 档位已被消费,状态条接管
 					pi.sendUserMessage(
 						`[pi-missions] 新 Mission 已创建(${r.id},${tier} 档),进入 PLAN 相位。` +
 							`阅读 ${rt.config.missionsDir}/README.md 与 ${rt.config.missionsDir}/phases/plan.md,` +
@@ -66,6 +90,7 @@ export function registerCommands(pi: any, getRuntime: GetRuntime): void {
 					if (!rest) return notifyUsage(ctx, "用法:/mission quick <任务> [--verify \"<验证命令>\"]");
 					const r = await rt.startQuick(ctx, rest, flags.verify);
 					if ("error" in r) return notifyUsage(ctx, r.error);
+					clearTierIndicator(ctx);
 					pi.sendUserMessage(
 						`[pi-missions] quick 任务(${r.id}):${rest}\n` +
 							(flags.verify

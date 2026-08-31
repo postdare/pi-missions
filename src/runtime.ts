@@ -8,7 +8,7 @@
 
 import * as fs from "node:fs";
 import * as path from "node:path";
-import type { Effect, MissionEvent, MissionState, Phase, Role, TransitionResult, Evidence } from "./core/types.ts";
+import type { Effect, MissionEvent, MissionState, Phase, Role, Tier, TransitionResult, Evidence } from "./core/types.ts";
 import { initialState, transition, ROLE_OF } from "./core/machine.ts";
 import { judge } from "./core/verdict.ts";
 import { evaluatePromotion } from "./core/tier.ts";
@@ -72,6 +72,8 @@ const DIFF_TAIL = 12000;
 
 export class Runtime {
 	active: ActiveMission | null = null;
+	/** 面板/命令选定的待用档位;下一次 /mission new 消费掉 */
+	pendingTier: Tier | null = null;
 	private savedProfile: SavedProfile | null = null;
 	private diagnostics: IncrementalDiagnostics | null = null;
 	private suppressHandoffFollowUp = false;
@@ -665,6 +667,13 @@ export class Runtime {
 
 	modelsConfig(): ModelsConfig {
 		return loadModelsConfig(modelsJson(this.layout));
+	}
+
+	/** 消费待选档位(返回后清除) */
+	consumePendingTier(): Tier | null {
+		const t = this.pendingTier;
+		this.pendingTier = null;
+		return t;
 	}
 
 	private busy(): boolean {
