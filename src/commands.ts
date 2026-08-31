@@ -90,6 +90,7 @@ export function registerCommands(pi: any, getRuntime: GetRuntime): void {
 					if (!rest) return notifyUsage(ctx, "用法:/mission quick <任务> [--verify \"<验证命令>\"]");
 					const r = await rt.startQuick(ctx, rest, flags.verify);
 					if ("error" in r) return notifyUsage(ctx, r.error);
+					rt.pendingTier = null; // quick 不消费待选档位,直接清掉
 					clearTierIndicator(ctx);
 					pi.sendUserMessage(
 						`[pi-missions] quick 任务(${r.id}):${rest}\n` +
