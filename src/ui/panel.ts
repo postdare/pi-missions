@@ -195,7 +195,7 @@ export async function openMissionsPanel(ctx: any, l: RepoLayout, cb: PanelCallba
 					};
 
 					const title = " Missions ";
-					const hint = " ←/→ 档位 · n 新建 · ↑↓ 选择 · ⏎ 恢复 · d 详情 · q 退出 ";
+					const hint = " Tab 切换档位 · n 新建 · ↑↓ 选择 · ⏎ 恢复 · d 详情 · q 退出 ";
 					const lines: string[] = [
 						t.bg(
 							"customMessageBg",
@@ -207,8 +207,8 @@ export async function openMissionsPanel(ctx: any, l: RepoLayout, cb: PanelCallba
 						),
 					];
 
-					// 新建入口(三档说明,←/→ 选择档位,高亮显示)
-					lines.push(row(`${t.fg("accent", "+")} ${t.bold("新建任务")}  ${t.fg("dim", "←/→ 选择档位 · n 开始")}`));
+					// 新建入口(三档说明,Tab/Shift+Tab 切换档位,高亮显示)
+					lines.push(row(`${t.fg("accent", "+")} ${t.bold("新建任务")}  ${t.fg("dim", "Tab 切换档位 · n 开始")}`));
 					// 描述列定宽左对齐:前缀 ▶ 是全角(宽 2),空格是半角(宽 1),
 					// padEnd 按码位算不按列宽算 —— 必须用 visibleWidth 对齐,否则三行描述错位
 					for (const td of TIER_DESC) {
@@ -252,11 +252,11 @@ export async function openMissionsPanel(ctx: any, l: RepoLayout, cb: PanelCallba
 						detail = !detail;
 						return tui.requestRender();
 					}
-					if (matchesKey(input, Key.right) || matchesKey(input, "l")) {
+					if (matchesKey(input, Key.tab)) {
 						tierIdx = (tierIdx + 1) % TIER_ORDER.length;
 						return tui.requestRender();
 					}
-					if (matchesKey(input, Key.left) || matchesKey(input, "h")) {
+					if (matchesKey(input, Key.shift("tab"))) {
 						tierIdx = (tierIdx - 1 + TIER_ORDER.length) % TIER_ORDER.length;
 						return tui.requestRender();
 					}
