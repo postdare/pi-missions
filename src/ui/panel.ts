@@ -42,6 +42,11 @@ const TIER_ORDER = TIER_DESC.map((t) => t.id);
 
 type TierId = "quick" | "standard" | "complex";
 
+/** 按终端列宽补空格(▶/▸ 是全角宽 2,空格半角宽 1,padEnd 按码位算会对不齐) */
+function padCol(s: string, width: number): string {
+	return s + " ".repeat(Math.max(0, width - visibleWidth(s)));
+}
+
 function relTime(ts: number, now: number): string {
 	const mins = Math.max(0, Math.round((now - ts) / 60_000));
 	if (mins < 1) return "刚刚";
@@ -61,7 +66,8 @@ function missionCard(m: ScannedMission, selected: boolean, detail: boolean, t: T
 	const total = s.taskOrder.length;
 	const cost = costTotal(s);
 	const threshold = thresholdFor(s.tier);
-	const cursor = selected ? t.fg("accent", "▸") : " ";
+	const cursorBase = padCol(selected ? "▸" : " ", 2); // ▸ 是全角(宽 2),与未选中的空格对齐
+	const cursor = selected ? t.fg("accent", cursorBase) : cursorBase;
 
 	// 标题行:图标 + id + 档位 + 相位 + 更新时间
 	const head =
@@ -203,13 +209,16 @@ export async function openMissionsPanel(ctx: any, l: RepoLayout, cb: PanelCallba
 
 					// 新建入口(三档说明,←/→ 选择档位,高亮显示)
 					lines.push(row(`${t.fg("accent", "+")} ${t.bold("新建任务")}  ${t.fg("dim", "←/→ 选择档位 · n 开始")}`));
+					// 描述列定宽左对齐:前缀 ▶ 是全角(宽 2),空格是半角(宽 1),
+					// padEnd 按码位算不按列宽算 —— 必须用 visibleWidth 对齐,否则三行描述错位
 					for (const td of TIER_DESC) {
 						const active = td.id === TIER_ORDER[tierIdx];
 						const cmd =
 							td.id === "quick" ? "/mission quick <任务>" : `/mission new <目标>${td.id === "complex" ? " --tier=complex" : ""}`;
-						const sel = active ? t.fg("accent", t.bold("▶")) : " ";
-						const name = active ? t.fg("accent", t.bold(td.id)) : t.fg("dim", td.id);
-						lines.push(row(`    ${sel} ${name.padEnd(11)}    ${t.fg("dim", td.desc)}  ${t.fg("dim", cmd)}`));
+						const marker = padCol(active ? "▶" : " ", 2); // ▶ 宽 2,空格补到 2
+						const nameCol = padCol(td.id, 12); // 名字列固定 12 列
+						const name = active ? t.fg("accent", t.bold(nameCol)) : t.fg("dim", nameCol);
+						lines.push(row(`    ${marker} ${name}${t.fg("dim", td.desc)}  ${t.fg("dim", cmd)}`));
 					}
 					lines.push(row(t.fg("dim", "─".repeat(Math.min(56, inner - 8)))));
 
