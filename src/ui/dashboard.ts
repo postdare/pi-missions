@@ -52,30 +52,22 @@ export function renderWidgetLines(plan: MissionPlan, state: MissionState, now = 
 	const total = state.taskOrder.length;
 	const cost = costTotal(state);
 
-	// 第一行:身份 + 相位 + 角色 + 进度
-	const head = [
-		`◆ ${state.missionId}`,
-		state.tier,
-		`phase=${state.phase}`,
-		role ?? null,
-		total > 0 ? `${bar(done, total)} ${done}/${total}` : null,
-	]
-		.filter(Boolean)
-		.join(" · ");
+	// 行 1:身份 + 档位 + 相位 + 角色
+	const lines = [
+		[`◆ ${state.missionId}`, state.tier, `phase=${state.phase}`, role ?? null].filter(Boolean).join(" · "),
+	];
 
-	// 第二行:当前任务 + 尝试计数 + 成本 + 时长
-	const second = [
-		task ? `▶ ${task.id} ${truncate(task.title, 32)}` : null,
-		t && ["do", "check", "act"].includes(state.phase) ? `attempt ${t.attempts}/${threshold}` : null,
-		cost > 0 ? `$${cost.toFixed(2)}` : null,
-		plan.createdAt ? fmtDuration(plan.createdAt, now) : null,
-	]
-		.filter(Boolean)
-		.join(" · ");
+	// 行 2:当前任务 + 进度(仅多任务时)+ attempt + 时长/成本(非零才显示)
+	const bits: string[] = [];
+	if (task) bits.push(`▶ ${task.id} ${truncate(task.title, 30)}`);
+	if (total > 1) bits.push(`${bar(done, total)} ${done}/${total}`);
+	if (t && ["do", "check", "act"].includes(state.phase)) bits.push(`attempt ${t.attempts}/${threshold}`);
+	const elapsed = plan.createdAt ? fmtDuration(plan.createdAt, now) : null;
+	if (elapsed && elapsed !== "0min") bits.push(elapsed);
+	if (cost >= 0.005) bits.push(`$${cost.toFixed(2)}`);
+	if (bits.length > 0) lines.push(`  ${bits.join(" · ")}`);
 
-	const lines = [head, second ? `  ${second}` : null].filter((l): l is string => !!l);
-
-	// 第三行(条件):熔断预警 / 换脑挂起 / 环境漂移
+	// 预警行(条件):熔断临界 / 环境漂移 / 换脑挂起
 	if (t && t.sameSignatureCount >= threshold - 1 && t.sameSignatureCount > 0) {
 		lines.push(`  ⚠ 同一失败签名 ×${t.sameSignatureCount},再失败一次将升级`);
 	}

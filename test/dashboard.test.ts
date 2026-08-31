@@ -44,16 +44,38 @@ function runningState(): ReturnType<typeof initialState> {
 	return s;
 }
 
-test("widget:三行包含身份/进度/熔断预警", () => {
+test("widget:身份/进度/成本/熔断预警(多任务才显示进度条)", () => {
 	const lines = renderWidgetLines(plan, runningState());
 	assert.ok(lines[0].includes("auth-refactor"));
 	assert.ok(lines[0].includes("standard"));
 	assert.ok(lines[0].includes("phase=do"));
-	assert.ok(lines[0].includes("1/2")); // T1 done
 	assert.ok(lines[1].includes("T2"));
 	assert.ok(lines[1].includes("attempt 2/3"));
+	assert.ok(lines[1].includes("1/2")); // 多任务:进度条在第二行
 	assert.ok(lines[1].includes("$0.96"));
 	assert.ok(lines.some((l) => l.includes("同一失败签名 ×2")), "熔断临界必须可见");
+});
+
+test("widget:单任务(quick)不显示进度条,零成本/零时长不显示", () => {
+	const s = initialState({ missionId: "quick-x", tier: "quick", taskOrder: ["T1"] });
+	s.phase = "do";
+	s.currentTask = "T1";
+	s.tasks.T1 = { ...s.tasks.T1, status: "running", attempts: 1 };
+	const p: MissionPlan = {
+		missionId: "quick-x",
+		tier: "quick",
+		goal: "x",
+		acceptanceCriteria: [],
+		milestones: [{ id: "M1", title: "m", tasks: [{ id: "T1", title: "本周天气如何呢", verify: [] }] }],
+		verifyScript: "",
+		createdAt: Date.now(),
+	};
+	const lines = renderWidgetLines(p, s);
+	assert.ok(!lines.some((l) => l.includes("░")), "单任务不显示进度条");
+	assert.ok(!lines.some((l) => l.includes("$0")), "零成本不显示");
+	assert.ok(!lines.some((l) => l.includes("0min")), "零时长不显示");
+	assert.ok(lines[1].includes("本周天气如何呢"));
+	assert.ok(lines[1].includes("attempt 1/2"));
 });
 
 test("widget:换脑挂起时有明确提示", () => {
