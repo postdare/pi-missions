@@ -195,7 +195,7 @@ export async function openMissionsPanel(ctx: any, l: RepoLayout, cb: PanelCallba
 							"customMessageBg",
 							border("╭─") +
 								t.bold(t.fg("accent", title)) +
-								border("─".repeat(Math.max(1, inner - 2 - visibleWidth(title) - visibleWidth(hint)))) +
+								border("─".repeat(Math.max(1, inner - 4 - visibleWidth(title) - visibleWidth(hint)))) +
 								t.fg("dim", hint) +
 								border("─╮"),
 						),
@@ -209,7 +209,7 @@ export async function openMissionsPanel(ctx: any, l: RepoLayout, cb: PanelCallba
 							td.id === "quick" ? "/mission quick <任务>" : `/mission new <目标>${td.id === "complex" ? " --tier=complex" : ""}`;
 						const sel = active ? t.fg("accent", t.bold("▶")) : " ";
 						const name = active ? t.fg("accent", t.bold(td.id)) : t.fg("dim", td.id);
-						lines.push(row(`    ${sel} ${name.padEnd(9)}${t.fg("dim", td.desc)}  ${t.fg("dim", cmd)}`));
+						lines.push(row(`    ${sel} ${name.padEnd(11)}    ${t.fg("dim", td.desc)}  ${t.fg("dim", cmd)}`));
 					}
 					lines.push(row(t.fg("dim", "─".repeat(Math.min(56, inner - 8)))));
 

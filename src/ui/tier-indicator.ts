@@ -15,10 +15,15 @@
 import { Editor, truncateToWidth } from "@earendil-works/pi-tui";
 import type { Tier } from "../core/types.ts";
 
-const TIER_COLOR: Record<Tier, string> = {
-	quick: "success",
-	standard: "accent",
-	complex: "warning",
+/**
+ * 档位色。主题的 success/warning 在 minimal 等主题里是接近灰色的暗色,
+ * quick/complex 用了会看着像没变色 —— 所以这两档直接用主题无关的高亮 ANSI;
+ * standard 用主题 accent(各主题里都是最鲜明的那个)。
+ */
+const TIER_ANSI: Record<Tier, string> = {
+	quick: "\x1b[38;5;40m", // 亮绿
+	standard: "", // 走主题 accent
+	complex: "\x1b[38;5;208m", // 亮橙
 };
 
 const TIER_LABEL: Record<Tier, string> = {
@@ -26,6 +31,12 @@ const TIER_LABEL: Record<Tier, string> = {
 	standard: "standard · 任务列表 + 验证闸门",
 	complex: "complex · 里程碑 + 独立验证",
 };
+
+/** 档位着色:standard 用主题 accent,quick/complex 用 ANSI 高亮 */
+function colorize(theme: any, tier: Tier, s: string): string {
+	if (tier === "standard") return theme.fg("accent", s);
+	return `${TIER_ANSI[tier]}${s}\x1b[39m`;
+}
 
 const WIDGET_KEY = "missions-tier";
 
@@ -41,13 +52,11 @@ let activeTier: Tier | null = null;
 export function applyTierIndicator(ctx: any, tier: Tier): void {
 	if (!ctx.hasUI) return;
 	activeTier = tier;
-	const color = TIER_COLOR[tier];
-	const fg = ctx.ui.theme.fg.bind(ctx.ui.theme);
 
 	// 编辑器上方的彩色指示条
 	ctx.ui.setWidget(WIDGET_KEY, (_tui: any, theme: any) => ({
 		render: (width: number) => [
-			theme.fg(color, truncateToWidth(`◆ mission 档位: ${TIER_LABEL[tier]} · 输入目标回车即可`, Math.min(width, 120))),
+			colorize(theme, tier, truncateToWidth(`◆ mission 档位: ${TIER_LABEL[tier]} · 输入目标回车即可`, Math.min(width, 120))),
 		],
 		invalidate: () => {},
 	}));
@@ -55,11 +64,12 @@ export function applyTierIndicator(ctx: any, tier: Tier): void {
 	// 编辑器:边框染档位色 + onSubmit 自动包命令
 	ctx.ui.setEditorComponent((tui: any, editorTheme: any) => {
 		const base = new Editor(tui, editorTheme);
+		const theme = ctx.ui.theme; // 边框着色用主题 accent 或 ANSI 高亮
 		const proxied = new Proxy(base, {
 			set(target: any, prop: string | symbol, value: unknown, receiver: any): boolean {
 				if (prop === "borderColor") {
 					// pi 每次渲染都重新赋值(默认/thinking/bash 色),统一染成档位色
-					value = (s: string) => fg(color, s);
+					value = (s: string) => colorize(theme, tier, s);
 				} else if (prop === "onSubmit") {
 					const original = value as ((text: string) => void) | undefined;
 					value = (text: string) => {

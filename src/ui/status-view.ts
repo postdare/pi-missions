@@ -116,7 +116,7 @@ export async function openStatusView(ctx: any, getData: () => StatusViewData | n
 							"customMessageBg",
 							border("╭─") +
 								t.bold(t.fg("accent", title)) +
-								border("─".repeat(Math.max(1, inner - 2 - visibleWidth(title)))) +
+								border("─".repeat(Math.max(1, inner - 4 - visibleWidth(title)))) +
 								border("╮"),
 						),
 						row(tabBar),
@@ -144,7 +144,7 @@ export async function openStatusView(ctx: any, getData: () => StatusViewData | n
 							"customMessageBg",
 							border("╰─") +
 								t.fg("dim", " Tab/←→ 切页 · ↑↓ 滚动 · r 刷新 · q/Esc 关闭 ") +
-								border("─".repeat(Math.max(1, inner - 2 - visibleWidth(" Tab/←→ 切页 · ↑↓ 滚动 · r 刷新 · q/Esc 关闭 ")))) +
+								border("─".repeat(Math.max(1, inner - 4 - visibleWidth(" Tab/←→ 切页 · ↑↓ 滚动 · r 刷新 · q/Esc 关闭 ")))) +
 								border("╯"),
 						),
 					);
