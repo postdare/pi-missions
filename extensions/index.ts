@@ -41,6 +41,7 @@ import {
 	rpcRequest,
 } from "../src/rpc.ts";
 import { ensureRuntimeAgents } from "../src/runtime-agents.ts";
+import { openMissionControl } from "../src/control-overlay.ts";
 import { MissionStatusCard, type StatusCardData, type StatusCardMission } from "../src/status-card.ts";
 
 const STATUS_KEY = "pi-missions";
@@ -79,6 +80,47 @@ export default function (pi: ExtensionAPI) {
 	});
 
 	// ---------------------------------------------------------------- helpers
+
+	/** Build view-model cards from ledgers (merging live workflow state when running). */
+	function toCards(missions: Mission[]): StatusCardMission[] {
+		return missions.map((m) => {
+			let currentLabel: string | undefined;
+			if (m.status === "running" && m.run?.subagentMissionId) {
+				const live = readLiveProgress(m.run.subagentMissionId, m.milestones.length, featureCount(m));
+				currentLabel = live?.currentLabel || undefined;
+			}
+			const features = m.milestones.flatMap((ms) => ms.features);
+			return {
+				id: m.id,
+				title: m.title,
+				status: m.status,
+				runId: m.run?.runId,
+				startedAt: m.run?.startedAt,
+				endedAt: m.run?.endedAt,
+				error: m.run?.error,
+				currentLabel,
+				featuresDone: features.filter((f) => f.status === "done").length,
+				featuresTotal: features.length,
+				milestonesDone: m.milestones.filter((ms) => ms.status === "done").length,
+				milestonesTotal: m.milestones.length,
+				milestones: m.milestones.map((ms) => ({
+					id: ms.id,
+					title: ms.title,
+					status: ms.status,
+					features: ms.features.map((f) => ({ id: f.id, title: f.title, status: f.status })),
+				})),
+			};
+		});
+	}
+
+	/** Light refresh for overlay ticks: reload ledgers from disk + merge live state (no RPC). */
+	function lightRefresh(ctx: ExtensionContext, id?: string): Mission[] {
+		const missions = id ? [loadMission(ctx.cwd, id)].filter((m): m is Mission => !!m) : listMissions(ctx.cwd);
+		for (const m of missions) {
+			if (reconcileProgressFromState(m)) saveMission(ctx.cwd, m);
+		}
+		return missions;
+	}
 
 	/** Copy per-feature/milestone results from the workflow's durable state into the ledger. */
 	function reconcileProgressFromState(mission: Mission): boolean {
@@ -395,7 +437,7 @@ export default function (pi: ExtensionAPI) {
 	});
 
 	pi.registerCommand("mission-status", {
-		description: "Show mission progress: /mission-status [id]",
+		description: "Show mission progress (live Mission Control overlay in TUI): /mission-status [id]",
 		handler: async (args, ctx) => {
 			const id = args.trim() || undefined;
 			const missions = id ? [loadMission(ctx.cwd, id)].filter((m): m is Mission => !!m) : listMissions(ctx.cwd);
@@ -407,35 +449,19 @@ export default function (pi: ExtensionAPI) {
 				if (m.status === "running") await reconcile(m, ctx.cwd);
 				if (reconcileProgressFromState(m)) saveMission(ctx.cwd, m);
 			}
-			const cards: StatusCardMission[] = [];
+
+			if (ctx.mode === "tui") {
+				// Live Mission Control overlay (pi-open-tui style modal).
+				await openMissionControl(ctx, () => ({ missions: toCards(lightRefresh(ctx, id)) }));
+				return;
+			}
+			if (ctx.hasUI) {
+				pi.appendEntry("pi-missions-status", { missions: toCards(missions) });
+				return;
+			}
+			// print/json mode: plain text on stdout
 			const plain: string[] = [];
 			for (const m of missions) {
-				let currentLabel: string | undefined;
-				if (m.status === "running" && m.run?.subagentMissionId) {
-					const live = readLiveProgress(m.run.subagentMissionId, m.milestones.length, featureCount(m));
-					currentLabel = live?.currentLabel || undefined;
-				}
-				const features = m.milestones.flatMap((ms) => ms.features);
-				cards.push({
-					id: m.id,
-					title: m.title,
-					status: m.status,
-					runId: m.run?.runId,
-					startedAt: m.run?.startedAt,
-					endedAt: m.run?.endedAt,
-					error: m.run?.error,
-					currentLabel,
-					featuresDone: features.filter((f) => f.status === "done").length,
-					featuresTotal: features.length,
-					milestonesDone: m.milestones.filter((ms) => ms.status === "done").length,
-					milestonesTotal: m.milestones.length,
-					milestones: m.milestones.map((ms) => ({
-						id: ms.id,
-						title: ms.title,
-						status: ms.status,
-						features: ms.features.map((f) => ({ id: f.id, title: f.title, status: f.status })),
-					})),
-				});
 				plain.push(
 					`### ${formatMissionLine(m)}`,
 					...m.milestones.flatMap((ms) => [
@@ -445,11 +471,7 @@ export default function (pi: ExtensionAPI) {
 					"",
 				);
 			}
-			if (ctx.hasUI) {
-				pi.appendEntry("pi-missions-status", { missions: cards });
-			} else {
-				process.stdout.write(plain.join("\n") + "\n");
-			}
+			process.stdout.write(plain.join("\n") + "\n");
 		},
 	});
 

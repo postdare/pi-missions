@@ -66,7 +66,42 @@ function duration(startedAt?: string, endedAt?: string): string | undefined {
 
 interface Theme {
 	fg(color: string, text: string): string;
+	bg(color: string, text: string): string;
 	bold(text: string): string;
+}
+
+/**
+ * Content lines for one mission (meta, progress bars, current activity,
+ * milestone tree) without any border — shared by the transcript card and the
+ * Mission Control overlay.
+ */
+export function missionContentLines(m: StatusCardMission, t: Theme): string[] {
+	const out: string[] = [];
+	const meta: string[] = [t.fg("dim", m.id ?? "?")];
+	if (m.runId) meta.push(t.fg("dim", `run ${m.runId.slice(0, 8)}`));
+	const dur = duration(m.startedAt, m.endedAt);
+	if (dur) meta.push(t.fg("dim", dur));
+	out.push(meta.join(t.fg("dim", " · ")));
+
+	out.push(
+		`${t.fg("accent", bar(m.featuresDone ?? 0, m.featuresTotal ?? 0))} ${t.bold(`${m.featuresDone ?? 0}/${m.featuresTotal ?? 0}`)} features` +
+			t.fg("dim", "   ") +
+			`${t.fg("accent", bar(m.milestonesDone ?? 0, m.milestonesTotal ?? 0, 6))} ${t.bold(`${m.milestonesDone ?? 0}/${m.milestonesTotal ?? 0}`)} milestones`,
+	);
+
+	if (m.currentLabel) out.push(t.fg("accent", "▸ ") + t.fg("text", m.currentLabel));
+	if (m.error) out.push(t.fg("error", `error: ${m.error}`));
+
+	for (const ms of m.milestones ?? []) {
+		if (!ms || typeof ms !== "object") continue;
+		const msStyle = styleOf(ms.status ?? "pending");
+		out.push(t.fg(msStyle.color, msStyle.icon) + " " + t.bold(ms.id ?? "?") + t.fg("dim", ` ${ms.title ?? ""}`));
+		for (const f of Array.isArray(ms.features) ? ms.features : []) {
+			const fStyle = styleOf(f.status);
+			out.push(t.fg("dim", "  ") + t.fg(fStyle.color, fStyle.icon) + " " + t.fg("text", f.id) + t.fg("dim", ` ${f.title}`));
+		}
+	}
+	return out;
 }
 
 /**
@@ -127,33 +162,10 @@ export class MissionStatusCard {
 					t.fg("borderMuted", "─╮"),
 			);
 
-			const meta: string[] = [t.fg("dim", m.id ?? "?")];
-			if (m.runId) meta.push(t.fg("dim", `run ${m.runId.slice(0, 8)}`));
-			const dur = duration(m.startedAt, m.endedAt);
-			if (dur) meta.push(t.fg("dim", dur));
-			out.push(row(meta.join(t.fg("dim", " · "))));
-
-			out.push(
-				row(
-					`${t.fg("accent", bar(m.featuresDone ?? 0, m.featuresTotal ?? 0))} ${t.bold(`${m.featuresDone ?? 0}/${m.featuresTotal ?? 0}`)} features` +
-						t.fg("dim", "   ") +
-						`${t.fg("accent", bar(m.milestonesDone ?? 0, m.milestonesTotal ?? 0, 6))} ${t.bold(`${m.milestonesDone ?? 0}/${m.milestonesTotal ?? 0}`)} milestones`,
-				),
-			);
-
-			if (m.currentLabel) out.push(row(t.fg("accent", "▸ ") + t.fg("text", m.currentLabel)));
-			if (m.error) out.push(row(t.fg("error", `error: ${m.error}`)));
-
+			const content = missionContentLines(m, t);
+			for (const line of content.slice(0, 2)) out.push(row(line));
 			out.push(hr("├─", "─┤"));
-			for (const ms of m.milestones) {
-				if (!ms || typeof ms !== "object") continue;
-				const msStyle = styleOf(ms.status ?? "pending");
-				out.push(row(t.fg(msStyle.color, msStyle.icon) + " " + t.bold(ms.id ?? "?") + t.fg("dim", ` ${ms.title ?? ""}`)));
-				for (const f of Array.isArray(ms.features) ? ms.features : []) {
-					const fStyle = styleOf(f.status);
-					out.push(row(t.fg("dim", "  ") + t.fg(fStyle.color, fStyle.icon) + " " + t.fg("text", f.id) + t.fg("dim", ` ${f.title}`)));
-				}
-			}
+			for (const line of content.slice(2)) out.push(row(line));
 			out.push(hr("╰─", "─╯"));
 		}
 		return out;
