@@ -6,7 +6,7 @@
  * 非 TUI 环境退化为 entry 卡片(renderStatusDashboard)。
  */
 
-import { Key, matchesKey, visibleWidth } from "@earendil-works/pi-tui";
+import { Key, matchesKey, truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
 import type { MissionState } from "../core/types.ts";
 import type { MissionPlan } from "../store/mission.ts";
 import {
@@ -116,8 +116,9 @@ export async function openStatusView(ctx: any, getData: () => StatusViewData | n
 							"customMessageBg",
 							border("╭─") +
 								t.bold(t.fg("accent", title)) +
-								// 左右不对称:左边 ╭─(2 列),右边只有 ╮(1 列) → n = inner - 3 - title
-								border("─".repeat(Math.max(1, inner - 3 - visibleWidth(title)))) +
+								// 左右不对称:左边 ╭─(2 列),右边只有 ╮(1 列) → n = inner - 3 - titleW
+								// title 先截断:窄屏时 title 可能比 inner 还宽,不截断会超宽炸 TUI
+								border("─".repeat(Math.max(1, inner - 3 - visibleWidth(truncateToWidth(title, inner - 6))))) +
 								border("╮"),
 						),
 						row(tabBar),
@@ -145,8 +146,8 @@ export async function openStatusView(ctx: any, getData: () => StatusViewData | n
 							"customMessageBg",
 							border("╰─") +
 								t.fg("dim", " Tab/←→ 切页 · ↑↓ 滚动 · r 刷新 · q/Esc 关闭 ") +
-								// 同 header:左边 ╰─(2),右边 ╯(1) → n = inner - 3 - hint
-								border("─".repeat(Math.max(1, inner - 3 - visibleWidth(" Tab/←→ 切页 · ↑↓ 滚动 · r 刷新 · q/Esc 关闭 ")))) +
+								// 同 header:左边 ╰─(2),右边 ╯(1) → n = inner - 3 - hintW;hint 先截断防窄屏超宽
+								border("─".repeat(Math.max(1, inner - 3 - visibleWidth(truncateToWidth(" Tab/←→ 切页 · ↑↓ 滚动 · r 刷新 · q/Esc 关闭 ", inner - 6))))) +
 								border("╯"),
 						),
 					);
