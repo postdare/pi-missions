@@ -7,6 +7,7 @@
  * 与 runtime 解耦,纯函数,可单测。
  */
 
+import { truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
 import type { MissionState } from "../core/types.ts";
 import { ROLE_OF } from "../core/machine.ts";
 import { thresholdFor } from "../core/breaker.ts";
@@ -41,9 +42,44 @@ export function truncate(s: string, n: number): string {
 	return s.length > n ? `${s.slice(0, n - 1)}…` : s;
 }
 
-// ─────────────────────────── 常驻状态条(多行) ───────────────────────────
+// ─────────────────────────── 常驻状态条(主题化卡片) ───────────────────────────
 
-export function renderWidgetLines(plan: MissionPlan, state: MissionState, now = Date.now()): string[] {
+export interface WidgetTheme {
+	fg(color: string, s: string): string;
+	bold(s: string): string;
+}
+
+const PHASE_COLOR: Record<string, string> = {
+	plan: "accent",
+	do: "accent",
+	check: "accent",
+	act: "warning",
+	done: "success",
+	halted: "error",
+};
+
+/** 彩色进度条:已完成为 accent,未完成为 dim */
+function coloredBar(theme: WidgetTheme, done: number, total: number, width = 8): string {
+	if (total <= 0) return theme.fg("dim", "░".repeat(width));
+	const filled = Math.round((done / total) * width);
+	return (
+		theme.fg("accent", "█".repeat(filled)) + theme.fg("dim", "░".repeat(Math.max(0, width - filled)))
+	);
+}
+
+/**
+ * 主题化状态卡片(输入框上方)。结构:
+ *   行1: ◆ id(accent 粗体) · 档位(dim) · 相位(带色) · 角色(dim) …… 时长+成本(右对齐)
+ *   行2: ▶ 任务标题 · 进度条(多任务) · attempt(临界变警告色)
+ *   行3+: 预警(熔断/环境漂移/换脑,警告色)
+ */
+export function renderWidgetCard(
+	theme: WidgetTheme,
+	plan: MissionPlan,
+	state: MissionState,
+	now = Date.now(),
+	width = 120,
+): string[] {
 	const task = state.currentTask ? findTask(plan, state.currentTask) : undefined;
 	const t = state.currentTask ? state.tasks[state.currentTask] : undefined;
 	const role = ROLE_OF[state.phase];
@@ -51,31 +87,51 @@ export function renderWidgetLines(plan: MissionPlan, state: MissionState, now = 
 	const done = Object.values(state.tasks).filter((x) => x.status === "done").length;
 	const total = state.taskOrder.length;
 	const cost = costTotal(state);
+	const sep = theme.fg("dim", " · ");
 
-	// 行 1:身份 + 档位 + 相位 + 角色
-	const lines = [
-		[`◆ ${state.missionId}`, state.tier, `phase=${state.phase}`, role ?? null].filter(Boolean).join(" · "),
-	];
+	// 行 1:左半 + 右对齐(时长/成本)
+	const left = [
+		theme.fg("accent", theme.bold(`◆ ${state.missionId}`)),
+		theme.fg("dim", state.tier),
+		theme.fg(PHASE_COLOR[state.phase] ?? "dim", `phase=${state.phase}`),
+		role ? theme.fg("dim", role) : null,
+	]
+		.filter(Boolean)
+		.join(sep);
 
-	// 行 2:当前任务 + 进度(仅多任务时)+ attempt + 时长/成本(非零才显示)
-	const bits: string[] = [];
-	if (task) bits.push(`▶ ${task.id} ${truncate(task.title, 30)}`);
-	if (total > 1) bits.push(`${bar(done, total)} ${done}/${total}`);
-	if (t && ["do", "check", "act"].includes(state.phase)) bits.push(`attempt ${t.attempts}/${threshold}`);
+	const rightBits: string[] = [];
 	const elapsed = plan.createdAt ? fmtDuration(plan.createdAt, now) : null;
-	if (elapsed && elapsed !== "0min") bits.push(elapsed);
-	if (cost >= 0.005) bits.push(`$${cost.toFixed(2)}`);
-	if (bits.length > 0) lines.push(`  ${bits.join(" · ")}`);
+	if (elapsed && elapsed !== "0min") rightBits.push(theme.fg("dim", elapsed));
+	if (cost >= 0.005) rightBits.push(theme.fg("accent", `$${cost.toFixed(2)}`));
+	const right = rightBits.join(" ");
 
-	// 预警行(条件):熔断临界 / 环境漂移 / 换脑挂起
+	const leftW = visibleWidth(left);
+	const rightW = visibleWidth(right);
+	const line1 =
+		rightW > 0 && leftW + rightW < width
+			? left + " ".repeat(width - leftW - rightW) + right
+			: left;
+	const lines = [truncateToWidth(line1, width)];
+
+	// 行 2:当前任务 + 进度 + attempt
+	const bits: string[] = [];
+	if (task) bits.push(`${theme.fg("accent", "▶")} ${task.id} ${truncate(task.title, 28)}`);
+	if (total > 1) bits.push(`${coloredBar(theme, done, total)} ${theme.fg("dim", `${done}/${total}`)}`);
+	if (t && ["do", "check", "act"].includes(state.phase)) {
+		const near = t.sameSignatureCount >= threshold - 1 && t.sameSignatureCount > 0;
+		bits.push(theme.fg(near ? "warning" : "dim", `attempt ${t.attempts}/${threshold}`));
+	}
+	if (bits.length > 0) lines.push(truncateToWidth(`  ${bits.join(" ")}`, width));
+
+	// 预警行(警告色)
 	if (t && t.sameSignatureCount >= threshold - 1 && t.sameSignatureCount > 0) {
-		lines.push(`  ⚠ 同一失败签名 ×${t.sameSignatureCount},再失败一次将升级`);
+		lines.push(theme.fg("warning", `  ⚠ 同一失败签名 ×${t.sameSignatureCount},再失败一次将升级`));
 	}
 	if (t && t.inconclusiveStreak > 0) {
-		lines.push(`  ⚠ 连续 ${t.inconclusiveStreak} 次无法判定(环境可能漂移)`);
+		lines.push(theme.fg("warning", `  ⚠ 连续 ${t.inconclusiveStreak} 次无法判定(环境可能漂移)`));
 	}
 	if (state.pendingHandoff) {
-		lines.push(`  ⏸ 等待换脑:${truncate(state.pendingHandoff, 40)} —— 执行 /mission next`);
+		lines.push(theme.fg("warning", `  ⏸ 等待换脑:${truncate(state.pendingHandoff, 40)} —— 执行 /mission next`));
 	}
 	return lines;
 }

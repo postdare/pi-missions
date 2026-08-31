@@ -42,7 +42,7 @@ import { loadStateFile, readCurrentPointer, saveStateFile, writeCurrentPointer }
 import { appendLog } from "./store/log.ts";
 import { computeEnvFingerprint, ensureInfoExclude, isGitRepo } from "./store/git.ts";
 import { saveEvidence } from "./store/evidence.ts";
-import { renderWidgetLines } from "./ui/dashboard.ts";
+import { renderWidgetCard } from "./ui/dashboard.ts";
 import {
 	applyRole,
 	loadModelsConfig,
@@ -724,11 +724,9 @@ export class Runtime {
 			ctx.ui.setWidget("missions", undefined);
 			return;
 		}
-		// 工厂形式 + truncateToWidth:widget 行超宽会直接炸掉 TUI,必须逐行截断;
-		// 且 widget 拿到的 width 可能超过终端宽度,再按 120 封顶双保险。
+		// 主题化状态卡片(颜色/对齐/右对齐时长成本);widget width 不可信,再按 120 封顶
 		ctx.ui.setWidget("missions", (_tui: any, theme: any) => ({
-			render: (width: number) =>
-				renderWidgetLines(a.plan, a.state).map((l) => truncateToWidth(l, Math.min(width, 120))),
+			render: (width: number) => renderWidgetCard(theme, a.plan, a.state, Date.now(), Math.min(width, 120)),
 			invalidate: () => {},
 		}));
 	}
