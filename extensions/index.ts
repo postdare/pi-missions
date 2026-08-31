@@ -15,7 +15,6 @@
  */
 import * as fs from "node:fs";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
-import { Box, Text } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
 import {
 	type Mission,
@@ -42,6 +41,7 @@ import {
 	rpcRequest,
 } from "../src/rpc.ts";
 import { ensureRuntimeAgents } from "../src/runtime-agents.ts";
+import { MissionStatusCard, type StatusCardData, type StatusCardMission } from "../src/status-card.ts";
 
 const STATUS_KEY = "pi-missions";
 const POLL_INTERVAL_MS = 15_000;
@@ -74,13 +74,8 @@ export default function (pi: ExtensionAPI) {
 	// Status reports render as durable transcript cards (appendEntry), not as
 	// LLM-bound messages — sendMessage(deliverAs:"nextTurn") would stay invisible
 	// until the next prompt, which made /mission-status look like a no-op.
-	pi.registerEntryRenderer<{ text: string }>("pi-missions-status", (entry, _options, theme) => {
-		const box = new Box(1, 1, (text) => theme.bg("customMessageBg", text));
-		const text = entry.data?.text ?? "(empty)";
-		for (const line of text.split("\n")) {
-			box.addChild(new Text(line, 0, 0));
-		}
-		return box;
+	pi.registerEntryRenderer<StatusCardData>("pi-missions-status", (entry, _options, theme) => {
+		return new MissionStatusCard(entry.data ?? { missions: [] }, theme);
 	});
 
 	// ---------------------------------------------------------------- helpers
@@ -242,10 +237,14 @@ export default function (pi: ExtensionAPI) {
 				60_000,
 			);
 		} catch (err) {
+			const message = err instanceof Error ? err.message : String(err);
 			mission.status = "failed";
-			mission.run = { ...mission.run, endedAt: new Date().toISOString(), error: err instanceof Error ? err.message : String(err) };
+			mission.run = { ...mission.run, endedAt: new Date().toISOString(), error: message };
 			saveMission(ctx.cwd, mission);
-			ctx.ui.notify(`Failed to launch mission runner: ${mission.run.error}`, "error");
+			ctx.ui.notify(
+				`Failed to launch mission runner: ${message}${/Unknown agent: mission-/.test(message) ? " — role agents missing; install the package (pi install) or reload the session." : ""}`,
+				"error",
+			);
 			return;
 		}
 
@@ -408,25 +407,48 @@ export default function (pi: ExtensionAPI) {
 				if (m.status === "running") await reconcile(m, ctx.cwd);
 				if (reconcileProgressFromState(m)) saveMission(ctx.cwd, m);
 			}
-			const lines: string[] = [];
+			const cards: StatusCardMission[] = [];
+			const plain: string[] = [];
 			for (const m of missions) {
-				lines.push(`### ${formatMissionLine(m)}`, "");
-				if (m.run?.runId) lines.push(`run: ${m.run.runId}${m.run.startedAt ? ` · started ${m.run.startedAt}` : ""}`);
+				let currentLabel: string | undefined;
 				if (m.status === "running" && m.run?.subagentMissionId) {
 					const live = readLiveProgress(m.run.subagentMissionId, m.milestones.length, featureCount(m));
-					if (live?.currentLabel) lines.push(`current: ${live.currentLabel}`);
+					currentLabel = live?.currentLabel || undefined;
 				}
-				for (const ms of m.milestones) {
-					lines.push(`- [${ms.status}] ${ms.id}: ${ms.title}`);
-					for (const f of ms.features) lines.push(`  - [${f.status}] ${f.id}: ${f.title}`);
-				}
-				if (m.run?.error) lines.push(`error: ${m.run.error}`);
-				lines.push("");
+				const features = m.milestones.flatMap((ms) => ms.features);
+				cards.push({
+					id: m.id,
+					title: m.title,
+					status: m.status,
+					runId: m.run?.runId,
+					startedAt: m.run?.startedAt,
+					endedAt: m.run?.endedAt,
+					error: m.run?.error,
+					currentLabel,
+					featuresDone: features.filter((f) => f.status === "done").length,
+					featuresTotal: features.length,
+					milestonesDone: m.milestones.filter((ms) => ms.status === "done").length,
+					milestonesTotal: m.milestones.length,
+					milestones: m.milestones.map((ms) => ({
+						id: ms.id,
+						title: ms.title,
+						status: ms.status,
+						features: ms.features.map((f) => ({ id: f.id, title: f.title, status: f.status })),
+					})),
+				});
+				plain.push(
+					`### ${formatMissionLine(m)}`,
+					...m.milestones.flatMap((ms) => [
+						`- [${ms.status}] ${ms.id}: ${ms.title}`,
+						...ms.features.map((f) => `  - [${f.status}] ${f.id}: ${f.title}`),
+					]),
+					"",
+				);
 			}
 			if (ctx.hasUI) {
-				pi.appendEntry("pi-missions-status", { text: lines.join("\n") });
+				pi.appendEntry("pi-missions-status", { missions: cards });
 			} else {
-				process.stdout.write(lines.join("\n") + "\n");
+				process.stdout.write(plain.join("\n") + "\n");
 			}
 		},
 	});
@@ -477,7 +499,9 @@ export default function (pi: ExtensionAPI) {
 	// ---------------------------------------------------------------- events
 
 	pi.on("session_start", (_event, ctx) => {
-		ensureRuntimeAgents(pi);
+		// Gated internally: registers only when this package is NOT installed
+		// (ad-hoc `pi -e` loading), avoiding runtime/configured agent collisions.
+		ensureRuntimeAgents(pi, ctx.cwd);
 		startPolling(ctx);
 		try {
 			const running = listMissions(ctx.cwd).filter((m) => m.status === "running");
