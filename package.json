@@ -1,23 +1,37 @@
 {
-  "name": "pi-missions",
-  "version": "0.1.0",
-  "description": "Factory-style Missions for pi: validation-contract-driven, milestone-gated multi-agent orchestration built on pi-subagents.",
-  "keywords": ["pi-package", "pi-missions", "orchestration", "multi-agent"],
-  "license": "MIT",
-  "type": "module",
-  "pi": {
-    "extensions": ["./extensions/index.ts"],
-    "skills": ["./skills"]
-  },
-  "pi-subagents": {
-    "agents": ["./agents"]
-  },
-  "peerDependencies": {
-    "@earendil-works/pi-coding-agent": "*",
-    "@earendil-works/pi-tui": "*",
-    "typebox": "*"
-  },
-  "engines": {
-    "node": ">=20"
-  }
+	"name": "pi-missions",
+	"version": "0.2.0",
+	"description": "双层循环工作流引擎 —— 外层 PDCA 管任务分解与进度,内层操控循环管执行质量与自我修正。L0 纯代码裁判,状态进仓库。",
+	"keywords": [
+		"pi-package",
+		"pi-missions",
+		"workflow",
+		"pdca",
+		"circuit-breaker"
+	],
+	"license": "MIT",
+	"type": "module",
+	"scripts": {
+		"test": "node --test \"src/core/__tests__/*.test.ts\" \"test/*.test.ts\""
+	},
+	"pi": {
+		"extensions": [
+			"./src/index.ts"
+		]
+	},
+	"peerDependencies": {
+		"@earendil-works/pi-coding-agent": "*",
+		"@earendil-works/pi-tui": "*",
+		"typebox": "*"
+	},
+	"engines": {
+		"node": ">=22.6"
+	},
+	"devDependencies": {
+		"@earendil-works/pi-coding-agent": "^0.84.4",
+		"@earendil-works/pi-tui": "^0.84.4",
+		"@types/node": "^26.4.0",
+		"typebox": "^1.3.23",
+		"typescript": "^7.0.2"
+	}
 }
