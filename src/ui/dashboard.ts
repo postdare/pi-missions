@@ -148,6 +148,7 @@ export function overviewLines(plan: MissionPlan, state: MissionState, now = Date
 		`进度: ${bar(done, total)} ${done}/${total} 任务` +
 			(plan.createdAt ? ` · 已运行 ${fmtDuration(plan.createdAt, now)}` : ""),
 		`环境指纹: ${state.envFingerprint ?? "未冻结(PLAN 完成后记录)"}`,
+		"",
 	];
 
 	const esc = state.escalation;
@@ -163,6 +164,7 @@ export function overviewLines(plan: MissionPlan, state: MissionState, now = Date
 		costEntries.length > 0
 			? `成本: ${costEntries.map(([r, v]) => `${r}=$${(v ?? 0).toFixed(3)}`).join("  ")} · 合计 $${costTotal(state).toFixed(3)}`
 			: "成本: 尚无记录",
+		"",
 	);
 
 	if (state.currentTask) {
@@ -172,6 +174,7 @@ export function overviewLines(plan: MissionPlan, state: MissionState, now = Date
 			`当前: ${state.currentTask} ${pt?.title ?? ""} · attempt ${t?.attempts ?? 0}/${thresholdFor(state.tier)}`,
 		);
 		if (t?.lastFailureReason) lines.push(`  上次失败: ${t.lastFailureReason}`);
+		lines.push("");
 	}
 	if (state.pendingHandoff) lines.push(`⏸ 等待换脑: ${state.pendingHandoff} —— /mission next`);
 
@@ -186,7 +189,8 @@ export function overviewLines(plan: MissionPlan, state: MissionState, now = Date
 
 export function taskLines(plan: MissionPlan, state: MissionState): string[] {
 	const lines: string[] = [];
-	for (const ms of plan.milestones) {
+	for (const [mi, ms] of plan.milestones.entries()) {
+		if (mi > 0) lines.push("");
 		if (plan.tier === "complex" || plan.milestones.length > 1) {
 			const msDone = ms.tasks.every((t) => state.tasks[t.id]?.status === "done");
 			lines.push(`${msDone ? "✓" : "▸"} ${ms.id} ${ms.title}`);
@@ -216,7 +220,8 @@ export function acLines(plan: MissionPlan, evidence: EvidenceSummary, dirName: s
 		return ["(quick 档或无 AC:验证命令随提交提供)"];
 	}
 	lines.push(`冻结验收标准 · 执行入口 ./${dirName}/scripts/verify.sh <分支>`, "");
-	for (const ac of plan.acceptanceCriteria) {
+	for (const [i, ac] of plan.acceptanceCriteria.entries()) {
+		if (i > 0) lines.push("");
 		const ev = evidence.latest[ac.verify];
 		const icon = ev ? (EV_ICON[ev.result] ?? "?") : "·";
 		const where = ev?.taskId ? `${ev.taskId}-a${ev.attempt}` : null;
