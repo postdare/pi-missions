@@ -86,6 +86,25 @@ export class MissionStatusCard {
 
 	render(width: number): string[] {
 		const t = this.theme;
+		try {
+			return this.renderSafe(width);
+		} catch (err) {
+			// A renderer must never take the whole TUI down.
+			return [t.fg("error", `[pi-missions] status card render error: ${err instanceof Error ? err.message : String(err)}`)];
+		}
+	}
+
+	private renderSafe(width: number): string[] {
+		const t = this.theme;
+		const data = this.data ?? { missions: [] };
+		// Backward compatibility: pre-0.2 entries stored { text: string }.
+		const legacyText = (data as { text?: unknown }).text;
+		if (!Array.isArray(data.missions)) {
+			if (typeof legacyText === "string") return legacyText.split("\n");
+			return [t.fg("dim", "[pi-missions] no status data")];
+		}
+		const missions = data.missions.filter((m) => m && Array.isArray(m.milestones));
+		if (missions.length === 0) return [t.fg("dim", "[pi-missions] no missions")];
 		const inner = Math.max(30, Math.min(width - 2, 84));
 		const out: string[] = [];
 		const hr = (left: string, right: string) =>
@@ -95,7 +114,7 @@ export class MissionStatusCard {
 			return t.fg("borderMuted", "│ ") + content + " ".repeat(pad) + t.fg("borderMuted", " │");
 		};
 
-		for (const [index, m] of this.data.missions.entries()) {
+		for (const [index, m] of missions.entries()) {
 			if (index > 0) out.push("");
 			const st = styleOf(m.status);
 			const title = ` ${st.icon} ${m.title} `;
@@ -108,17 +127,17 @@ export class MissionStatusCard {
 					t.fg("borderMuted", "─╮"),
 			);
 
-			const meta: string[] = [t.fg("dim", m.id)];
+			const meta: string[] = [t.fg("dim", m.id ?? "?")];
 			if (m.runId) meta.push(t.fg("dim", `run ${m.runId.slice(0, 8)}`));
-			const dur = duration(m.startedAt, m.endedAt ?? (m.status === "running" ? undefined : m.endedAt));
+			const dur = duration(m.startedAt, m.endedAt);
 			if (dur) meta.push(t.fg("dim", dur));
 			out.push(row(meta.join(t.fg("dim", " · "))));
 
 			out.push(
 				row(
-					`${t.fg("accent", bar(m.featuresDone, m.featuresTotal))} ${t.bold(`${m.featuresDone}/${m.featuresTotal}`)} features` +
+					`${t.fg("accent", bar(m.featuresDone ?? 0, m.featuresTotal ?? 0))} ${t.bold(`${m.featuresDone ?? 0}/${m.featuresTotal ?? 0}`)} features` +
 						t.fg("dim", "   ") +
-						`${t.fg("accent", bar(m.milestonesDone, m.milestonesTotal, 6))} ${t.bold(`${m.milestonesDone}/${m.milestonesTotal}`)} milestones`,
+						`${t.fg("accent", bar(m.milestonesDone ?? 0, m.milestonesTotal ?? 0, 6))} ${t.bold(`${m.milestonesDone ?? 0}/${m.milestonesTotal ?? 0}`)} milestones`,
 				),
 			);
 
@@ -127,9 +146,10 @@ export class MissionStatusCard {
 
 			out.push(hr("├─", "─┤"));
 			for (const ms of m.milestones) {
-				const msStyle = styleOf(ms.status);
-				out.push(row(t.fg(msStyle.color, msStyle.icon) + " " + t.bold(ms.id) + t.fg("dim", ` ${ms.title}`)));
-				for (const f of ms.features) {
+				if (!ms || typeof ms !== "object") continue;
+				const msStyle = styleOf(ms.status ?? "pending");
+				out.push(row(t.fg(msStyle.color, msStyle.icon) + " " + t.bold(ms.id ?? "?") + t.fg("dim", ` ${ms.title ?? ""}`)));
+				for (const f of Array.isArray(ms.features) ? ms.features : []) {
 					const fStyle = styleOf(f.status);
 					out.push(row(t.fg("dim", "  ") + t.fg(fStyle.color, fStyle.icon) + " " + t.fg("text", f.id) + t.fg("dim", ` ${f.title}`)));
 				}
