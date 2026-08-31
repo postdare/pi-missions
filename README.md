@@ -105,8 +105,9 @@ LLM 可调用的工具只有三个:`mission_write_plan`(PLAN)、`mission_submit`
 
 `agent_settled` 判定需要换脑 → 自动 followUp 触发 `/mission next` → 命令里
 `ctx.newSession()` 创建干净会话(升级时只携带 MISSION.md + LOG.md 失败记录 +
-最后一次失败证据,不带污染对话)。自触发失败时闸门硬阻断写操作,手动
-`/mission next` 是兜底出口。
+最后一次失败证据,不带污染对话)。pi 会在 newSession 后重建扩展实例,因此握手
+走磁盘:新会话的 session_start 从 CURRENT 指针 + STATE.json 重附着并发出
+HANDOFF_DONE。链路被打断时 pendingHandoff 硬阻断仍在,手动 `/mission next` 兜底。
 
 ## 配置
 
@@ -168,6 +169,6 @@ npm test    # core 层 49 个单测(node --test,无需构建)
 - 相位切换用 `setActiveTools` 改写工具集,plan/act/check 相位会隐藏其它扩展的工具。
 - 并行工具执行下 `tool_call` 不保证看到同批次兄弟工具结果;闸门只依赖 STATE。
 - 失败签名归一化粒度(`core/breaker.ts` 的 `normalize()`)是最需要按实际数据调的参数。
-- 换脑自触发链路(事件→followUp→命令→newSession)若被打断,靠 pendingHandoff
-  硬阻断 + 手动 `/mission next` 兜底。
+- 内存态不可信:pi 在 newSession/reload/重启时重建扩展实例。所有关键路径
+  (session_start、驱动类命令)都会从 CURRENT 指针 + STATE.json 重附着(I1)。
 - 子进程 Verifier 每次 CHECK 冷启动一个 pi 进程;quick 档不用它。

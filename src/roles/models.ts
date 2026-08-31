@@ -34,13 +34,26 @@ export function loadModelsConfig(file: string): ModelsConfig {
 }
 
 export interface SavedProfile {
-	model: unknown | undefined;
+	/** 进程内直接持有 Model 对象;跨会话接力时从 provider/modelId 重新解析 */
+	model?: unknown;
+	provider?: string;
+	modelId?: string;
 	thinking: string;
 }
 
-/** mission 开始前记录用户现场,RESTORE 时还原 */
+/** mission 开始时记录用户现场,RESTORE 时还原 */
 export function saveProfile(pi: any, ctx: any): SavedProfile {
-	return { model: ctx.model, thinking: pi.getThinkingLevel() };
+	const m = ctx.model as { provider?: string; id?: string } | undefined;
+	return { model: m, provider: m?.provider, modelId: m?.id, thinking: pi.getThinkingLevel() };
+}
+
+/** 可持久化形态(进 STATE 同级的 profile.json,Model 对象不可序列化) */
+export function profileToJson(p: SavedProfile): { provider?: string; modelId?: string; thinking: string } {
+	return { provider: p.provider, modelId: p.modelId, thinking: p.thinking };
+}
+
+export function profileFromJson(j: { provider?: string; modelId?: string; thinking?: string }): SavedProfile {
+	return { provider: j.provider, modelId: j.modelId, thinking: j.thinking ?? "medium" };
 }
 
 /**
@@ -68,8 +81,14 @@ export async function applyRole(
 	}
 }
 
-export async function restoreProfile(pi: any, saved: SavedProfile | null): Promise<void> {
+export async function restoreProfile(pi: any, ctx: any, saved: SavedProfile | null): Promise<void> {
 	if (!saved) return;
 	pi.setThinkingLevel(saved.thinking as never);
-	if (saved.model) await pi.setModel(saved.model);
+	if (saved.model) {
+		await pi.setModel(saved.model);
+	} else if (saved.provider && saved.modelId) {
+		// 跨会话接力:Model 对象已随旧会话销毁,按 provider/id 重新解析
+		const m = ctx.modelRegistry.find(saved.provider, saved.modelId);
+		if (m) await pi.setModel(m);
+	}
 }

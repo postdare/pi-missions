@@ -39,6 +39,10 @@ export function registerCommands(pi: any, getRuntime: GetRuntime): void {
 				return notifyUsage(ctx, `mission 循环需要交互会话(TUI 或 RPC),当前是 ${ctx.mode} 模式`);
 			}
 
+			// pi 重建扩展实例后内存态丢失(newSession/reload/重启)——先从磁盘接上再干活(I1)
+			const ATTACH_FIRST = new Set(["status", "next", "verify", "escalate", "plan", "log", "abort", "models"]);
+			if (ATTACH_FIRST.has(sub)) await rt.ensureAttached(ctx);
+
 			switch (sub) {
 				case "new": {
 					const tier = flags.tier ?? "standard";

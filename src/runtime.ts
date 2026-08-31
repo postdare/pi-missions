@@ -42,7 +42,16 @@ import { appendLog } from "./store/log.ts";
 import { computeEnvFingerprint, ensureInfoExclude, isGitRepo } from "./store/git.ts";
 import { saveEvidence } from "./store/evidence.ts";
 import { renderWidgetLines } from "./ui/dashboard.ts";
-import { applyRole, loadModelsConfig, restoreProfile, saveProfile, type ModelsConfig, type SavedProfile } from "./roles/models.ts";
+import {
+	applyRole,
+	loadModelsConfig,
+	profileFromJson,
+	profileToJson,
+	restoreProfile,
+	saveProfile,
+	type ModelsConfig,
+	type SavedProfile,
+} from "./roles/models.ts";
 import { renderVerifierBrief, runVerifier } from "./roles/verifier.ts";
 import { BUILTIN_ALL, gateCheck, MISSION_TOOLS, toolsForPhase } from "./hooks/gate.ts";
 import { IncrementalDiagnostics } from "./hooks/diagnostics.ts";
@@ -113,6 +122,7 @@ export class Runtime {
 		await this.persist();
 		writeCurrentPointer(currentPointer(l), id);
 		this.savedProfile = saveProfile(this.pi, ctx);
+		this.persistProfile();
 		this.pi.setActiveTools(toolsForPhase("plan"));
 		await applyRole(this.pi, ctx, "planner", this.modelsConfig(), (m) => this.warn(ctx, m));
 		this.refreshWidget(ctx);
@@ -148,6 +158,22 @@ export class Runtime {
 	/** /mission resume:从仓库重附着到当前会话(Q15) */
 	async resume(ctx: any, missionId: string): Promise<{ ok: true } | { error: string }> {
 		if (this.busy()) return { error: "已有进行中的 mission,先 /mission abort" };
+		const r = await this.attach(ctx, missionId, { clearPendingHandoff: true });
+		if ("error" in r) return r;
+		if (this.active!.state.phase === "done") return { error: "该 mission 已完成" };
+		return { ok: true };
+	}
+
+	/**
+	 * 磁盘重附着(I1 的兑现)。
+	 * pi 在 newSession/reload/重启时会重建扩展实例,内存态必然丢失 ——
+	 * 会话即上下文,状态即进度:进度从仓库恢复,上下文靠换脑重建。
+	 */
+	private async attach(
+		ctx: any,
+		missionId: string,
+		opts: { clearPendingHandoff: boolean },
+	): Promise<{ ok: true } | { error: string }> {
 		const l = this.layout;
 		const pp = planPaths(l, missionId);
 		const sp = statePaths(l, missionId);
@@ -156,17 +182,17 @@ export class Runtime {
 		if (!plan) return { error: `找不到 ${missionId} 的 MISSION.md(或 fence 损坏)。quick 档不落盘,无法恢复。` };
 		const state = loadStateFile(sp.stateJson);
 		if (!state) return { error: `找不到 ${missionId} 的 STATE.json` };
-		if (state.phase === "done") return { error: "该 mission 已完成" };
 
 		// check 是 L0 瞬时相位,act 依赖上一轮对话 —— 恢复时统一落回 do(attempts 不变)
 		if (state.phase === "check" || state.phase === "act") state.phase = "do";
-		// 崩溃时可能停在换脑半途:进程重启本身就是干净上下文,换脑视为已完成
-		state.pendingHandoff = null;
+		if (opts.clearPendingHandoff) state.pendingHandoff = null;
 
 		ensureScaffold(l);
 		this.active = { plan, state, inMemory: false, git: await isGitRepo(this.exec, this.cwd) };
 		writeCurrentPointer(currentPointer(l), missionId);
-		this.savedProfile = saveProfile(this.pi, ctx);
+		// 用户现场(thinking/模型)随 mission 持久化;已有则以磁盘为准(跨会话接力)
+		this.savedProfile = this.loadProfile() ?? saveProfile(this.pi, ctx);
+		this.persistProfile();
 		this.pi.setActiveTools(toolsForPhase(state.phase));
 		const role = ROLE_OF[state.phase];
 		if (role) await applyRole(this.pi, ctx, role, this.modelsConfig(), (m) => this.warn(ctx, m));
@@ -174,36 +200,54 @@ export class Runtime {
 		return { ok: true };
 	}
 
-	/** session_start:有挂起的换脑 → 换脑完成;否则按 CURRENT 指针重建(同进程换脑场景) */
+	/** 驱动类命令入口:内存丢了就从磁盘悄悄接上(CURRENT 指针)。 */
+	async ensureAttached(ctx: any): Promise<boolean> {
+		if (this.active) return true;
+		const id = readCurrentPointer(currentPointer(this.layout));
+		if (!id) return false;
+		const r = await this.attach(ctx, id, { clearPendingHandoff: false });
+		return "ok" in r;
+	}
+
+	/** session_start:换脑接力(磁盘 handshake)或提示恢复 */
 	async onSessionStart(ctx: any): Promise<void> {
 		if (this.active?.state.pendingHandoff) {
-			const r = await this.applyEvent(
+			// 同进程接力(若 runner 未重建)
+			await this.applyEvent(
 				{ type: "HANDOFF_DONE", at: Date.now(), sessionFile: safeSessionFile(ctx) },
 				ctx,
 			);
-			if (!r.error) {
-				this.pi.setActiveTools(toolsForPhase(this.active.state.phase));
-				const role = ROLE_OF[this.active.state.phase];
-				if (role) await applyRole(this.pi, ctx, role, this.modelsConfig(), (m) => this.warn(ctx, m));
-			}
+			this.pi.setActiveTools(toolsForPhase(this.active.state.phase));
+			const role = ROLE_OF[this.active.state.phase];
+			if (role) await applyRole(this.pi, ctx, role, this.modelsConfig(), (m) => this.warn(ctx, m));
 			this.refreshWidget(ctx);
 			return;
 		}
 		if (this.active) {
-			// 同进程会话切换(switchSession/newSession 非换脑场景):重挂闸门即可
+			// 同进程会话切换:重挂闸门即可
 			this.pi.setActiveTools(toolsForPhase(this.active.state.phase));
 			this.refreshWidget(ctx);
 			return;
 		}
-		// 进程重启:不自动接管 —— 显式 /mission resume,避免用户打开别的活儿却被 mission 闸门拦住
+		// 全新实例:newSession 会重建扩展 runner,内存态必丢 —— 从磁盘恢复
 		const id = readCurrentPointer(currentPointer(this.layout));
-		if (id) {
-			const sp = statePaths(this.layout, id);
-			const s = loadStateFile(sp.stateJson);
-			if (s && s.phase !== "done" && s.phase !== "halted") {
-				ctx.ui.notify(`检测到未完成的 mission "${id}"(${s.phase}),/mission resume ${id} 恢复`, "info");
-			}
+		if (!id) return;
+		const sp = statePaths(this.layout, id);
+		const s = loadStateFile(sp.stateJson);
+		if (!s || s.phase === "done" || s.phase === "halted") return;
+		if (s.pendingHandoff) {
+			// 这个全新会话就是换脑要的干净上下文:接上并完成握手
+			const r = await this.attach(ctx, id, { clearPendingHandoff: false });
+			if ("error" in r) return;
+			await this.applyEvent(
+				{ type: "HANDOFF_DONE", at: Date.now(), sessionFile: safeSessionFile(ctx) },
+				ctx,
+			);
+			this.refreshWidget(ctx);
+			return;
 		}
+		// 进程重启且不在换脑途中:不自动接管,避免劫持不相干的会话
+		ctx.ui.notify(`检测到未完成的 mission "${id}"(${s.phase}),/mission resume ${id} 恢复`, "info");
 	}
 
 	// ─────────────────────────── 事件应用与效果翻译 ───────────────────────────
@@ -270,7 +314,7 @@ export class Runtime {
 					break;
 				case "RESTORE":
 					this.pi.setActiveTools([...BUILTIN_ALL, ...MISSION_TOOLS]);
-					await restoreProfile(this.pi, this.savedProfile);
+					await restoreProfile(this.pi, ctx, this.savedProfile);
 					this.savedProfile = null;
 					this.diagnostics?.dispose();
 					this.diagnostics = null;
@@ -562,7 +606,11 @@ export class Runtime {
 				this.suppressHandoffFollowUp = false;
 			}
 		}
-		const brief = renderHandoffBrief(a.plan, a.state, this.config.missionsDir);
+		const brief = renderHandoffBrief(
+			a.plan,
+			{ ...a.state, pendingHandoff: null },
+			this.config.missionsDir,
+		);
 		const parentSession = safeSessionFile(ctx);
 		await ctx.newSession({
 			parentSession,
@@ -627,6 +675,26 @@ export class Runtime {
 		const a = this.active;
 		if (!a || a.inMemory) return;
 		await saveStateFile(statePaths(this.layout, a.state.missionId).stateJson, a.state);
+	}
+
+	/** 用户现场(thinking/模型)随 mission 落盘,跨会话接力时 RESTORE 才能还原 */
+	private persistProfile(): void {
+		const a = this.active;
+		if (!a || a.inMemory || !this.savedProfile) return;
+		const file = path.join(statePaths(this.layout, a.state.missionId).dir, "profile.json");
+		fs.mkdirSync(path.dirname(file), { recursive: true });
+		fs.writeFileSync(file, `${JSON.stringify(profileToJson(this.savedProfile))}\n`, "utf8");
+	}
+
+	private loadProfile(): SavedProfile | null {
+		const a = this.active;
+		if (!a) return null;
+		try {
+			const file = path.join(statePaths(this.layout, a.state.missionId).dir, "profile.json");
+			return profileFromJson(JSON.parse(fs.readFileSync(file, "utf8")));
+		} catch {
+			return null;
+		}
 	}
 
 	private async gitDiff(): Promise<string> {

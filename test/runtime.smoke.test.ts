@@ -170,6 +170,56 @@ test("闸门:do 相位写冻结件被拦,pendingHandoff 硬阻断", async () => 
 	assert.equal(rt.gate("write", { path: "src/main.ts" }), null);
 });
 
+test("跨实例换脑接力:新 Runtime 从磁盘握手完成 HANDOFF_DONE", async () => {
+	const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "pi-missions-smoke-"));
+	const { ctx, rt } = await newMission(tmp);
+
+	// 进入 pendingHandoff(complex 推进/水位/升级的等价物)
+	const r = await rt.applyEvent({ type: "HANDOFF_REQUEST", at: Date.now(), reason: "advance to T2" }, ctx);
+	assert.ok(!r.error);
+	assert.equal(rt.active!.state.pendingHandoff, "advance to T2");
+
+	// 模拟 pi 在 newSession 后重建扩展实例:全新 Runtime,同一仓库
+	const pi2 = mockPi();
+	const ctx2 = mockCtx(tmp);
+	const rt2 = new Runtime(pi2, tmp);
+	assert.equal(rt2.active, null, "新实例内存为空");
+
+	await rt2.onSessionStart(ctx2);
+
+	// 从磁盘接上 + 换脑握手完成 + 闸门重新生效
+	assert.ok(rt2.active, "必须从磁盘重附着");
+	assert.equal(rt2.active!.state.pendingHandoff, null, "HANDOFF_DONE 已落账");
+	assert.equal(rt2.active!.state.phase, "do");
+	assert.equal(rt2.active!.state.sessionMap.T1, "/tmp/fake-session.jsonl");
+	assert.ok(
+		rt2.gate("write", { path: `missions/plans/${rt2.active!.state.missionId}/MISSION.md` }),
+		"闸门在接力后必须重新生效",
+	);
+	assert.equal(rt2.gate("write", { path: "src/main.ts" }), null, "换脑完成后写工具解冻");
+	// 用户现场 profile 落盘,跨实例可还原
+	assert.ok(
+		fs.existsSync(path.join(tmp, "missions", "state", rt2.active!.state.missionId, "profile.json")),
+	);
+});
+
+test("ensureAttached:内存丢失时驱动命令从磁盘悄悄接上", async () => {
+	const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "pi-missions-smoke-"));
+	const { rt } = await newMission(tmp);
+	const id = rt.active!.state.missionId;
+
+	// 同仓库新实例:接上
+	const rt2 = new Runtime(mockPi(), tmp);
+	assert.equal(await rt2.ensureAttached(mockCtx(tmp)), true);
+	assert.equal(rt2.active!.state.missionId, id);
+	assert.equal(rt2.active!.state.phase, "do");
+
+	// 无 mission 的仓库:接不上,返回 false(命令随后报"无活动 mission")
+	const emptyDir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-missions-empty-"));
+	const rt3 = new Runtime(mockPi(), emptyDir);
+	assert.equal(await rt3.ensureAttached(mockCtx(emptyDir)), false);
+});
+
 test("quick 档:内存态不落盘,--verify 命令驱动判定", async () => {
 	const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "pi-missions-smoke-"));
 	const pi = mockPi();
