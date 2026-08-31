@@ -1,0 +1,22 @@
+{
+  "name": "pi-missions",
+  "version": "0.1.0",
+  "description": "Factory-style Missions for pi: validation-contract-driven, milestone-gated multi-agent orchestration built on pi-subagents.",
+  "keywords": ["pi-package", "pi-missions", "orchestration", "multi-agent"],
+  "license": "MIT",
+  "type": "module",
+  "pi": {
+    "extensions": ["./extensions/index.ts"],
+    "skills": ["./skills"]
+  },
+  "pi-subagents": {
+    "agents": ["./agents"]
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": "*",
+    "typebox": "*"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}
