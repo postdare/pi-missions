@@ -15,6 +15,7 @@
  */
 import * as fs from "node:fs";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
+import { Box, Text } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
 import {
 	type Mission,
@@ -69,6 +70,18 @@ interface SubmitPlanParams {
 export default function (pi: ExtensionAPI) {
 	let pollTimer: ReturnType<typeof setInterval> | undefined;
 	let lastCtx: ExtensionContext | undefined;
+
+	// Status reports render as durable transcript cards (appendEntry), not as
+	// LLM-bound messages — sendMessage(deliverAs:"nextTurn") would stay invisible
+	// until the next prompt, which made /mission-status look like a no-op.
+	pi.registerEntryRenderer<{ text: string }>("pi-missions-status", (entry, _options, theme) => {
+		const box = new Box(1, 1, (text) => theme.bg("customMessageBg", text));
+		const text = entry.data?.text ?? "(empty)";
+		for (const line of text.split("\n")) {
+			box.addChild(new Text(line, 0, 0));
+		}
+		return box;
+	});
 
 	// ---------------------------------------------------------------- helpers
 
@@ -410,7 +423,11 @@ export default function (pi: ExtensionAPI) {
 				if (m.run?.error) lines.push(`error: ${m.run.error}`);
 				lines.push("");
 			}
-			pi.sendMessage({ customType: "pi-missions-status", content: lines.join("\n"), display: true }, { deliverAs: "nextTurn" });
+			if (ctx.hasUI) {
+				pi.appendEntry("pi-missions-status", { text: lines.join("\n") });
+			} else {
+				process.stdout.write(lines.join("\n") + "\n");
+			}
 		},
 	});
 
