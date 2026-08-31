@@ -2,15 +2,20 @@
  * pi-missions · ui/panel
  *
  * /missions 主面板(ctx.ui.custom,需 hasUI 守卫)。
- * 顶部新建提示,下方历史列表 —— 从 missions/state/*\/STATE.json 扫描重建,不依赖内存(I1)。
+ * 顶部三档新建入口,下方 mission 卡片列表 —— 全部从 missions/state/* 扫描重建(I1)。
+ *
+ * 卡片信息:目标 · 档位 · 相位 · 进度条 · 当前任务/attempt · 成本 · 时长 ·
+ *           熔断预警 / 换脑挂起 / 失败原因 · 最近更新时间。
+ * d 展开详情(升级历史 + 日志尾部)。
  */
 
 import { Key, matchesKey, visibleWidth } from "@earendil-works/pi-tui";
-import type { MissionState } from "../core/types.ts";
 import { thresholdFor } from "../core/breaker.ts";
+import { ROLE_OF } from "../core/machine.ts";
 import { readLog } from "../store/log.ts";
 import { scanMissions, type ScannedMission } from "../store/evidence.ts";
 import { statePaths, type RepoLayout } from "../store/paths.ts";
+import { bar, costTotal, fmtDuration, truncate } from "./dashboard.ts";
 
 interface Theme {
 	fg(color: string, text: string): string;
@@ -19,46 +24,104 @@ interface Theme {
 }
 
 const PHASE_STYLE: Record<string, { icon: string; color: string; label: string }> = {
-	plan: { icon: "◌", color: "accent", label: "规划中" },
-	do: { icon: "●", color: "accent", label: "执行中" },
-	check: { icon: "●", color: "accent", label: "判定中" },
-	act: { icon: "●", color: "warning", label: "调整中" },
-	done: { icon: "○", color: "success", label: "已完成" },
-	halted: { icon: "✕", color: "error", label: "已熔断" },
+	plan: { icon: "◌", color: "accent", label: "规划" },
+	do: { icon: "●", color: "accent", label: "执行" },
+	check: { icon: "◍", color: "accent", label: "判定" },
+	act: { icon: "●", color: "warning", label: "调整" },
+	done: { icon: "✓", color: "success", label: "完成" },
+	halted: { icon: "✕", color: "error", label: "熔断" },
 };
 
-function truncate(line: string, width: number): string {
+const TIER_DESC: Array<{ id: string; desc: string }> = [
+	{ id: "quick", desc: "单任务,不落盘,快速循环" },
+	{ id: "standard", desc: "任务列表 + 验证闸门(默认)" },
+	{ id: "complex", desc: "里程碑 + 独立验证 + 逐里程碑回归" },
+];
+
+function relTime(ts: number, now: number): string {
+	const mins = Math.max(0, Math.round((now - ts) / 60_000));
+	if (mins < 1) return "刚刚";
+	if (mins < 60) return `${mins}min 前`;
+	const hours = Math.floor(mins / 60);
+	if (hours < 24) return `${hours}h 前`;
+	return `${Math.floor(hours / 24)}d 前`;
+}
+
+/** 单个 mission 的卡片行 */
+function missionCard(m: ScannedMission, selected: boolean, detail: boolean, t: Theme, width: number, now: number, l: RepoLayout): string[] {
+	const s = m.state;
+	const st = PHASE_STYLE[s.phase] ?? PHASE_STYLE.halted;
+	const task = s.currentTask ? s.tasks[s.currentTask] : undefined;
+	const planTask = s.currentTask ? m.plan?.milestones.flatMap((x) => x.tasks).find((x) => x.id === s.currentTask) : undefined;
+	const doneCount = Object.values(s.tasks).filter((x) => x.status === "done").length;
+	const total = s.taskOrder.length;
+	const cost = costTotal(s);
+	const threshold = thresholdFor(s.tier);
+	const cursor = selected ? t.fg("accent", "▸") : " ";
+
+	// 标题行:图标 + id + 档位 + 相位 + 更新时间
+	const head =
+		`${cursor} ${t.fg(st.color, st.icon)} ${t.bold(t.fg(st.color, m.missionId))}` +
+		`  ${t.fg("dim", s.tier)}  ${t.fg(st.color, st.label)}` +
+		(ROLE_OF[s.phase] ? t.fg("dim", `·${ROLE_OF[s.phase]}`) : "") +
+		t.fg("dim", `  ${relTime(s.updatedAt, now)}`);
+
+	const lines = [head];
+
+	// 目标行
+	if (m.plan?.goal) lines.push(`    ${t.fg("muted", truncate(m.plan.goal, width - 10))}`);
+
+	// 进度行:进度条 + 当前任务 + attempt + 成本 + 时长
+	const progress = total > 0 ? `${bar(doneCount, total)} ${doneCount}/${total}` : "—";
+	const bits = [progress];
+	if (s.currentTask && s.phase !== "done") {
+		bits.push(`▶ ${s.currentTask}${planTask ? ` ${truncate(planTask.title, 20)}` : ""} · a${task?.attempts ?? 0}/${threshold}`);
+	}
+	if (cost > 0) bits.push(`$${cost.toFixed(2)}`);
+	if (m.plan?.createdAt) {
+		bits.push(s.phase === "done" || s.phase === "halted" ? `共 ${fmtDuration(m.plan.createdAt, s.updatedAt)}` : fmtDuration(m.plan.createdAt, now));
+	}
+	lines.push(`    ${bits.join(t.fg("dim", " · "))}`);
+
+	// 预警行(按需):熔断临界 / 换脑挂起 / 失败原因 / 环境漂移
+	if (task && task.sameSignatureCount >= threshold - 1 && task.sameSignatureCount > 0) {
+		lines.push(`    ${t.fg("warning", `⚠ 同一失败签名 ×${task.sameSignatureCount},再失败一次将升级`)}`);
+	}
+	if (s.pendingHandoff) {
+		lines.push(`    ${t.fg("warning", `⏸ 等待换脑: ${truncate(s.pendingHandoff, width - 20)}`)}`);
+	}
+	if (task?.lastFailureReason && s.phase !== "done") {
+		lines.push(`    ${t.fg("dim", `✗ ${truncate(task.lastFailureReason, width - 12)}`)}`);
+	}
+	if (s.phase === "halted") {
+		const last = s.escalation.history[s.escalation.history.length - 1];
+		lines.push(
+			`    ${t.fg("error", `止于 L${s.escalation.level}${last ? ` · ${truncate(last.reason, width - 16)}` : ""}`)}`,
+		);
+	}
+
+	// 详情(d):升级历史 + 日志尾部
+	if (detail) {
+		if (s.escalation.history.length > 0) {
+			lines.push(`    ${t.fg("dim", "升级历史:")}`);
+			for (const h of s.escalation.history.slice(-4)) {
+				lines.push(`      ${t.fg("dim", `L${h.from}→L${h.to} ${h.taskId} · ${truncate(h.reason, width - 22)}`)}`);
+			}
+		}
+		const logTail = readLog(statePaths(l, m.missionId).logMd).trim().split("\n").filter(Boolean).slice(-8);
+		if (logTail.length > 0 && logTail[0] !== "(暂无日志)") {
+			lines.push(`    ${t.fg("dim", "日志:")}`);
+			for (const line of logTail) lines.push(`      ${t.fg("dim", clip(line, width - 10))}`);
+		}
+	}
+	return lines;
+}
+
+function clip(line: string, width: number): string {
 	if (visibleWidth(line) <= width) return line;
 	let out = line;
 	while (out.length > 0 && visibleWidth(`${out}…`) > width) out = out.slice(0, -1);
 	return `${out}…`;
-}
-
-function missionSummary(m: ScannedMission, selected: boolean, t: Theme, width: number): string[] {
-	const s: MissionState = m.state;
-	const st = PHASE_STYLE[s.phase] ?? PHASE_STYLE.halted;
-	const task = s.currentTask ? s.tasks[s.currentTask] : undefined;
-	const done = Object.values(s.tasks).filter((x) => x.status === "done").length;
-	const total = s.taskOrder.length;
-	const cursor = selected ? t.fg("accent", "▸") : " ";
-
-	const head = `${cursor} ${t.fg(st.color, st.icon)} ${t.bold(t.fg(st.color, s.missionId))}  ${s.tier}  ${done}/${total}  ${t.fg(st.color, st.label)}`;
-	const lines = [head];
-
-	const goal = s.tasks[s.currentTask ?? ""]?.lastFailureReason;
-	if (s.phase !== "done" && s.currentTask) {
-		lines.push(t.fg("dim", `    当前:${s.currentTask} · attempt ${task?.attempts ?? 0}`));
-	}
-	if (task && task.sameSignatureCount >= thresholdFor(s.tier) - 1 && task.sameSignatureCount > 0) {
-		lines.push(t.fg("warning", `    ⚠ 同一失败签名 ×${task.sameSignatureCount},再失败一次将升级`));
-	} else if (goal && s.phase !== "done") {
-		lines.push(t.fg("dim", `    ${truncate(goal, width - 8)}`));
-	}
-	if (s.phase === "halted") {
-		const last = s.escalation.history[s.escalation.history.length - 1];
-		lines.push(t.fg("error", `    L${s.escalation.level}${last ? ` · ${truncate(last.reason, width - 12)}` : ""}`));
-	}
-	return lines;
 }
 
 export interface PanelCallbacks {
@@ -109,18 +172,18 @@ export async function openMissionsPanel(ctx: any, l: RepoLayout, cb: PanelCallba
 			return {
 				render: (w: number) => {
 					const t = theme;
-					const inner = Math.max(40, Math.min(w - 6, 96));
+					const now = Date.now();
+					const inner = Math.max(48, Math.min(w - 6, 104));
 					const border = (s: string) => t.fg("borderAccent", s);
 					const row = (content: string) => {
-						const clipped = truncate(content, inner - 4);
-						const pad = Math.max(0, inner - 4 - visibleWidth(clipped));
-						return t.bg("customMessageBg", `${border("│")} ${clipped}${" ".repeat(pad)} ${border("│")}`);
+						const c = clip(content, inner - 4);
+						const pad = Math.max(0, inner - 4 - visibleWidth(c));
+						return t.bg("customMessageBg", `${border("│")} ${c}${" ".repeat(pad)} ${border("│")}`);
 					};
 
-					const lines: string[] = [];
 					const title = " Missions ";
-					const hint = " ↑↓ 选择 · ⏎ 恢复 · d 详情 · n 新建 · q 退出 ";
-					lines.push(
+					const hint = " ↑↓ 选择 · ⏎ 恢复 · d 详情 · q 退出 ";
+					const lines: string[] = [
 						t.bg(
 							"customMessageBg",
 							border("╭─") +
@@ -129,27 +192,28 @@ export async function openMissionsPanel(ctx: any, l: RepoLayout, cb: PanelCallba
 								t.fg("dim", hint) +
 								border("─╮"),
 						),
-					);
+					];
 
-					lines.push(row(`${t.fg("accent", "+")} 新建任务:${t.fg("dim", "/mission quick <任务> 或 /mission new <目标> [--tier=complex]")}`));
-					lines.push(row(t.fg("dim", "─".repeat(Math.min(40, inner - 8)))));
+					// 新建入口(三档说明)
+					lines.push(row(`${t.fg("accent", "+")} ${t.bold("新建任务")}`));
+					for (const td of TIER_DESC) {
+						const cmd = td.id === "quick" ? "/mission quick <任务>" : `/mission new <目标>${td.id === "complex" ? " --tier=complex" : ""}`;
+						lines.push(row(`    ${t.fg("accent", td.id.padEnd(9))}${t.fg("dim", td.desc)}  ${t.fg("dim", cmd)}`));
+					}
+					lines.push(row(t.fg("dim", "─".repeat(Math.min(56, inner - 8)))));
 
 					if (missions.length === 0) {
 						lines.push(row(t.fg("dim", "暂无历史 mission")));
 					}
 					for (const [i, m] of missions.entries()) {
-						for (const line of missionSummary(m, i === selected, t, inner - 4)) lines.push(row(line));
-						if (detail && i === selected) {
-							const logTail = readLog(statePaths(l, m.missionId).logMd).trim().split("\n").slice(-6);
-							for (const line of logTail) lines.push(row(t.fg("dim", `    ${line}`)));
+						if (i > 0) lines.push(row(""));
+						for (const line of missionCard(m, i === selected, detail && i === selected, t, inner - 4, now, l)) {
+							lines.push(row(line));
 						}
 					}
 
 					lines.push(
-						t.bg(
-							"customMessageBg",
-							border("╰") + border("─".repeat(Math.max(1, inner - 2))) + border("╯"),
-						),
+						t.bg("customMessageBg", border("╰") + border("─".repeat(Math.max(1, inner - 2))) + border("╯")),
 					);
 					return lines;
 				},
@@ -182,6 +246,6 @@ export async function openMissionsPanel(ctx: any, l: RepoLayout, cb: PanelCallba
 				},
 			};
 		},
-		{ overlay: true, overlayOptions: { anchor: "center", width: "72%", margin: 1 } },
+		{ overlay: true, overlayOptions: { anchor: "center", width: "76%", margin: 1 } },
 	);
 }
