@@ -10,6 +10,8 @@ import type { Runtime } from "./runtime.ts";
 import { parseMissionMd } from "./store/mission.ts";
 import { planPaths, statePaths } from "./store/paths.ts";
 import { readLog } from "./store/log.ts";
+import { latestEvidenceResults } from "./store/evidence.ts";
+import { renderStatusDashboard } from "./ui/dashboard.ts";
 import { openMissionsPanel } from "./ui/panel.ts";
 
 type Ctx = any;
@@ -73,22 +75,19 @@ export function registerCommands(pi: any, getRuntime: GetRuntime): void {
 				case "status": {
 					const a = rt.active;
 					if (!a) return notifyUsage(ctx, "无活动 mission。/missions 查看历史,/mission resume <id> 恢复");
-					const s = a.state;
-					const cost = Object.entries(s.cost)
-						.map(([role, v]) => `${role}=$${(v ?? 0).toFixed(3)}`)
-						.join(" ");
+					const sp = statePaths(rt.layout, a.state.missionId);
+					const logTail = a.inMemory
+						? []
+						: readLog(sp.logMd).trim().split("\n").filter(Boolean).slice(-5);
 					pi.appendEntry("missions-card", {
-						title: `${s.missionId} · ${s.tier} · ${s.phase}`,
-						body: [
-							`goal: ${a.plan.goal}`,
-							`task: ${s.currentTask ?? "-"}  order: ${s.taskOrder.join(" → ") || "-"}`,
-							`escalation: L${s.escalation.level}(${s.escalation.history.length} 次)`,
-							`env: ${s.envFingerprint ?? "未冻结"}`,
-							s.pendingHandoff ? `⏸ 等待换脑:${s.pendingHandoff}` : null,
-							cost ? `cost: ${cost}` : "cost: -",
-						]
-							.filter(Boolean)
-							.join("\n"),
+						title: `${a.state.missionId} · ${a.state.tier} · ${a.state.phase}`,
+						body: renderStatusDashboard(
+							a.plan,
+							a.state,
+							{ latest: latestEvidenceResults(sp.evidenceDir) },
+							logTail,
+							rt.config.missionsDir,
+						),
 					});
 					return;
 				}

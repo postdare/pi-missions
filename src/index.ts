@@ -80,9 +80,11 @@ export default function (pi: any) {
 		await runtime(ctx.cwd).onAgentSettled(ctx);
 	});
 
-	// 成本分账
+	// 成本分账(顺带刷新状态条上的成本/时长;空闲时无需心跳——成本只在 LLM 活动时变化)
 	pi.on("message_end", async (event: any, ctx: any) => {
-		runtime(ctx.cwd).onMessageEnd(event.message);
+		const r = runtime(ctx.cwd);
+		r.onMessageEnd(event.message);
+		if (r.active) r.refreshWidget(ctx);
 	});
 
 	registerMissionTools(pi, getRuntime);

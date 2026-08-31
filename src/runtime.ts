@@ -11,7 +11,6 @@ import * as path from "node:path";
 import type { Effect, MissionEvent, MissionState, Phase, Role, TransitionResult, Evidence } from "./core/types.ts";
 import { initialState, transition, ROLE_OF } from "./core/machine.ts";
 import { judge } from "./core/verdict.ts";
-import { thresholdFor } from "./core/breaker.ts";
 import { evaluatePromotion } from "./core/tier.ts";
 import type { MissionPlan } from "./store/mission.ts";
 import {
@@ -42,6 +41,7 @@ import { loadStateFile, readCurrentPointer, saveStateFile, writeCurrentPointer }
 import { appendLog } from "./store/log.ts";
 import { computeEnvFingerprint, ensureInfoExclude, isGitRepo } from "./store/git.ts";
 import { saveEvidence } from "./store/evidence.ts";
+import { renderWidgetLines } from "./ui/dashboard.ts";
 import { applyRole, loadModelsConfig, restoreProfile, saveProfile, type ModelsConfig, type SavedProfile } from "./roles/models.ts";
 import { renderVerifierBrief, runVerifier } from "./roles/verifier.ts";
 import { BUILTIN_ALL, gateCheck, MISSION_TOOLS, toolsForPhase } from "./hooks/gate.ts";
@@ -423,7 +423,14 @@ export class Runtime {
 			taskId: a.state.currentTask,
 			attempt: taskState?.attempts ?? 1,
 			verdict,
-			evidences: evidences.map((e) => ({ level: e.level, acId: e.acId, result: e.result, exitCode: e.exitCode })),
+			evidences: evidences.map((e) => ({
+				level: e.level,
+				acId: e.acId,
+				result: e.result,
+				exitCode: e.exitCode,
+				// 失败证据附带原始输出尾部:卡片不进 LLM 上下文,可以详细
+				rawTail: e.result === "fail" ? tail(e.raw, 600) : undefined,
+			})),
 		});
 
 		const r = await this.applyEvent({ type: "VERDICT", at: Date.now(), verdict }, ctx);
@@ -639,35 +646,11 @@ export class Runtime {
 			ctx.ui.setWidget("missions", undefined);
 			return;
 		}
-		ctx.ui.setWidget("missions", [renderStatusLine(a.plan, a.state)]);
+		ctx.ui.setWidget("missions", renderWidgetLines(a.plan, a.state));
 	}
 }
 
 // ─────────────────────────── 渲染(纯函数,UI 层共用) ───────────────────────────
-
-export function renderStatusLine(plan: MissionPlan, state: MissionState): string {
-	const task = state.currentTask ? findTask(plan, state.currentTask) : undefined;
-	const t = state.currentTask ? state.tasks[state.currentTask] : undefined;
-	const role = ROLE_OF[state.phase];
-	const threshold = thresholdFor(state.tier);
-	const parts = [
-		`◆ ${state.missionId}`,
-		state.tier,
-		state.currentTask ? `${state.currentTask}${task ? ` ${task.title}` : ""}` : "-",
-		`phase=${state.phase}`,
-		t && (state.phase === "do" || state.phase === "check" || state.phase === "act")
-			? `attempt ${t.attempts}(阈值 ${threshold})`
-			: null,
-		role ?? null,
-	];
-	let line = parts.filter(Boolean).join(" · ");
-	// 熔断临界可视化(I4):烧断之前就要看见
-	if (t && t.sameSignatureCount >= threshold - 1 && t.sameSignatureCount > 0) {
-		line += ` ⚠ 同一失败签名 ×${t.sameSignatureCount},再失败一次将升级`;
-	}
-	if (state.pendingHandoff) line += ` ⏸ 等待换脑(/mission next)`;
-	return line;
-}
 
 export function renderStateCard(plan: MissionPlan, state: MissionState, dirName = "missions"): string {
 	const task = state.currentTask ? findTask(plan, state.currentTask) : undefined;

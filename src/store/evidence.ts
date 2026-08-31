@@ -17,6 +17,32 @@ export function saveEvidence(evidenceDir: string, taskId: string, attempt: numbe
 	return file;
 }
 
+/** 聚合每条 AC(verify 分支)最近一次判定结果,供状态面板展示 */
+export function latestEvidenceResults(evidenceDir: string): Record<string, { result: string; level: string; at: number }> {
+	const out: Record<string, { result: string; level: string; at: number }> = {};
+	let files: string[];
+	try {
+		files = fs.readdirSync(evidenceDir).filter((f) => f.endsWith(".json"));
+	} catch {
+		return out;
+	}
+	for (const f of files) {
+		try {
+			const data = JSON.parse(fs.readFileSync(path.join(evidenceDir, f), "utf8")) as {
+				at: number;
+				evidences: Evidence[];
+			};
+			for (const e of data.evidences ?? []) {
+				const prev = out[e.acId];
+				if (!prev || data.at >= prev.at) out[e.acId] = { result: e.result, level: e.level, at: data.at };
+			}
+		} catch {
+			/* 跳过坏文件 */
+		}
+	}
+	return out;
+}
+
 export interface ScannedMission {
 	missionId: string;
 	state: MissionState;

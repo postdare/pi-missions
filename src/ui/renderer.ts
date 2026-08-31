@@ -43,7 +43,7 @@ export interface VerdictCardData {
 	taskId: string;
 	attempt: number;
 	verdict: { outcome: string; reason: string; signature?: string };
-	evidences: Array<{ level: string; acId: string; result: string; exitCode?: number }>;
+	evidences: Array<{ level: string; acId: string; result: string; exitCode?: number; rawTail?: string }>;
 }
 
 export function renderVerdictCard(t: Theme, d: VerdictCardData): string[] {
@@ -60,6 +60,11 @@ export function renderVerdictCard(t: Theme, d: VerdictCardData): string[] {
 		lines.push(
 			`   ${t.fg(COLOR[e.result] ?? "dim", ICON[e.result] ?? "?")} ${e.acId} ${t.fg("dim", `(${e.level}${e.exitCode != null ? `, exit=${e.exitCode}` : ""})`)}`,
 		);
+		if (e.rawTail) {
+			for (const l of e.rawTail.split("\n").filter(Boolean).slice(-5)) {
+				lines.push(`     ${t.fg("dim", l)}`);
+			}
+		}
 	}
 	lines.push(`   ${t.fg("dim", d.verdict.reason)}`);
 	if (d.verdict.signature) lines.push(`   ${t.fg("dim", `失败签名 ${d.verdict.signature}`)}`);
