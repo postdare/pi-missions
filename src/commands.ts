@@ -11,7 +11,7 @@ import { parseMissionMd } from "./store/mission.ts";
 import { planPaths, statePaths } from "./store/paths.ts";
 import { readLog } from "./store/log.ts";
 import { latestEvidenceResults } from "./store/evidence.ts";
-import { renderStatusDashboard } from "./ui/dashboard.ts";
+import { openStatusView, statusFallbackText, type StatusViewData } from "./ui/status-view.ts";
 import { openMissionsPanel } from "./ui/panel.ts";
 
 type Ctx = any;
@@ -79,20 +79,32 @@ export function registerCommands(pi: any, getRuntime: GetRuntime): void {
 				case "status": {
 					const a = rt.active;
 					if (!a) return notifyUsage(ctx, "无活动 mission。/missions 查看历史,/mission resume <id> 恢复");
-					const sp = statePaths(rt.layout, a.state.missionId);
-					const logTail = a.inMemory
-						? []
-						: readLog(sp.logMd).trim().split("\n").filter(Boolean).slice(-5);
-					pi.appendEntry("missions-card", {
-						title: `${a.state.missionId} · ${a.state.tier} · ${a.state.phase}`,
-						body: renderStatusDashboard(
-							a.plan,
-							a.state,
-							{ latest: latestEvidenceResults(sp.evidenceDir) },
-							logTail,
-							rt.config.missionsDir,
-						),
-					});
+					const dirName = rt.config.missionsDir;
+					const getData = (): StatusViewData | null => {
+						const cur = rt.active;
+						if (!cur) return null;
+						const sp = statePaths(rt.layout, cur.state.missionId);
+						return {
+							plan: cur.plan,
+							state: cur.state,
+							evidence: { latest: latestEvidenceResults(sp.evidenceDir) },
+							logLines: cur.inMemory
+								? []
+								: readLog(sp.logMd).trim().split("\n").filter(Boolean),
+							dirName,
+						};
+					};
+					if (ctx.hasUI) {
+						await openStatusView(ctx, getData);
+					} else {
+						const d = getData();
+						if (d) {
+							pi.appendEntry("missions-card", {
+								title: `${d.state.missionId} · ${d.state.tier} · ${d.state.phase}`,
+								body: statusFallbackText(d),
+							});
+						}
+					}
 					return;
 				}
 

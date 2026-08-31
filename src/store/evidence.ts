@@ -17,9 +17,18 @@ export function saveEvidence(evidenceDir: string, taskId: string, attempt: numbe
 	return file;
 }
 
+export interface EvidenceRecord {
+	result: string;
+	level: string;
+	at: number;
+	taskId?: string;
+	attempt?: number;
+	rawTail?: string;
+}
+
 /** 聚合每条 AC(verify 分支)最近一次判定结果,供状态面板展示 */
-export function latestEvidenceResults(evidenceDir: string): Record<string, { result: string; level: string; at: number }> {
-	const out: Record<string, { result: string; level: string; at: number }> = {};
+export function latestEvidenceResults(evidenceDir: string): Record<string, EvidenceRecord> {
+	const out: Record<string, EvidenceRecord> = {};
 	let files: string[];
 	try {
 		files = fs.readdirSync(evidenceDir).filter((f) => f.endsWith(".json"));
@@ -30,11 +39,22 @@ export function latestEvidenceResults(evidenceDir: string): Record<string, { res
 		try {
 			const data = JSON.parse(fs.readFileSync(path.join(evidenceDir, f), "utf8")) as {
 				at: number;
+				taskId?: string;
+				attempt?: number;
 				evidences: Evidence[];
 			};
 			for (const e of data.evidences ?? []) {
 				const prev = out[e.acId];
-				if (!prev || data.at >= prev.at) out[e.acId] = { result: e.result, level: e.level, at: data.at };
+				if (!prev || data.at >= prev.at) {
+					out[e.acId] = {
+						result: e.result,
+						level: e.level,
+						at: data.at,
+						taskId: data.taskId,
+						attempt: data.attempt,
+						rawTail: e.result === "fail" ? e.raw.slice(-400) : undefined,
+					};
+				}
 			}
 		} catch {
 			/* 跳过坏文件 */
