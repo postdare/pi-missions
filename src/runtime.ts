@@ -8,6 +8,7 @@
 
 import * as fs from "node:fs";
 import * as path from "node:path";
+import { truncateToWidth } from "@earendil-works/pi-tui";
 import type { Effect, MissionEvent, MissionState, Phase, Role, Tier, TransitionResult, Evidence } from "./core/types.ts";
 import { initialState, transition, ROLE_OF } from "./core/machine.ts";
 import { judge } from "./core/verdict.ts";
@@ -723,7 +724,13 @@ export class Runtime {
 			ctx.ui.setWidget("missions", undefined);
 			return;
 		}
-		ctx.ui.setWidget("missions", renderWidgetLines(a.plan, a.state));
+		// 工厂形式 + truncateToWidth:widget 行超宽会直接炸掉 TUI,必须逐行截断;
+		// 且 widget 拿到的 width 可能超过终端宽度,再按 120 封顶双保险。
+		ctx.ui.setWidget("missions", (_tui: any, theme: any) => ({
+			render: (width: number) =>
+				renderWidgetLines(a.plan, a.state).map((l) => truncateToWidth(l, Math.min(width, 120))),
+			invalidate: () => {},
+		}));
 	}
 }
 

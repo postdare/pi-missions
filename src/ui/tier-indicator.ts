@@ -8,7 +8,7 @@
  * mission 启动后自动清除(状态条接管显示)。
  */
 
-import { Editor } from "@earendil-works/pi-tui";
+import { Editor, truncateToWidth } from "@earendil-works/pi-tui";
 import type { Tier } from "../core/types.ts";
 
 const TIER_COLOR: Record<Tier, string> = {
@@ -33,13 +33,12 @@ export function applyTierIndicator(ctx: any, tier: Tier): void {
 	if (!ctx.hasUI) return;
 	const color = TIER_COLOR[tier];
 
-	// 编辑器上方的彩色指示条
+	// 编辑器上方的彩色指示条。注意:pi 传给 widget 的 width 可能超过终端真实宽度,
+	// 绝不能填充到 width;并按 Math.min(width, 120) 封顶,双保险防越界炸 TUI。
 	ctx.ui.setWidget(WIDGET_KEY, (_tui: any, theme: any) => ({
-		render: (width: number) => {
-			const label = `◆ mission 档位: ${TIER_LABEL[tier]}`;
-			const padded = label.length < width ? label + " ".repeat(Math.max(0, width - label.length)) : label;
-			return [theme.fg(color, padded)];
-		},
+		render: (width: number) => [
+			theme.fg(color, truncateToWidth(`◆ mission 档位: ${TIER_LABEL[tier]}`, Math.min(width, 120))),
+		],
 		invalidate: () => {},
 	}));
 
