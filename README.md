@@ -140,6 +140,8 @@ mission 结束/中止时恢复你原来的模型与 thinking level。
 
 ## 代码结构
 
+> 分层、相位状态机、术语表与不变量落点见 [docs/ARCHITECTURE.md](./docs/ARCHITECTURE.md)。
+
 ```
 src/
 ├── index.ts            # 装配:命令/工具/事件
