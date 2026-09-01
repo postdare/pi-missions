@@ -36,11 +36,59 @@ LLM 永远不能自己宣布"我做完了"——它只能提交,由 L0 依据证
 
 ## 安装
 
+### 在线安装(git)
+
 ```bash
-pi install /path/to/pi-missions      # 本地路径
+pi install git:github.com/postdare/pi-missions            # 跟随默认分支
+pi install git:github.com/postdare/pi-missions@<tag|commit>  # 钉死某个版本
+pi install https://github.com/postdare/pi-missions        # 裸 URL 同样可用
+pi install git:git@github.com:postdare/pi-missions        # SSH(用你已配置的 key)
 ```
 
-Node ≥ 22.6(core 单测用 `node --test` + type stripping)。
+默认写进用户设置 `~/.pi/agent/settings.json`,克隆到
+`~/.pi/agent/git/github.com/postdare/pi-missions`。
+
+**装到项目里**(写 `.pi/settings.json`,可随仓库提交;队友信任该项目后,pi 启动时自动补装):
+
+```bash
+pi install -l git:github.com/postdare/pi-missions
+```
+
+**只试一次,不落设置**(装到临时目录,仅本次运行有效):
+
+```bash
+pi -e git:github.com/postdare/pi-missions
+```
+
+### 本地安装
+
+```bash
+pi install /absolute/path/to/pi-missions
+pi install ./pi-missions
+```
+
+### 管理
+
+```bash
+pi list                                                   # 已安装的包
+pi update --extensions                                    # 更新已装包
+pi update git:github.com/postdare/pi-missions             # 只更这一个
+pi remove git:github.com/postdare/pi-missions
+```
+
+带 `@ref` 的安装是**钉死**的:`pi update` 不会把它移到新版本,要换版本重新
+`pi install git:github.com/postdare/pi-missions@<新 ref>`。
+
+### 前置与注意
+
+- **Node ≥ 22.6**(core 单测用 `node --test` + type stripping,扩展本身直接跑 `.ts`)。
+- **不需要额外依赖**:运行时只用到 pi 自带的 `@earendil-works/pi-coding-agent`、
+  `@earendil-works/pi-tui`、`typebox`,它们按 pi 的约定声明为 `peerDependencies`。
+  git 安装会跑 `npm install --omit=dev`,不会拉进多余的东西。
+- ⚠️ **不要 `pi install npm:pi-missions`。** npm 上的 `pi-missions` 是另一个同名的
+  无关项目(`itisbryan/pi-missions`),不是本仓库。本项目只从 git 源安装。
+- ⚠️ pi 包以**完整系统权限**运行(扩展执行任意代码)。装任何第三方包之前,
+  包括这个,先读一遍源码。
 
 ## 用法
 
