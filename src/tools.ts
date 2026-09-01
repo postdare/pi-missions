@@ -64,19 +64,16 @@ export function registerMissionTools(pi: any, getRuntime: GetRuntime): void {
 		description:
 			"[DO 相位] 声明当前任务已提交,触发系统判定(不等于通过)。" +
 			"提交后写工具会被冻结,不要继续改代码。",
-		parameters: Type.Object({
-			verifyCommand: Type.Optional(
-				Type.String({ description: "quick 档必填:用于判定的验证命令(如 'npm test')。standard/complex 档忽略,判定走 verify.sh。" }),
-			),
-		}),
-		async execute(_id: string, params: any, _signal: any, _onUpdate: any, ctx: any) {
+		// 无参数:判定依据(AC / quick 的验证命令)在进入 DO 之前就已冻结,
+		// 提交时不接受任何"补一条标准"的入口 —— 那等于让被判定方事后选裁判(I2/I3)。
+		parameters: Type.Object({}),
+		async execute(_id: string, _params: any, _signal: any, _onUpdate: any, ctx: any) {
 			const rt = getRuntime(ctx);
 			const a = rt.active;
 			if (!a) return toolError("无活动 mission");
-			if (a.state.tier === "quick" && !a.quickVerifyCommand) {
-				const cmd = typeof params.verifyCommand === "string" ? params.verifyCommand.trim() : "";
-				if (!cmd) return toolError("quick 档必须提供 verifyCommand(判定的唯一依据)");
-				a.quickVerifyCommand = cmd;
+			if (a.state.tier === "quick" && !a.quickVerifyCommand?.trim()) {
+				// 正常不可达:无验证命令的 quick 输入在 startQuick 就被升档挡住了
+				return toolError("quick 档缺少验证命令(判定的唯一依据),无法判定。请 /mission abort 后带 --verify 重来");
 			}
 			const r = await rt.applyEvent({ type: "SUBMIT", at: Date.now() }, ctx);
 			if (r.error) return toolError(r.error);

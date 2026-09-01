@@ -14,7 +14,7 @@ import { execFile } from "node:child_process";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import { Runtime } from "../src/runtime.ts";
+import { Runtime, renderStateCard } from "../src/runtime.ts";
 
 function execReal(cmd: string, args: string[], opts?: { cwd?: string; timeout?: number }) {
 	return new Promise<{ code: number; stdout: string; stderr: string; killed: boolean }>((resolve) => {
@@ -238,4 +238,62 @@ test("quick 档:内存态不落盘,--verify 命令驱动判定", async () => {
 	await rt.runCheck(ctx);
 	assert.equal(rt.active!.state.phase, "done");
 	assert.ok(!fs.existsSync(path.join(tmp, "missions")), "quick 全程零落盘");
+});
+
+test("quick 带 --verify:命令进 DO 前冻结,走完判定闭环", async () => {
+	const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "pi-missions-smoke-"));
+	const pi = mockPi();
+	const ctx = mockCtx(tmp);
+	const rt = new Runtime(pi, tmp);
+
+	const r = await rt.startQuick(ctx, "create hello.txt", "test -f hello.txt");
+	assert.ok("id" in r, JSON.stringify(r));
+	assert.equal(r.tier, "quick");
+	assert.equal(rt.active!.state.tier, "quick");
+	assert.equal(rt.active!.state.phase, "do");
+	assert.equal(rt.active!.quickVerifyCommand, "test -f hello.txt");
+	assert.equal(rt.active!.inMemory, true, "quick 不落盘");
+
+	// 命令不满足 → fail;满足 → pass → done
+	await rt.applyEvent({ type: "SUBMIT", at: Date.now() }, ctx);
+	await rt.runCheck(ctx);
+	assert.equal(rt.active!.state.phase, "act");
+
+	await rt.applyEvent({ type: "ADJUST_DONE", at: Date.now() }, ctx);
+	fs.writeFileSync(path.join(tmp, "hello.txt"), "hello\n");
+	await rt.applyEvent({ type: "SUBMIT", at: Date.now() }, ctx);
+	await rt.runCheck(ctx);
+	assert.equal(rt.active!.state.phase, "done");
+});
+
+test("quick 无 --verify:不进 DO,自动升 standard 停在 PLAN", async () => {
+	const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "pi-missions-smoke-"));
+	const pi = mockPi();
+	const ctx = mockCtx(tmp);
+	const rt = new Runtime(pi, tmp);
+
+	const r = await rt.startQuick(ctx, "让登录快一点");
+	assert.ok("id" in r, JSON.stringify(r));
+	assert.equal(r.tier, "standard", "没有判定依据就不该有快车道");
+	assert.equal(rt.active!.state.tier, "standard");
+	assert.equal(rt.active!.state.phase, "plan", "必须先写出可执行的 AC");
+	assert.equal(rt.active!.quickVerifyCommand, undefined);
+	assert.equal(rt.active!.inMemory, false, "升档后走正常落盘路径");
+	assert.ok(ctx.notifications.some((m) => m.includes("--verify")), "要告诉人为什么升档了");
+
+	// PLAN 相位:写工具被工具集收走,AC 尚未冻结
+	assert.ok(pi.calls.activeTools.at(-1)!.includes("mission_write_plan"));
+	assert.ok(!pi.calls.activeTools.at(-1)!.includes("write"));
+});
+
+test("PLAN 相位的 State Card 不能把'尚未冻结'说成 quick 档口径", async () => {
+	const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "pi-missions-smoke-"));
+	const pi = mockPi();
+	const ctx = mockCtx(tmp);
+	const rt = new Runtime(pi, tmp);
+	await rt.startNew(ctx, "x", "standard");
+
+	const card = renderStateCard(rt.active!.plan, rt.active!.state, "missions");
+	assert.ok(!card.includes("quick 档"), "standard mission 的卡片不该出现 quick 档口径");
+	assert.ok(card.includes("尚未冻结"));
 });

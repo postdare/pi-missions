@@ -46,7 +46,7 @@ Node ≥ 22.6(core 单测用 `node --test` + type stripping)。
 |---|---|
 | `/missions` | 主面板:顶部新建,下方历史(从 `missions/state/*/STATE.json` 扫描重建) |
 | `/mission new <目标> [--tier=standard\|complex]` | 新建并进入 PLAN 相位 |
-| `/mission quick <任务> [--verify "<命令>"]` | 单任务快捷档,不落盘 |
+| `/mission quick <任务> --verify "<命令>"` | 单任务快捷档,不落盘。**`--verify` 是判定的唯一依据,必须给**;不给则自动升 standard 走 PLAN |
 | `/mission status` | 当前任务详情(页签浮层:概览/任务/验收/日志) |
 | `/mission tier <quick\|standard\|complex\|off>` | 设定/清除待用档位:编辑器边框随档位换色,输入框预填命令 |
 | `/mission next` | 换脑:创建干净会话继续(唯一解除 pendingHandoff 的出口) |
@@ -58,7 +58,7 @@ Node ≥ 22.6(core 单测用 `node --test` + type stripping)。
 | `/mission abort` | 终止当前任务(halted) |
 | `/mission models` | 角色模型映射 + 按角色分账的花费 |
 
-LLM 可调用的工具只有三个:`mission_write_plan`(PLAN)、`mission_submit`(DO)、
+LLM 可调用的工具只有三个:`mission_write_plan`(PLAN)、`mission_submit`(DO,无参数)、
 `mission_escalate`(ACT)。状态推进由 L0 驱动。
 
 ## 仓库布局(I6 · 仓库即规范)
@@ -85,14 +85,18 @@ LLM 可调用的工具只有三个:`mission_write_plan`(PLAN)、`mission_submit`
 
 | | quick | standard | complex |
 |---|---|---|---|
-| 入口 | `/mission quick` | `/mission new` | `/mission new --tier=complex` |
+| 入口 | `/mission quick --verify "<命令>"` | `/mission new` | `/mission new --tier=complex` |
 | MISSION.md | 不落盘(升档时补落盘) | 落盘,任务级 | 落盘,里程碑分文件 |
-| 验证 | hard(--verify 或 submit 时给命令) | hard + 子进程 semi | hard + semi + 里程碑回归 |
+| 验证 | hard(`--verify` 的命令,进 DO 前冻结) | hard + 子进程 semi | hard + semi + 里程碑回归 |
 | 换脑 | 不换 | 水位/升级触发 | 每任务换 + 升级换 |
 | 熔断阈值 | 2 | 3 | 3 |
 
 **升档自动,降档手动。** 判据机械可测:attempts≥2、改动文件 >5、触及公开 API
 (`publicApiGlobs` 配置)、2 次改方案(L2)。
+
+**入口守卫(I2/I3):** `/mission quick` 不带 `--verify` 时不进 DO —— 判定依据必须先于执行
+冻结,否则等于让执行者干完活再自己挑裁判。这种输入自动升 standard,由 PLAN 相位
+写出可执行的 AC。判定见 `core/tier.ts` 的 `evaluateAdmission()`。
 
 ## 证据分级(I3)
 

@@ -77,26 +77,21 @@ export function registerCommands(pi: any, getRuntime: GetRuntime): void {
 					const r = await rt.startNew(ctx, rest, tier);
 					if ("error" in r) return notifyUsage(ctx, r.error);
 					clearTierIndicator(ctx); // 档位已被消费,状态条接管
-					pi.sendUserMessage(
-						`[pi-missions] 新 Mission 已创建(${r.id},${tier} 档),进入 PLAN 相位。` +
-							`阅读 ${rt.config.missionsDir}/README.md 与 ${rt.config.missionsDir}/phases/plan.md,` +
-							"分析代码库,设计可执行的验收标准与任务分解,然后调用 mission_write_plan 原子提交。目标:" + rest,
-						{ deliverAs: "followUp" },
-					);
+					pi.sendUserMessage(planKickoff(rt.config.missionsDir, r.id, tier, rest), { deliverAs: "followUp" });
 					return;
 				}
 
 				case "quick": {
-					if (!rest) return notifyUsage(ctx, "用法:/mission quick <任务> [--verify \"<验证命令>\"]");
+					if (!rest) return notifyUsage(ctx, "用法:/mission quick <任务> --verify \"<验证命令>\"");
 					const r = await rt.startQuick(ctx, rest, flags.verify);
 					if ("error" in r) return notifyUsage(ctx, r.error);
 					rt.pendingTier = null; // quick 不消费待选档位,直接清掉
 					clearTierIndicator(ctx);
+					// 无 --verify 时 startQuick 会升档 standard(判定依据必须先于执行冻结),此处按落点分流
 					pi.sendUserMessage(
-						`[pi-missions] quick 任务(${r.id}):${rest}\n` +
-							(flags.verify
-								? `验证命令:${flags.verify}。完成后调用 mission_submit。`
-								: "完成后调用 mission_submit 并提供 verifyCommand(判定依据)。"),
+						r.tier === "quick"
+							? `[pi-missions] quick 任务(${r.id}):${rest}\n验证命令:${flags.verify}。完成后调用 mission_submit。`
+							: planKickoff(rt.config.missionsDir, r.id, r.tier, rest),
 						{ deliverAs: "followUp" },
 					);
 					return;
@@ -237,6 +232,15 @@ export function registerCommands(pi: any, getRuntime: GetRuntime): void {
 function fmtRole(c?: { provider?: string; model?: string; thinking?: string }): string {
 	if (!c) return "(默认:跟随会话模型)";
 	return `${c.provider ? `${c.provider}/` : ""}${c.model ?? "?"}${c.thinking ? ` thinking=${c.thinking}` : ""}`;
+}
+
+/** PLAN 相位的开场白(/mission new 与 quick 升档后共用) */
+function planKickoff(dirName: string, id: string, tier: string, goal: string): string {
+	return (
+		`[pi-missions] 新 Mission 已创建(${id},${tier} 档),进入 PLAN 相位。` +
+		`阅读 ${dirName}/README.md 与 ${dirName}/phases/plan.md,` +
+		`分析代码库,设计可执行的验收标准与任务分解,然后调用 mission_write_plan 原子提交。目标:${goal}`
+	);
 }
 
 function notifyUsage(ctx: Ctx, msg: string): void {

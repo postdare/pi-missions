@@ -12,7 +12,7 @@ import { truncateToWidth } from "@earendil-works/pi-tui";
 import type { Effect, MissionEvent, MissionState, Phase, Role, Tier, TransitionResult, Evidence } from "./core/types.ts";
 import { initialState, transition, ROLE_OF } from "./core/machine.ts";
 import { judge } from "./core/verdict.ts";
-import { evaluatePromotion } from "./core/tier.ts";
+import { evaluateAdmission, evaluatePromotion } from "./core/tier.ts";
 import type { MissionPlan } from "./store/mission.ts";
 import {
 	allTasks,
@@ -64,7 +64,7 @@ export interface ActiveMission {
 	inMemory: boolean;
 	/** 目标目录是 git 仓库(降级模式=false 时 AC 冻结有 git 审计链) */
 	git: boolean;
-	/** quick 档:/mission quick --verify 给的默认验证命令 */
+	/** quick 档判定的唯一依据。必须在进 DO 前定下(--verify),不接受事后补 */
 	quickVerifyCommand?: string;
 }
 
@@ -132,9 +132,29 @@ export class Runtime {
 		return { id };
 	}
 
-	/** /mission quick:单任务,不落盘,直接进 DO(Q18) */
-	async startQuick(ctx: any, task: string, verifyCommand?: string): Promise<{ id: string } | { error: string }> {
+	/**
+	 * /mission quick:单任务,不落盘,直接进 DO(Q18)。
+	 *
+	 * 准入由 core 判定(evaluateAdmission):没有验证命令就没有裁判,
+	 * 这种输入不进快车道,自动升 standard 去 PLAN 相位把标准写清楚。
+	 */
+	async startQuick(
+		ctx: any,
+		task: string,
+		verifyCommand?: string,
+	): Promise<{ id: string; tier: Tier } | { error: string }> {
 		if (this.busy()) return { error: "已有进行中的 mission,先 /mission abort" };
+
+		const cmd = verifyCommand?.trim();
+		const admission = evaluateAdmission({ tier: "quick", hasVerifyCommand: !!cmd });
+		if (!admission.ok) {
+			const promoted = admission.promoteTo === "complex" ? "complex" : "standard";
+			const r = await this.startNew(ctx, task, promoted);
+			if ("error" in r) return r;
+			ctx.ui.notify(admission.reason, "warning");
+			return { id: r.id, tier: promoted };
+		}
+
 		const id = `quick-${Date.now().toString(36)}`;
 		const plan: MissionPlan = {
 			missionId: id,
@@ -150,12 +170,12 @@ export class Runtime {
 			state: initialState({ missionId: id, tier: "quick", taskOrder: ["T1"] }),
 			inMemory: true,
 			git: await isGitRepo(this.exec, this.cwd),
-			quickVerifyCommand: verifyCommand,
+			quickVerifyCommand: cmd,
 		};
 		this.savedProfile = saveProfile(this.pi, ctx);
 		const r = await this.applyEvent({ type: "PLAN_FROZEN", at: Date.now(), taskOrder: ["T1"] }, ctx);
 		if (r.error) return { error: r.error };
-		return { id };
+		return { id, tier: "quick" };
 	}
 
 	/** /mission resume:从仓库重附着到当前会话(Q15) */
@@ -393,7 +413,7 @@ export class Runtime {
 		let hardResults: Array<{ acId: string; pass: boolean; outputTail: string }> = [];
 
 		if (a.state.tier === "quick") {
-			// quick 档:验证命令来自 --verify 或 mission_submit 的参数(见 README 设计决议)
+			// quick 档:验证命令在 startQuick 时就已冻结(无命令的输入会被升档挡在 DO 之外)
 			const cmd = a.quickVerifyCommand;
 			if (cmd) {
 				requiredAcIds = ["quick"];
@@ -740,7 +760,9 @@ export function renderStateCard(plan: MissionPlan, state: MissionState, dirName 
 	const acs =
 		plan.acceptanceCriteria.length > 0
 			? plan.acceptanceCriteria.map((c) => `  - ${c.id}: ./${dirName}/scripts/verify.sh ${c.verify} 退出码 0 —— ${c.text}`).join("\n")
-			: "  (quick 档:验证命令随 mission_submit 提交)";
+			: plan.tier === "quick"
+				? "  (quick 档:判定依据是 --verify 冻结的那条命令,提交时不可更改)"
+				: "  (尚未冻结:本相位的产出就是可执行的 AC,由 mission_write_plan 提交)";
 	const lines = [
 		`[MISSION] ${state.missionId} · ${state.tier} · phase=${state.phase}` +
 			(state.currentTask ? ` · task=${state.currentTask} · attempt=${t?.attempts ?? 0}` : ""),

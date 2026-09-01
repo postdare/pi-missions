@@ -156,9 +156,9 @@ transition(state: MissionState, event: MissionEvent): { state, effects, error? }
 
 | | quick | standard | complex |
 |---|---|---|---|
-| 入口 | `/mission quick` | `/mission new` | `/mission new --tier=complex` |
+| 入口 | `/mission quick --verify "<命令>"` | `/mission new` | `/mission new --tier=complex` |
 | 落盘 | 否(`inMemory: true`) | 是 | 是,里程碑分文件 |
-| 判定依据 | 一条裸命令 `quickVerifyCommand` | verify.sh 分支 + 子进程 Verifier | 同左 + 里程碑回归 |
+| 判定依据 | 一条裸命令 `quickVerifyCommand`,**进 DO 前冻结** | verify.sh 分支 + 子进程 Verifier | 同左 + 里程碑回归 |
 | 熔断阈值 | 2 | 3 | 3 |
 | 尝试硬上限 | 4 | 9 | 12 |
 | 任务切换换脑 | 否 | 否 | **是** |
@@ -168,6 +168,17 @@ transition(state: MissionState, event: MissionEvent): { state, effects, error? }
 升档判据在 `src/core/tier.ts:39` `evaluatePromotion()`,全部机械可测:
 触及公开 API / 改动 > 5 文件 / quick 档第 2 次尝试 / standard 档 2 次 L2。
 **刻意不让 LLM 自评"这任务复杂吗"**(I7)。
+
+### 入口守卫(准入判定)
+
+`evaluateAdmission()`(`src/core/tier.ts:80`)决定一个 mission 能否直接进 DO:
+
+- quick 档**必须**在进 DO 前拿到一条验证命令(`/mission quick --verify "<命令>"`)
+- 拿不到 → 不进 DO,自动升 standard,由 PLAN 相位写出可执行的 AC
+
+理由是 I2/I3:判定依据必须先于执行冻结。允许执行者干完活再补一条判定命令,
+等于让被判定方事后挑裁判。`mission_submit` 因此**不接受任何参数**——
+提交路径上没有任何"补一条标准"的入口。
 
 ### 4.3 角色(Role)
 
@@ -371,7 +382,7 @@ README 标题里的"双层循环":
 | 工具 | 相位 | 作用 |
 |---|---|---|
 | `mission_write_plan` | PLAN | 原子提交 AC + 任务分解 + verify.sh 内容 |
-| `mission_submit` | DO | 声明已提交,触发判定(**不等于通过**) |
+| `mission_submit` | DO | 声明已提交,触发判定(**不等于通过**)。无参数——判定依据早已冻结 |
 | `mission_escalate` | ACT | 主动升级 L2/L3 |
 | `mission_verdict` | — | 只存在于 Verifier 子进程,逐条 AC 提交结论 |
 
@@ -469,15 +480,18 @@ followUp 发 DO brief 或 ACT brief,循环继续
 `ac1) exit 0 ;;` 能通过校验。也就是说:AC 必须可执行这条约束挡住了"用户体验良好"
 这类不可判定的 AC,但挡不住空壳 target。
 
-### 8.2 quick 档旁路了全部 AC 约束
+### 8.2 quick 档仍然没有 AC,只有一条命令
 
-`startQuick()`(`src/runtime.ts:136`)直接构造 `acceptanceCriteria: []`、
-`tasks: [{ id: "T1", verify: [] }]`,**不走 `validatePlan()`**,立刻发 `PLAN_FROZEN`
-进 DO。判定依据是 `quickVerifyCommand` —— `--verify` 给的,或 `mission_submit` 时
-LLM 自己填的裸命令,acId 固定为 `"quick"`。
+quick 档不落盘、不走 `validatePlan()`,`acceptanceCriteria` 恒为空,
+判定依据是单条 `quickVerifyCommand`,acId 固定为 `"quick"`,也没有子进程 Verifier
+交叉核对。**这一档的判定强度天然低于 standard**,是设计取舍(Q18),不是缺陷。
 
-后果:AC 相关的机械约束在这一档全部不生效;完全不给命令时采不到证据,
-`judge()` 第 0 条判 inconclusive,连 3 次后停机(不会误判通过,但会空烧三轮)。
+已经收口的部分:那条命令现在必须由 `--verify` 在进 DO 前给出并冻结
+(`evaluateAdmission()`),`mission_submit` 不再接受任何参数,执行者无法事后
+补一条判定标准。给不出命令的输入会被升档到 standard,走完整的 PLAN + AC 流程。
+
+仍然成立的限制:那条命令本身的判别力没有任何机械校验 —— `--verify "true"`
+能过。这与 8.1 是同一个洞的两个入口。
 
 ### 8.3 签名归一化粒度未经真实数据校准
 

@@ -217,7 +217,9 @@ export function taskLines(plan: MissionPlan, state: MissionState): string[] {
 export function acLines(plan: MissionPlan, evidence: EvidenceSummary, dirName: string): string[] {
 	const lines: string[] = [];
 	if (plan.acceptanceCriteria.length === 0) {
-		return ["(quick 档或无 AC:验证命令随提交提供)"];
+		return plan.tier === "quick"
+			? ["(quick 档:无 AC,判定依据是 --verify 冻结的验证命令)"]
+			: ["(尚未冻结 AC:PLAN 相位调用 mission_write_plan 后显示)"];
 	}
 	lines.push(`冻结验收标准 · 执行入口 ./${dirName}/scripts/verify.sh <分支>`, "");
 	for (const [i, ac] of plan.acceptanceCriteria.entries()) {
