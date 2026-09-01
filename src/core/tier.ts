@@ -61,3 +61,38 @@ export function evaluatePromotion(s: PromotionSignals): Promotion | null {
 
 	return null;
 }
+
+// ─────────────────────────── 进入 DO 的准入判定 ───────────────────────────
+
+export interface AdmissionSignals {
+	tier: Tier;
+	/** quick 档:是否已经拿到一条冻结的验证命令(--verify 给的) */
+	hasVerifyCommand: boolean;
+}
+
+export type Admission =
+	| { ok: true }
+	| { ok: false; promoteTo: Tier; reason: string };
+
+/**
+ * 纯函数:能否直接进入 DO,还是必须先升档去 PLAN。
+ *
+ * quick 档不落盘、无 AC、无子进程 Verifier,判定的唯一依据就是那条验证命令。
+ * 它必须在动手之前就定下来 —— 让执行者干完活再补一条,等于判定标准由被判定方
+ * 事后选定,I2(执行期只读)与 I3(证据来自执行者之外)同时失守。
+ *
+ * 写不出判定命令 = 任务没想清楚。这种输入交给 standard 档的 PLAN 相位去拆,
+ * 而不是放进一个没有裁判的快车道。
+ *
+ * standard/complex 的准入由 validatePlan + PLAN_FROZEN 把关,这里恒放行。
+ */
+export function evaluateAdmission(s: AdmissionSignals): Admission {
+	if (s.tier === "quick" && !s.hasVerifyCommand) {
+		return {
+			ok: false,
+			promoteTo: "standard",
+			reason: "quick 档需要一条验证命令作为判定依据(--verify);没有就说明任务还没想清楚,升档 standard 先做 PLAN",
+		};
+	}
+	return { ok: true };
+}

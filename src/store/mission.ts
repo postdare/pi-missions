@@ -8,19 +8,31 @@
  */
 
 import type { Tier } from "../core/types.ts";
+import type { Baseline } from "../core/baseline.ts";
+import type { TaskKind } from "../core/spike.ts";
 
 export interface AcceptanceCriterion {
 	id: string;
 	text: string;
 	/** verify.sh 的分支名 —— AC 的可执行入口,不写裸命令(I9) */
 	verify: string;
+	/**
+	 * 冻结时该分支应有的状态。缺省 "red"。
+	 * red = 现在必须失败(红→绿才是证据);green = 回归项,现在必须已经通过。
+	 * 校验见 core/baseline.ts。
+	 */
+	baseline?: Baseline;
 }
 
 export interface PlanTask {
 	id: string;
 	title: string;
-	/** 本任务必须通过的 verify.sh 分支名列表 */
+	/** 本任务必须通过的 verify.sh 分支名列表(spike 任务必须为空) */
 	verify: string[];
+	/** impl(缺省)= 写代码;spike = 打探针出结论,见 core/spike.ts */
+	kind?: TaskKind;
+	/** spike 必填:这根探针要回答的那一个问题。判定就是核对结论有没有回答它 */
+	question?: string;
 }
 
 export interface PlanMilestone {
@@ -29,10 +41,21 @@ export interface PlanMilestone {
 	tasks: PlanTask[];
 }
 
+/** FRAME 相位的产出:锐化后的目标 + 明确的边界。PLAN 据此设计 AC */
+export interface Framing {
+	/** 已确认的约束/前提(来自人工回答或代码事实) */
+	constraints: string[];
+	/** 明确不做的事 —— 边界写不出来,AC 就会漂 */
+	nonGoals: string[];
+	at: number;
+}
+
 export interface MissionPlan {
 	missionId: string;
 	tier: Tier;
 	goal: string;
+	/** FRAME 的产出;quick 档与老 mission 没有 */
+	framing?: Framing;
 	acceptanceCriteria: AcceptanceCriterion[];
 	milestones: PlanMilestone[];
 	/** verify.sh 完整内容,与 MISSION.md 原子冻结(Q6) */
@@ -44,6 +67,12 @@ const FENCE_RE = /```mission\s*\n([\s\S]*?)\n```/;
 
 export function taskOrder(plan: MissionPlan): string[] {
 	return plan.milestones.flatMap((m) => m.tasks.map((t) => t.id));
+}
+
+export function spikeTaskIds(plan: MissionPlan): string[] {
+	return allTasks(plan)
+		.filter((t) => t.kind === "spike")
+		.map((t) => t.id);
 }
 
 export function allTasks(plan: MissionPlan): PlanTask[] {
@@ -83,6 +112,18 @@ export function validatePlan(plan: MissionPlan): string[] {
 	for (const t of allTasks(plan)) {
 		if (taskIds.has(t.id)) errors.push(`任务 id 重复:${t.id}`);
 		taskIds.add(t.id);
+
+		// spike 走另一套判定(结论文件 + 独立验证者核对是否回答了问题),
+		// 它没有 verify 分支 —— 探针的产出是结论,不是绿色
+		if (t.kind === "spike") {
+			if (!t.question?.trim()) errors.push(`${t.id} 是 spike,必须写明它要回答的那一个问题(question)`);
+			if (t.verify.length > 0) {
+				errors.push(`${t.id} 是 spike,不能有 verify 分支(它的产出是书面结论,不是退出码)`);
+			}
+			continue;
+		}
+
+		if (t.question?.trim()) errors.push(`${t.id} 不是 spike,不该带 question`);
 		if (t.verify.length === 0) errors.push(`${t.id} 没有 verify 分支(无法判定的事不该进入 DO)`);
 		for (const v of t.verify) {
 			if (!verifyNames.has(v) && !scriptHasBranch(plan.verifyScript, v)) {
@@ -118,9 +159,16 @@ export function renderMissionMd(plan: MissionPlan): string {
 		"",
 	];
 	for (const ac of plan.acceptanceCriteria) {
-		lines.push(`- ${ac.id} (verify: \`${ac.verify}\`): ${ac.text}`);
+		lines.push(`- ${ac.id} (verify: \`${ac.verify}\`, baseline: ${ac.baseline ?? "red"}): ${ac.text}`);
 	}
 	lines.push("");
+
+	if (plan.framing) {
+		lines.push("## Frame", "", `> 问题定义(FRAME 相位产出)`, "");
+		for (const c of plan.framing.constraints) lines.push(`- 约束:${c}`);
+		for (const n of plan.framing.nonGoals) lines.push(`- 不做:${n}`);
+		lines.push("");
+	}
 
 	if (plan.tier === "complex") {
 		lines.push("## Milestones", "");
@@ -132,7 +180,7 @@ export function renderMissionMd(plan: MissionPlan): string {
 		lines.push("## Tasks", "");
 		for (const ms of plan.milestones) {
 			for (const t of ms.tasks) {
-				lines.push(`- [ ] ${t.id} ${t.title} (verify: ${t.verify.map((v) => `\`${v}\``).join(", ")})`);
+				lines.push(`- [ ] ${t.id} ${describeTask(t)}`);
 			}
 		}
 		lines.push("");
@@ -145,10 +193,17 @@ export function renderMissionMd(plan: MissionPlan): string {
 export function renderMilestoneMd(plan: MissionPlan, ms: PlanMilestone): string {
 	const lines = [`# ${ms.id}: ${ms.title}`, "", `> Mission: ${plan.missionId} · AC 见 MISSION.md`, "", "## Tasks", ""];
 	for (const t of ms.tasks) {
-		lines.push(`- [ ] ${t.id} ${t.title} (verify: ${t.verify.map((v) => `\`${v}\``).join(", ")})`);
+		lines.push(`- [ ] ${t.id} ${describeTask(t)}`);
 	}
 	lines.push("");
 	return lines.join("\n");
+}
+
+/** 任务在 MISSION.md 里的一行描述 */
+function describeTask(t: PlanTask): string {
+	return t.kind === "spike"
+		? `${t.title} **[spike]** —— 要回答:${t.question ?? ""}(产出书面结论,完成后重写计划)`
+		: `${t.title} (verify: ${t.verify.map((v) => `\`${v}\``).join(", ")})`;
 }
 
 /** 只解析 fence;没有 fence 或 JSON 非法则返回 null(绝不回读散文) */
@@ -161,6 +216,7 @@ export function parseMissionMd(content: string): MissionPlan | null {
 			missionId: payload.missionId,
 			tier: payload.tier,
 			goal: payload.goal,
+			framing: payload.framing,
 			acceptanceCriteria: payload.acceptanceCriteria,
 			milestones: payload.milestones,
 			verifyScript: payload.verifyScript,
@@ -176,6 +232,7 @@ function fencePayload(plan: MissionPlan) {
 		missionId: plan.missionId,
 		tier: plan.tier,
 		goal: plan.goal,
+		framing: plan.framing,
 		acceptanceCriteria: plan.acceptanceCriteria,
 		milestones: plan.milestones,
 		verifyScript: plan.verifyScript,

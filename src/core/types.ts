@@ -8,11 +8,16 @@
 
 // ─────────────────────────────── 基础枚举 ───────────────────────────────
 
-export type Phase = "plan" | "do" | "check" | "act" | "done" | "halted";
+import type { TaskKind } from "./spike.ts";
+
+export type Phase = "frame" | "plan" | "do" | "check" | "act" | "done" | "halted";
 
 export type Tier = "quick" | "standard" | "complex";
 
-/** 升级阶梯:1=改实现 2=改方案 3=改问题定义 */
+/**
+ * 升级阶梯:1=改实现 2=改方案 3=改问题定义。
+ * 每一级对应相位图上的一条反向边:L1 回 DO、L2 回 PLAN、L3 回 FRAME。
+ */
 export type EscalationLevel = 1 | 2 | 3;
 
 export type Role = "planner" | "executor" | "verifier" | "escalator";
@@ -57,6 +62,8 @@ export type TaskStatus = "pending" | "running" | "done" | "blocked";
 
 export interface TaskState {
 	id: string;
+	/** impl = 写代码;spike = 打探针出结论(见 core/spike.ts)。缺省 impl */
+	kind?: TaskKind;
 	status: TaskStatus;
 	/** 已进行的 do→check 周期数,从 1 开始计 */
 	attempts: number;
@@ -109,6 +116,14 @@ export interface MissionState {
 	pendingHandoff: string | null;
 	/** taskId → 执行该任务的 session 文件路径(换脑后更新) */
 	sessionMap: Record<string, string>;
+	/** FRAME 相位已用掉的提问轮数(预算见 core/frame.ts)。老 STATE.json 缺此字段按 0 算 */
+	frameAsks?: number;
+	/**
+	 * 已经跑完的探针数(不论成败)。
+	 * 不能靠扫 tasks 得知:重写计划时 PLAN_FROZEN 只保留新 taskOrder 里的任务,
+	 * 跑过的 spike 会从 tasks 里消失 —— 额度必须自己记账。
+	 */
+	spikesRun?: number;
 	/** 按角色分账的累计成本(美元),来自 message_end 的 usage.cost.total */
 	cost: Partial<Record<Role, number>>;
 	metrics: MissionMetrics;
@@ -118,7 +133,11 @@ export interface MissionState {
 // ─────────────────────────────── 状态机 I/O ───────────────────────────────
 
 export type MissionEvent =
-	| { type: "PLAN_FROZEN"; at: number; taskOrder?: string[] }
+	/** FRAME 用掉一轮提问(预算判定在 core/frame.ts,机器只记账) */
+	| { type: "FRAME_ASKED"; at: number }
+	/** 问题定义完成,进入 PLAN。goal 由调用方写进 plan,机器只管相位 */
+	| { type: "FRAME_DONE"; at: number }
+	| { type: "PLAN_FROZEN"; at: number; taskOrder?: string[]; spikes?: string[] }
 	| { type: "SUBMIT"; at: number }
 	| { type: "VERDICT"; at: number; verdict: Verdict }
 	/** ACT 相位完成调整,回到 DO 重试。act 相位一轮对话结束后由 tick 发出 */

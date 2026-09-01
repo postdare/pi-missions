@@ -16,6 +16,16 @@ import { readLog } from "../store/log.ts";
 import { scanMissions, type ScannedMission } from "../store/evidence.ts";
 import { statePaths, type RepoLayout } from "../store/paths.ts";
 import { bar, costTotal, fmtDuration, truncate } from "./dashboard.ts";
+import { cycleThinking, ROLE_ORDER, type ModelsConfig } from "../roles/models.ts";
+import type { Role } from "../core/types.ts";
+import {
+	filterModels,
+	modelRows,
+	modelsFooter,
+	pickerRows,
+	type ModelOption,
+	type ModelsPageData,
+} from "./models-page.ts";
 
 interface Theme {
 	fg(color: string, text: string): string;
@@ -24,6 +34,7 @@ interface Theme {
 }
 
 const PHASE_STYLE: Record<string, { icon: string; color: string; label: string }> = {
+	frame: { icon: "◇", color: "accent", label: "定义" },
 	plan: { icon: "◌", color: "accent", label: "规划" },
 	do: { icon: "●", color: "accent", label: "执行" },
 	check: { icon: "◍", color: "accent", label: "判定" },
@@ -139,6 +150,25 @@ export interface PanelCallbacks {
 	onResume: (missionId: string) => void;
 	/** n:用当前选中的档位开新任务(面板关闭,编辑器着色 + 预填命令) */
 	onSelectTier: (tier: TierId) => void;
+	/** 「模型」页的数据与写入(runtime 提供);缺省则该页显示为不可用 */
+	models?: ModelsBridge;
+}
+
+const PAGES = [
+	{ id: "missions", label: "任务" },
+	{ id: "models", label: "模型" },
+] as const;
+
+type PageId = (typeof PAGES)[number]["id"];
+
+/** 模型选择器的子模式状态 */
+type Picking = { role: Role; cursor: number; filter: string } | null;
+
+export interface ModelsBridge {
+	getData(): ModelsPageData;
+	/** selection=null 表示清除配置(回到跟随会话) */
+	setModel(role: Role, selection: { provider: string; id: string } | null): void;
+	setThinking(role: Role, thinking: string): void;
 }
 
 export async function openMissionsPanel(ctx: any, l: RepoLayout, cb: PanelCallbacks): Promise<void> {
@@ -163,6 +193,10 @@ export async function openMissionsPanel(ctx: any, l: RepoLayout, cb: PanelCallba
 			let detail = false;
 			let tierIdx = 1; // 默认 standard
 			let closed = false;
+			let page: PageId = "missions";
+			let roleIdx = 0;
+			/** 非 null = 正在为该角色挑模型(选择器子模式) */
+			let picking: Picking = null;
 
 			const refresh = () => {
 				try {
@@ -182,6 +216,31 @@ export async function openMissionsPanel(ctx: any, l: RepoLayout, cb: PanelCallba
 				done(undefined);
 			};
 
+			/** 「模型」页的内容行(含选择器子模式) */
+			const modelsPageLines = (t: Theme, width: number): string[] => {
+				if (!cb.models) return [t.fg("dim", "模型配置不可用(runtime 未接入)")];
+				const d = cb.models.getData();
+				const pick = picking;
+				if (pick) {
+					const list = filterModels(d.models, pick.filter);
+					const cur = d.config[pick.role];
+					const rows = pickerRows(list.slice(0, 12), Math.min(pick.cursor, Math.max(0, list.length - 1)), cur, t);
+					return [
+						`${t.bold(`为 ${pick.role} 选择模型`)}  ${t.fg("dim", `${list.length} 个可选`)}`,
+						`过滤:${pick.filter ? t.fg("accent", pick.filter) : t.fg("dim", "(输入字符过滤)")}`,
+						"",
+						...rows,
+						...(list.length > 12 ? [t.fg("dim", `  … 还有 ${list.length - 12} 个,继续输入过滤`)] : []),
+						"",
+						t.fg("dim", "  ⏎ 选中 · Esc 取消 · Backspace 删过滤字符"),
+					];
+				}
+				return [
+					...modelRows(d, roleIdx, t, visibleWidth),
+					...modelsFooter(d, t),
+				];
+			};
+
 			return {
 				render: (w: number) => {
 					const t = theme;
@@ -195,7 +254,11 @@ export async function openMissionsPanel(ctx: any, l: RepoLayout, cb: PanelCallba
 					};
 
 					const title = " Missions ";
-					const hint = " Tab 切换档位 · n 新建 · ↑↓ 选择 · ⏎ 恢复 · d 详情 · q 退出 ";
+					const hint = picking
+						? " ↑↓ 选择 · ⏎ 确认 · 输入过滤 · Esc 取消 "
+						: page === "models"
+							? " ←→ 切页 · ↑↓ 选角色 · ⏎ 选模型 · t thinking · x 清除 · q 退出 "
+							: " ←→ 切页 · Tab 切换档位 · n 新建 · ↑↓ 选择 · ⏎ 恢复 · d 详情 · q 退出 ";
 					const lines: string[] = [
 						t.bg(
 							"customMessageBg",
@@ -206,6 +269,21 @@ export async function openMissionsPanel(ctx: any, l: RepoLayout, cb: PanelCallba
 								border("─╮"),
 						),
 					];
+
+					lines.push(
+						row(
+							PAGES.map((p) => (p.id === page ? t.fg("accent", t.bold(`[${p.label}]`)) : t.fg("dim", ` ${p.label} `))).join(" "),
+						),
+					);
+					lines.push(row(t.fg("dim", "─".repeat(Math.min(56, inner - 8)))));
+
+					if (page === "models") {
+						for (const line of modelsPageLines(t, inner - 4)) lines.push(row(line));
+						lines.push(
+							t.bg("customMessageBg", border("╰") + border("─".repeat(Math.max(1, inner - 2))) + border("╯")),
+						);
+						return lines;
+					}
 
 					// 新建入口(三档说明,Tab/Shift+Tab 切换档位,高亮显示)
 					lines.push(row(`${t.fg("accent", "+")} ${t.bold("新建任务")}  ${t.fg("dim", "Tab 切换档位 · n 开始")}`));
@@ -239,7 +317,79 @@ export async function openMissionsPanel(ctx: any, l: RepoLayout, cb: PanelCallba
 				},
 				invalidate: () => {},
 				handleInput: (input: string) => {
+					// ── 模型选择器子模式 ──
+					const pick = picking;
+					if (pick) {
+						const list = cb.models ? filterModels(cb.models.getData().models, pick.filter) : [];
+						if (matchesKey(input, Key.escape)) {
+							picking = null;
+							return tui.requestRender();
+						}
+						if (matchesKey(input, Key.up)) {
+							picking = { ...pick, cursor: Math.max(0, pick.cursor - 1) };
+							return tui.requestRender();
+						}
+						if (matchesKey(input, Key.down)) {
+							picking = { ...pick, cursor: Math.min(Math.max(0, list.length - 1), pick.cursor + 1) };
+							return tui.requestRender();
+						}
+						if (matchesKey(input, Key.enter)) {
+							const m = list[pick.cursor];
+							if (m) cb.models?.setModel(pick.role, { provider: m.provider, id: m.id });
+							picking = null;
+							return tui.requestRender();
+						}
+						if (matchesKey(input, Key.backspace)) {
+							picking = { ...pick, filter: pick.filter.slice(0, -1), cursor: 0 };
+							return tui.requestRender();
+						}
+						// 可打印字符 → 过滤
+						if (input.length === 1 && input >= " " && input !== "\x7f") {
+							picking = { ...pick, filter: pick.filter + input, cursor: 0 };
+							return tui.requestRender();
+						}
+						return;
+					}
+
 					if (matchesKey(input, Key.escape) || matchesKey(input, "q")) return close();
+
+					// ── 页签切换(Tab 留给档位:那是既有肌肉记忆) ──
+					if (matchesKey(input, Key.right)) {
+						page = PAGES[(PAGES.findIndex((p) => p.id === page) + 1) % PAGES.length].id;
+						return tui.requestRender();
+					}
+					if (matchesKey(input, Key.left)) {
+						page = PAGES[(PAGES.findIndex((p) => p.id === page) - 1 + PAGES.length) % PAGES.length].id;
+						return tui.requestRender();
+					}
+
+					// ── 模型页 ──
+					if (page === "models") {
+						const role = ROLE_ORDER[roleIdx];
+						if (matchesKey(input, Key.up)) {
+							roleIdx = Math.max(0, roleIdx - 1);
+							return tui.requestRender();
+						}
+						if (matchesKey(input, Key.down)) {
+							roleIdx = Math.min(ROLE_ORDER.length - 1, roleIdx + 1);
+							return tui.requestRender();
+						}
+						if (matchesKey(input, Key.enter)) {
+							picking = { role, cursor: 0, filter: "" };
+							return tui.requestRender();
+						}
+						if (matchesKey(input, "t")) {
+							const cur = cb.models?.getData().config[role]?.thinking;
+							cb.models?.setThinking(role, cycleThinking(cur, role));
+							return tui.requestRender();
+						}
+						if (matchesKey(input, "x")) {
+							cb.models?.setModel(role, null);
+							return tui.requestRender();
+						}
+						return;
+					}
+
 					if (matchesKey(input, Key.up)) {
 						selected = Math.max(0, selected - 1);
 						return tui.requestRender();

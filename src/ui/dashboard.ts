@@ -50,6 +50,7 @@ export interface WidgetTheme {
 }
 
 const PHASE_COLOR: Record<string, string> = {
+	frame: "accent",
 	plan: "accent",
 	do: "accent",
 	check: "accent",
@@ -198,8 +199,13 @@ export function taskLines(plan: MissionPlan, state: MissionState): string[] {
 		for (const t of ms.tasks) {
 			const ts = state.tasks[t.id];
 			const icon = TASK_ICON[ts?.status ?? "pending"] ?? "○";
-			const verify = t.verify.length > 0 ? ` (verify: ${t.verify.join(", ")})` : "";
-			lines.push(`  ${icon} ${t.id} ${t.title} · attempt ${ts?.attempts ?? 0}${verify}`);
+			const suffix =
+				t.kind === "spike"
+					? " · spike(产出结论,完成后重写计划)"
+					: t.verify.length > 0
+						? ` (verify: ${t.verify.join(", ")})`
+						: "";
+			lines.push(`  ${icon} ${t.id} ${t.title} · attempt ${ts?.attempts ?? 0}${suffix}`);
 			if (ts?.lastFailureReason && ts.status !== "done") {
 				lines.push(`      上次失败: ${ts.lastFailureReason}`);
 			}
@@ -217,7 +223,9 @@ export function taskLines(plan: MissionPlan, state: MissionState): string[] {
 export function acLines(plan: MissionPlan, evidence: EvidenceSummary, dirName: string): string[] {
 	const lines: string[] = [];
 	if (plan.acceptanceCriteria.length === 0) {
-		return ["(quick 档或无 AC:验证命令随提交提供)"];
+		return plan.tier === "quick"
+			? ["(quick 档:无 AC,判定依据是 --verify 冻结的验证命令)"]
+			: ["(尚未冻结 AC:PLAN 相位调用 mission_write_plan 后显示)"];
 	}
 	lines.push(`冻结验收标准 · 执行入口 ./${dirName}/scripts/verify.sh <分支>`, "");
 	for (const [i, ac] of plan.acceptanceCriteria.entries()) {

@@ -12,7 +12,10 @@ import { truncateToWidth } from "@earendil-works/pi-tui";
 import type { Effect, MissionEvent, MissionState, Phase, Role, Tier, TransitionResult, Evidence } from "./core/types.ts";
 import { initialState, transition, ROLE_OF } from "./core/machine.ts";
 import { judge } from "./core/verdict.ts";
-import { evaluatePromotion } from "./core/tier.ts";
+import { evaluateAdmission, evaluatePromotion } from "./core/tier.ts";
+import { evaluateBaseline, shouldProbeBaseline, type BaselineProbe } from "./core/baseline.ts";
+import { evaluateAsk } from "./core/frame.ts";
+import { reportIsSubstantive, validateSpikePlan } from "./core/spike.ts";
 import type { MissionPlan } from "./store/mission.ts";
 import {
 	allTasks,
@@ -22,6 +25,7 @@ import {
 	parseMissionMd,
 	renderMilestoneMd,
 	renderMissionMd,
+	spikeTaskIds,
 	taskOrder,
 	validatePlan,
 } from "./store/mission.ts";
@@ -32,6 +36,7 @@ import {
 	layout,
 	modelsJson,
 	planPaths,
+	spikeReport,
 	statePaths,
 	verifySh,
 	verifierToolsTs,
@@ -46,14 +51,16 @@ import { renderWidgetCard } from "./ui/dashboard.ts";
 import {
 	applyRole,
 	loadModelsConfig,
+	saveModelsConfig,
 	profileFromJson,
 	profileToJson,
 	restoreProfile,
 	saveProfile,
 	type ModelsConfig,
+	type RoleModelConfig,
 	type SavedProfile,
 } from "./roles/models.ts";
-import { renderVerifierBrief, runVerifier } from "./roles/verifier.ts";
+import { renderSpikeVerifierBrief, renderVerifierBrief, runVerifier } from "./roles/verifier.ts";
 import { BUILTIN_ALL, gateCheck, MISSION_TOOLS, toolsForPhase } from "./hooks/gate.ts";
 import { IncrementalDiagnostics } from "./hooks/diagnostics.ts";
 
@@ -64,11 +71,22 @@ export interface ActiveMission {
 	inMemory: boolean;
 	/** 目标目录是 git 仓库(降级模式=false 时 AC 冻结有 git 审计链) */
 	git: boolean;
-	/** quick 档:/mission quick --verify 给的默认验证命令 */
+	/** quick 档判定的唯一依据。必须在进 DO 前定下(--verify),不接受事后补 */
 	quickVerifyCommand?: string;
 }
 
+/** 换脑后给新会话的第一句推动语。按落点相位分流 —— 换脑不只发生在 DO */
+const HANDOFF_NUDGE: Record<string, string> = {
+	frame: "开始重新定义问题",
+	plan: "开始重新规划",
+	do: "开始执行当前任务",
+	act: "开始分析上一轮失败",
+	check: "等待系统判定",
+};
+
 const EVIDENCE_TAIL = 4000;
+/** 基线探针的单分支超时。与 CHECK 同量级:基线本来就该快速失败 */
+const BASELINE_TIMEOUT_MS = 600_000;
 const DIFF_TAIL = 12000;
 
 export class Runtime {
@@ -104,7 +122,11 @@ export class Runtime {
 	// ─────────────────────────── 生命周期 ───────────────────────────
 
 	/** /mission new:scaffold + 初始状态 + 进入 plan 相位 */
-	async startNew(ctx: any, goal: string, tier: "standard" | "complex"): Promise<{ id: string } | { error: string }> {
+	async startNew(
+		ctx: any,
+		goal: string,
+		tier: "standard" | "complex",
+	): Promise<{ id: string; phase: Phase } | { error: string }> {
 		if (this.busy()) return { error: "已有进行中的 mission,先 /mission abort 或 /mission resume" };
 		const l = this.layout;
 		ensureScaffold(l);
@@ -126,15 +148,37 @@ export class Runtime {
 		writeCurrentPointer(currentPointer(l), id);
 		this.savedProfile = saveProfile(this.pi, ctx);
 		this.persistProfile();
-		this.pi.setActiveTools(toolsForPhase("plan"));
-		await applyRole(this.pi, ctx, "planner", this.modelsConfig(), (m) => this.warn(ctx, m));
+		const phase = this.active.state.phase; // standard/complex 起于 FRAME(见 core/machine START_PHASE)
+		this.pi.setActiveTools(toolsForPhase(phase));
+		const role = ROLE_OF[phase];
+		if (role) await applyRole(this.pi, ctx, role, this.modelsConfig(), (m) => this.warn(ctx, m));
 		this.refreshWidget(ctx);
-		return { id };
+		return { id, phase };
 	}
 
-	/** /mission quick:单任务,不落盘,直接进 DO(Q18) */
-	async startQuick(ctx: any, task: string, verifyCommand?: string): Promise<{ id: string } | { error: string }> {
+	/**
+	 * /mission quick:单任务,不落盘,直接进 DO(Q18)。
+	 *
+	 * 准入由 core 判定(evaluateAdmission):没有验证命令就没有裁判,
+	 * 这种输入不进快车道,自动升 standard 去 PLAN 相位把标准写清楚。
+	 */
+	async startQuick(
+		ctx: any,
+		task: string,
+		verifyCommand?: string,
+	): Promise<{ id: string; tier: Tier } | { error: string }> {
 		if (this.busy()) return { error: "已有进行中的 mission,先 /mission abort" };
+
+		const cmd = verifyCommand?.trim();
+		const admission = evaluateAdmission({ tier: "quick", hasVerifyCommand: !!cmd });
+		if (!admission.ok) {
+			const promoted = admission.promoteTo === "complex" ? "complex" : "standard";
+			const r = await this.startNew(ctx, task, promoted);
+			if ("error" in r) return r;
+			ctx.ui.notify(admission.reason, "warning");
+			return { id: r.id, tier: promoted };
+		}
+
 		const id = `quick-${Date.now().toString(36)}`;
 		const plan: MissionPlan = {
 			missionId: id,
@@ -150,12 +194,12 @@ export class Runtime {
 			state: initialState({ missionId: id, tier: "quick", taskOrder: ["T1"] }),
 			inMemory: true,
 			git: await isGitRepo(this.exec, this.cwd),
-			quickVerifyCommand: verifyCommand,
+			quickVerifyCommand: cmd,
 		};
 		this.savedProfile = saveProfile(this.pi, ctx);
 		const r = await this.applyEvent({ type: "PLAN_FROZEN", at: Date.now(), taskOrder: ["T1"] }, ctx);
 		if (r.error) return { error: r.error };
-		return { id };
+		return { id, tier: "quick" };
 	}
 
 	/** /mission resume:从仓库重附着到当前会话(Q15) */
@@ -305,9 +349,11 @@ export class Runtime {
 					break;
 				}
 				case "ADVANCE_TASK":
+					this.ensureSpikeDir();
 					break; // State Card 与 widget 已反映
 				case "FREEZE_AC":
 					await this.onFreezeAc(ctx);
+					this.ensureSpikeDir();
 					break;
 				case "PERSIST_PLAN":
 					await this.persistPlanFiles();
@@ -345,6 +391,12 @@ export class Runtime {
 		appendLog(sp.logMd, `env fingerprint=${a.state.envFingerprint}`);
 	}
 
+	/** 探针任务开始前先把结论目录建好,免得执行者第一次写文件就撞在 ENOENT 上 */
+	private ensureSpikeDir(): void {
+		const s = this.currentSpikeReport();
+		if (s) fs.mkdirSync(path.dirname(s.abs), { recursive: true });
+	}
+
 	private async persistPlanFiles(): Promise<void> {
 		const a = this.active!;
 		const l = this.layout;
@@ -357,10 +409,7 @@ export class Runtime {
 				fs.writeFileSync(pp.milestoneFile(ms.id), renderMilestoneMd(a.plan, ms), "utf8");
 			}
 		}
-		if (a.plan.verifyScript.trim()) {
-			fs.writeFileSync(verifySh(l), a.plan.verifyScript, "utf8");
-			fs.chmodSync(verifySh(l), 0o755);
-		}
+		this.writeVerifyScript(a.plan);
 		a.inMemory = false;
 		writeCurrentPointer(currentPointer(l), a.plan.missionId);
 		if (a.git) ensureInfoExclude(this.cwd, `${this.config.missionsDir}/state/`);
@@ -392,8 +441,44 @@ export class Runtime {
 		let requiredAcIds: string[] = [];
 		let hardResults: Array<{ acId: string; pass: boolean; outputTail: string }> = [];
 
-		if (a.state.tier === "quick") {
-			// quick 档:验证命令来自 --verify 或 mission_submit 的参数(见 README 设计决议)
+		const spike = this.currentSpikeReport();
+		if (spike) {
+			// 探针的判定:hard = 结论文件够不够实(机械、零模型成本);
+			// semi = 独立验证者核对它有没有真的回答那个问题。
+			const report = fs.existsSync(spike.abs) ? fs.readFileSync(spike.abs, "utf8") : null;
+			const substantive = reportIsSubstantive(report);
+			requiredAcIds = ["spike"];
+			evidences.push({
+				level: "hard",
+				acId: "spike",
+				result: substantive ? "pass" : "fail",
+				raw: substantive
+					? `结论文件 ${spike.rel}(${report!.trim().length} 字)`
+					: `结论文件 ${spike.rel} 缺失或过短 —— 探针的产出就是这份结论`,
+				exitCode: substantive ? 0 : 1,
+				envFingerprint: fp,
+			});
+
+			if (substantive && a.git && fs.existsSync(verifierToolsTs(l))) {
+				const semi = await runVerifier(this.exec, {
+					cwd: this.cwd,
+					toolsPath: verifierToolsTs(l),
+					provider: this.modelsConfig().verifier?.provider,
+					model: this.modelsConfig().verifier?.model,
+					timeoutMs: this.config.verifierTimeoutMs ?? 300_000,
+					envFingerprint: fp,
+					brief: renderSpikeVerifierBrief({
+						goal: a.plan.goal,
+						taskId: task?.id ?? "",
+						question: task?.question ?? "",
+						report: tail(report!, EVIDENCE_TAIL),
+						diff: await this.gitDiff(),
+					}),
+				});
+				if (semi) evidences.push(...semi);
+			}
+		} else if (a.state.tier === "quick") {
+			// quick 档:验证命令在 startQuick 时就已冻结(无命令的输入会被升档挡在 DO 之外)
 			const cmd = a.quickVerifyCommand;
 			if (cmd) {
 				requiredAcIds = ["quick"];
@@ -489,7 +574,7 @@ export class Runtime {
 		if (s.phase === "act") {
 			this.pi.sendUserMessage(renderActBrief(a.plan, s), { deliverAs: "followUp" });
 		} else if (s.phase === "do") {
-			this.pi.sendUserMessage(renderDoBrief(a.plan, s), { deliverAs: "followUp" });
+			this.pi.sendUserMessage(renderDoBrief(a.plan, s, this.currentSpikeReport()?.rel), { deliverAs: "followUp" });
 		}
 	}
 
@@ -509,12 +594,12 @@ export class Runtime {
 			// ACT = 一轮诊断对话,结束后自动回 DO(L1 改实现)
 			const r = await this.applyEvent({ type: "ADJUST_DONE", at: Date.now() }, ctx);
 			if (!r.error && !a.state.pendingHandoff) {
-				this.pi.sendUserMessage(renderDoBrief(a.plan, a.state), { deliverAs: "followUp" });
+				this.pi.sendUserMessage(renderDoBrief(a.plan, a.state, this.currentSpikeReport()?.rel), { deliverAs: "followUp" });
 			}
 			return;
 		}
 
-		if (phase === "do" || phase === "plan") {
+		if (phase === "do" || phase === "plan" || phase === "frame") {
 			// 机械升档(升档自动,降档手动)
 			const promo = evaluatePromotion({
 				tier: a.state.tier,
@@ -580,6 +665,18 @@ export class Runtime {
 		a.state.cost[role] = (a.state.cost[role] ?? 0) + total;
 	}
 
+	// ─────────────────────────── 探针(spike) ───────────────────────────
+
+	/** 当前任务是 spike 时返回它的结论文件路径;否则 null */
+	currentSpikeReport(): { abs: string; rel: string } | null {
+		const a = this.active;
+		if (!a?.state.currentTask) return null;
+		const task = findTask(a.plan, a.state.currentTask);
+		if (task?.kind !== "spike") return null;
+		const abs = spikeReport(this.layout, a.state.missionId, task.id);
+		return { abs, rel: path.relative(this.cwd, abs).replace(/\\/g, "/") };
+	}
+
 	// ─────────────────────────── 闸门 ───────────────────────────
 
 	gate(toolName: string, input: Record<string, unknown>): string | null {
@@ -592,6 +689,7 @@ export class Runtime {
 			toolName,
 			input,
 			missionsDirName: this.config.missionsDir,
+			spikeReportPath: this.currentSpikeReport()?.rel ?? null,
 		});
 	}
 
@@ -622,9 +720,63 @@ export class Runtime {
 			},
 			withSession: async (ctx2: any) => {
 				// ⚠️ 只能用 ctx2:外层捕获的 pi/ctx 在会话替换后已失效
-				await ctx2.sendUserMessage("开始执行当前任务");
+				await ctx2.sendUserMessage(HANDOFF_NUDGE[a.state.phase] ?? "继续当前相位的工作");
 			},
 		});
+		return { ok: true };
+	}
+
+	// ─────────────────────────── FRAME(mission_ask / mission_frame) ───────────────────────────
+
+	/**
+	 * FRAME 提问。预算判定在 core(evaluateAsk):一个 mission 只许问一轮、最多 3 个。
+	 * 问题以卡片呈现给人,本轮到此为止 —— 回答由人以普通消息给出。
+	 */
+	async ask(ctx: any, questions: string[]): Promise<{ ok: true; questions: string[] } | { error: string }> {
+		const a = this.active;
+		if (!a) return { error: "无活动 mission" };
+		if (a.state.phase !== "frame") return { error: `当前相位是 ${a.state.phase},只有 frame 相位可以提问` };
+
+		const verdict = evaluateAsk({ askedRounds: a.state.frameAsks ?? 0, questions });
+		if (!verdict.ok) return { error: verdict.reason };
+
+		const r = await this.applyEvent({ type: "FRAME_ASKED", at: Date.now() }, ctx);
+		if (r.error) return { error: r.error };
+
+		this.pi.appendEntry("missions-card", {
+			title: `${a.state.missionId} · 需要你回答(${verdict.questions.length} 个)`,
+			body: verdict.questions.map((q, i) => `${i + 1}. ${q}`).join("\n"),
+		});
+		if (!a.inMemory) {
+			appendLog(
+				statePaths(this.layout, a.state.missionId).logMd,
+				`FRAME 提问:${verdict.questions.map((q) => q.replace(/\s+/g, " ")).join(" / ")}`,
+			);
+		}
+		return { ok: true, questions: verdict.questions };
+	}
+
+	/** FRAME 完成:锐化目标 + 边界写进 plan,进入 PLAN 相位 */
+	async frame(
+		ctx: any,
+		params: { goal: string; constraints: string[]; nonGoals: string[] },
+	): Promise<{ ok: true } | { error: string }> {
+		const a = this.active;
+		if (!a) return { error: "无活动 mission" };
+		if (a.state.phase !== "frame") return { error: `当前相位是 ${a.state.phase},只有 frame 相位可以定义问题` };
+		const goal = params.goal?.trim();
+		if (!goal) return { error: "goal 为空:FRAME 的产出就是一句说得清的目标" };
+
+		a.plan = {
+			...a.plan,
+			goal,
+			framing: { constraints: params.constraints ?? [], nonGoals: params.nonGoals ?? [], at: Date.now() },
+		};
+		const r = await this.applyEvent({ type: "FRAME_DONE", at: Date.now() }, ctx);
+		if (r.error) return { error: r.error };
+		if (!a.inMemory) {
+			appendLog(statePaths(this.layout, a.state.missionId).logMd, `FRAME 定义:${goal.replace(/\s+/g, " ")}`);
+		}
 		return { ok: true };
 	}
 
@@ -645,6 +797,13 @@ export class Runtime {
 
 		const plan: MissionPlan = { ...a.plan, ...params };
 		const errors = validatePlan(plan);
+		// 探针的额度是 mission 级的,validatePlan(纯函数、只看计划)判不了,放在这里
+		errors.push(
+			...validateSpikePlan({
+				spikeTaskIds: spikeTaskIds(plan),
+				alreadyRanSpike: (a.state.spikesRun ?? 0) > 0,
+			}),
+		);
 		if (errors.length > 0) return { error: `计划不合法:\n${errors.map((e) => `- ${e}`).join("\n")}` };
 
 		// PLAN 冻结前人工确认 —— 最重要的一次介入(§7.4)
@@ -657,17 +816,144 @@ export class Runtime {
 			if (!confirmed) return { error: "人工拒绝了计划。请根据反馈修改后重新调用 mission_write_plan。" };
 		}
 
+		// 基线跑:AC 指向的分支存在还不够,它现在必须是红的(空壳分支在这里被打回)。
+		// 放在人工确认之后 —— PLAN 相位不执行任何东西,这一跑属于进入 DO 的过渡动作,
+		// 且跑的是人刚刚批准的那份脚本。
+		this.writeVerifyScript(plan);
+		if (shouldProbeBaseline(a.state.escalation.history.length)) {
+			const probes = await this.runBaseline(plan);
+			const baselineErrors = evaluateBaseline(probes);
+			this.logBaseline(probes, baselineErrors);
+			if (baselineErrors.length > 0) {
+				ctx.ui.notify(`基线未通过,计划未冻结(${baselineErrors.length} 项)`, "error");
+				return {
+					error:
+						`基线校验未通过(计划未冻结,仍在 PLAN 相位):\n${baselineErrors.map((e) => `- ${e}`).join("\n")}\n` +
+						"修正 AC 或 verify.sh 后重新调用 mission_write_plan。",
+				};
+			}
+			ctx.ui.notify(`基线通过:${probes.map((p) => `${p.acId}=${p.expected}`).join(" ")}`, "info");
+		} else if (!a.inMemory) {
+			appendLog(statePaths(this.layout, a.state.missionId).logMd, "baseline skipped (重规划:世界已被执行者改过)");
+		}
+
+		// 通过之后才认这份计划:被拒的 AC 不能留在 a.plan 里,
+		// 否则下一轮 State Card 会把它当成"已冻结"喂给 planner
 		a.plan = plan;
 		await this.persistPlanFiles();
-		const r = await this.applyEvent({ type: "PLAN_FROZEN", at: Date.now(), taskOrder: taskOrder(plan) }, ctx);
+		const r = await this.applyEvent(
+			{ type: "PLAN_FROZEN", at: Date.now(), taskOrder: taskOrder(plan), spikes: spikeTaskIds(plan) },
+			ctx,
+		);
 		if (r.error) return { error: r.error };
 		return { ok: true, taskOrder: taskOrder(plan) };
+	}
+
+	/** 逐条跑 AC 的 verify 分支,采集冻结时刻的基线退出码 */
+	private async runBaseline(plan: MissionPlan): Promise<BaselineProbe[]> {
+		const script = verifySh(this.layout);
+		const probes: BaselineProbe[] = [];
+		for (const ac of plan.acceptanceCriteria) {
+			const r = await this.exec("bash", [script, ac.verify], { timeout: BASELINE_TIMEOUT_MS });
+			probes.push({ acId: ac.id, verify: ac.verify, expected: ac.baseline ?? "red", exitCode: r.code });
+		}
+		return probes;
+	}
+
+	private logBaseline(probes: BaselineProbe[], errors: string[]): void {
+		const a = this.active;
+		if (!a || a.inMemory) return;
+		const line = probes.map((p) => `${p.acId}:${p.verify} exit=${p.exitCode} want=${p.expected}`).join(" · ");
+		const md = statePaths(this.layout, a.state.missionId).logMd;
+		appendLog(md, `baseline ${line}`);
+		for (const e of errors) appendLog(md, `baseline REJECTED: ${e}`);
+	}
+
+	/** 单独落 verify.sh(基线跑要在冻结之前拿到脚本;persistPlanFiles 会再写一次,幂等) */
+	private writeVerifyScript(plan: MissionPlan): void {
+		if (!plan.verifyScript.trim()) return;
+		const l = this.layout;
+		ensureScaffold(l);
+		fs.writeFileSync(verifySh(l), plan.verifyScript, "utf8");
+		fs.chmodSync(verifySh(l), 0o755);
 	}
 
 	// ─────────────────────────── 杂项 ───────────────────────────
 
 	modelsConfig(): ModelsConfig {
 		return loadModelsConfig(modelsJson(this.layout));
+	}
+
+	/** 会话当前模型的可读名(角色未配置时实际会用它) */
+	sessionModelLabel(ctx: any): string {
+		const m = ctx?.model as { provider?: string; id?: string } | undefined;
+		return m?.provider && m?.id ? `${m.provider}/${m.id}` : (m?.id ?? "当前会话模型");
+	}
+
+	/**
+	 * 可选模型列表。优先用 ctx.scopedModels(pi 文档指定的 picker 数据源,
+	 * 与内置选择器同一套),没有 scoping 时退回整个目录。
+	 */
+	availableModels(ctx: any): Array<{ provider: string; id: string; name?: string }> {
+		const norm = (m: any) => ({ provider: String(m?.provider ?? ""), id: String(m?.id ?? ""), name: m?.name });
+		try {
+			const scoped = (ctx?.scopedModels ?? []) as Array<{ model: any }>;
+			if (scoped.length > 0) return scoped.map((e) => norm(e.model)).filter((m) => m.provider && m.id);
+			const all = (ctx?.modelRegistry?.getAvailable?.() ?? []) as any[];
+			return all.map(norm).filter((m) => m.provider && m.id);
+		} catch {
+			return [];
+		}
+	}
+
+	/**
+	 * 改角色模型映射。写 missions/models.json(I6:配置进仓库)。
+	 *
+	 * 三件事必须一起做,少一件这个面板就不该存在:
+	 *   1. 若改的正是当前相位的角色,立刻 applyRole —— 否则要等到下次相位切换才生效
+	 *   2. 进行中的 mission 一律写 LOG.md —— 判定口径和成本口径变了,审计链要能解释
+	 *   3. verifier 额外告警 —— 它是 I3 的独立判定者,中途换等于换裁判
+	 */
+	async setRoleModel(
+		ctx: any,
+		role: Role,
+		selection: { provider: string; id: string } | null,
+		thinking?: string,
+	): Promise<void> {
+		const cfg = this.modelsConfig();
+		const prev = cfg[role];
+		const next: RoleModelConfig = { ...prev };
+		if (selection === null) {
+			delete next.provider;
+			delete next.model;
+		} else {
+			next.provider = selection.provider;
+			next.model = selection.id;
+		}
+		if (thinking !== undefined) next.thinking = thinking;
+
+		if (Object.keys(next).length === 0) delete cfg[role];
+		else cfg[role] = next;
+		saveModelsConfig(modelsJson(this.layout), cfg);
+
+		const before = prev?.provider && prev?.model ? `${prev.provider}/${prev.model}` : "跟随会话";
+		const after = next.provider && next.model ? `${next.provider}/${next.model}` : "跟随会话";
+		const line =
+			`MODEL ${role}: ${before} → ${after}` +
+			(thinking !== undefined && thinking !== prev?.thinking ? ` · thinking ${prev?.thinking ?? "默认"} → ${thinking}` : "");
+
+		const a = this.active;
+		if (a && !a.inMemory) appendLog(statePaths(this.layout, a.state.missionId).logMd, line);
+		if (a && role === "verifier" && a.state.phase !== "done" && a.state.phase !== "halted") {
+			this.warn(
+				ctx,
+				"mission 进行中更换了 verifier 模型:此后的 semi 证据与之前不同源,判定口径已变(已记入 LOG.md)",
+			);
+		}
+		// 改的正是当前相位的角色 → 立刻生效,不必等下次相位切换
+		if (a && ROLE_OF[a.state.phase] === role) {
+			await applyRole(this.pi, ctx, role, this.modelsConfig(), (m) => this.warn(ctx, m));
+		}
 	}
 
 	/** 消费待选档位(返回后清除) */
@@ -740,7 +1026,9 @@ export function renderStateCard(plan: MissionPlan, state: MissionState, dirName 
 	const acs =
 		plan.acceptanceCriteria.length > 0
 			? plan.acceptanceCriteria.map((c) => `  - ${c.id}: ./${dirName}/scripts/verify.sh ${c.verify} 退出码 0 —— ${c.text}`).join("\n")
-			: "  (quick 档:验证命令随 mission_submit 提交)";
+			: plan.tier === "quick"
+				? "  (quick 档:判定依据是 --verify 冻结的那条命令,提交时不可更改)"
+				: "  (尚未冻结:本相位的产出就是可执行的 AC,由 mission_write_plan 提交)";
 	const lines = [
 		`[MISSION] ${state.missionId} · ${state.tier} · phase=${state.phase}` +
 			(state.currentTask ? ` · task=${state.currentTask} · attempt=${t?.attempts ?? 0}` : ""),
@@ -748,18 +1036,49 @@ export function renderStateCard(plan: MissionPlan, state: MissionState, dirName 
 		`AC(冻结,不可修改):`,
 		acs,
 	];
-	if (task) lines.push(`CURRENT TASK: ${task.id} ${task.title}(verify: ${task.verify.join(", ") || "submit 时提供"})`);
+	if (plan.framing) {
+		const f = plan.framing;
+		if (f.constraints.length) lines.push(`约束(FRAME 已确认):${f.constraints.join(" · ")}`);
+		if (f.nonGoals.length) lines.push(`不做:${f.nonGoals.join(" · ")}`);
+	}
+	if (task?.kind === "spike") {
+		lines.push(
+			`CURRENT TASK: ${task.id} ${task.title} —— 探针(spike),产出是书面结论,不是代码`,
+			`  要回答:${task.question ?? ""}`,
+			`  结论写到:./${dirName}/spikes/${state.missionId}/${task.id}.md(闸门只放行这一个文件)`,
+			"  一次机会,不重试;提交后系统会带着结论回到 PLAN 重新规划。",
+		);
+	} else if (task) {
+		lines.push(`CURRENT TASK: ${task.id} ${task.title}(verify: ${task.verify.join(", ") || "submit 时提供"})`);
+	}
 	if (t?.lastFailureReason) lines.push(`PREV FAILURE: ${t.lastFailureReason}`);
 	if (state.pendingHandoff) lines.push(`⏸ 换脑挂起中:${state.pendingHandoff}。请执行 /mission next。`);
-	if (state.phase === "do" && task) {
+	if (state.phase === "frame") {
+		lines.push(
+			(state.frameAsks ?? 0) > 0
+				? "提问机会已用完:根据已有回答调用 mission_frame;仍不足以定义就说明缺什么,由人重新描述。"
+				: "先定义问题:读代码,必要时 mission_ask 问一轮(最多 3 个),然后 mission_frame。不要写代码或设计方案。",
+		);
+	}
+	if (state.phase === "do" && task && task.kind !== "spike") {
 		lines.push(`你只需完成 ${task.id}。完成后调用 mission_submit,不要自行判定通过。`);
 	}
 	return lines.join("\n");
 }
 
-function renderDoBrief(plan: MissionPlan, state: MissionState): string {
+function renderDoBrief(plan: MissionPlan, state: MissionState, spikeReportRel?: string | null): string {
 	const task = state.currentTask ? findTask(plan, state.currentTask) : undefined;
 	const t = state.currentTask ? state.tasks[state.currentTask] : undefined;
+	if (task?.kind === "spike") {
+		return [
+			`[pi-missions] 进入 DO:${task.id} ${task.title} —— 这是一次**探针(spike)**,不是实现任务。`,
+			`要回答的问题:${task.question ?? ""}`,
+			`只做调查(读代码、grep、跑只读命令),把结论写进 ${spikeReportRel ?? "结论文件"} ——`,
+			"闸门只放行写这一个文件,改实现会被拦。结论要给出依据的事实(文件、数量、报错、测量值),",
+			"不要写\"需要进一步调研\"。写完调用 mission_submit;之后系统会带着结论回到 PLAN 重新规划。",
+			"探针只打一次,没有第二次尝试。",
+		].join("\n");
+	}
 	const lines = [`[pi-missions] 进入 DO:${state.currentTask} ${task?.title ?? ""}(第 ${t?.attempts ?? 1} 次尝试)`];
 	if (t?.lastFailureReason) lines.push(`上一轮失败:${t.lastFailureReason} —— 换思路,不要重复同一修法。`);
 	lines.push("完成后调用 mission_submit。");
@@ -781,6 +1100,10 @@ function renderHandoffBrief(plan: MissionPlan, state: MissionState, dirName = "m
 		"",
 		`工作流规则见 ${dirName}/README.md;当前相位规则见 ${dirName}/phases/${state.phase}.md。`,
 		state.phase === "plan" ? `重规划:先读 ${dirName}/state 下该 mission 的 LOG.md 失败记录,再调用 mission_write_plan。` : "",
+		state.phase === "frame"
+			? `重新定义问题(L3):先读 ${dirName}/state 下该 mission 的 LOG.md 与 archive/ 里的旧 MISSION.md,` +
+				"弄清原来的问题定义错在哪。提问预算已重置,可以再问一轮,然后调用 mission_frame。"
+			: "",
 	]
 		.filter(Boolean)
 		.join("\n");

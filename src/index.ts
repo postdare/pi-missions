@@ -17,7 +17,8 @@ import { TextCard, renderLogCard, renderVerdictCard, type VerdictCardData } from
 
 /** 相位提示词的兜底(仓库里的 missions/phases/*.md 被删时用) */
 const FALLBACK_PHASE_RULES: Record<string, string> = {
-	plan: "你在 PLAN 相位:只读分析 + 调用 mission_write_plan 提交计划。不写实现代码。",
+	frame: "你在 FRAME 相位:只做问题定义。读代码;仍有影响验收标准的模糊就调用 mission_ask 问一轮(整个 mission 只许一轮、最多 3 个问题),然后停下等人回答;清楚了就调用 mission_frame。不写代码,不设计方案。",
+	plan: "你在 PLAN 相位:只读分析 + 调用 mission_write_plan 提交计划。不写实现代码。每条 AC 冻结时会被跑一遍核对基线(默认必须是红的,回归项显式声明 baseline: \"green\")。",
 	do: "你在 DO 相位:只完成 State Card 里的当前任务,完成后调用 mission_submit,不要自行判定通过。",
 	check: "你在 CHECK 相位:判定由系统执行,你不需要做任何事。",
 	act: "你在 ACT 相位:分析上一轮失败,给出修法或调用 mission_escalate。只有一轮,不能写代码。",
