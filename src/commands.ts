@@ -77,7 +77,7 @@ export function registerCommands(pi: any, getRuntime: GetRuntime): void {
 					const r = await rt.startNew(ctx, rest, tier);
 					if ("error" in r) return notifyUsage(ctx, r.error);
 					clearTierIndicator(ctx); // 档位已被消费,状态条接管
-					pi.sendUserMessage(planKickoff(rt.config.missionsDir, r.id, tier, rest), { deliverAs: "followUp" });
+					pi.sendUserMessage(kickoff(rt.config.missionsDir, r.id, tier, rest, r.phase), { deliverAs: "followUp" });
 					return;
 				}
 
@@ -91,7 +91,7 @@ export function registerCommands(pi: any, getRuntime: GetRuntime): void {
 					pi.sendUserMessage(
 						r.tier === "quick"
 							? `[pi-missions] quick 任务(${r.id}):${rest}\n验证命令:${flags.verify}。完成后调用 mission_submit。`
-							: planKickoff(rt.config.missionsDir, r.id, r.tier, rest),
+							: kickoff(rt.config.missionsDir, r.id, r.tier, rest, rt.active?.state.phase ?? "frame"),
 						{ deliverAs: "followUp" },
 					);
 					return;
@@ -234,11 +234,19 @@ function fmtRole(c?: { provider?: string; model?: string; thinking?: string }): 
 	return `${c.provider ? `${c.provider}/` : ""}${c.model ?? "?"}${c.thinking ? ` thinking=${c.thinking}` : ""}`;
 }
 
-/** PLAN 相位的开场白(/mission new 与 quick 升档后共用) */
-function planKickoff(dirName: string, id: string, tier: string, goal: string): string {
+/** 新 Mission 的开场白。按起始相位分流(standard/complex 起于 FRAME) */
+function kickoff(dirName: string, id: string, tier: string, goal: string, phase: string): string {
+	const head = `[pi-missions] 新 Mission 已创建(${id},${tier} 档),进入 ${phase.toUpperCase()} 相位。`;
+	if (phase === "frame") {
+		return (
+			`${head}阅读 ${dirName}/README.md 与 ${dirName}/phases/frame.md。` +
+			"先读代码,能从仓库里读到的别去问人;仍有影响验收标准的模糊就调用 mission_ask 问一轮" +
+			"(整个 mission 只许一轮、最多 3 个问题)并停下等回答,清楚了就调用 mission_frame。" +
+			`原始需求:${goal}`
+		);
+	}
 	return (
-		`[pi-missions] 新 Mission 已创建(${id},${tier} 档),进入 PLAN 相位。` +
-		`阅读 ${dirName}/README.md 与 ${dirName}/phases/plan.md,` +
+		`${head}阅读 ${dirName}/README.md 与 ${dirName}/phases/plan.md,` +
 		`分析代码库,设计可执行的验收标准与任务分解,然后调用 mission_write_plan 原子提交。目标:${goal}`
 	);
 }

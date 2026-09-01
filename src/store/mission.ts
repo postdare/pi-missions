@@ -36,10 +36,21 @@ export interface PlanMilestone {
 	tasks: PlanTask[];
 }
 
+/** FRAME 相位的产出:锐化后的目标 + 明确的边界。PLAN 据此设计 AC */
+export interface Framing {
+	/** 已确认的约束/前提(来自人工回答或代码事实) */
+	constraints: string[];
+	/** 明确不做的事 —— 边界写不出来,AC 就会漂 */
+	nonGoals: string[];
+	at: number;
+}
+
 export interface MissionPlan {
 	missionId: string;
 	tier: Tier;
 	goal: string;
+	/** FRAME 的产出;quick 档与老 mission 没有 */
+	framing?: Framing;
 	acceptanceCriteria: AcceptanceCriterion[];
 	milestones: PlanMilestone[];
 	/** verify.sh 完整内容,与 MISSION.md 原子冻结(Q6) */
@@ -129,6 +140,13 @@ export function renderMissionMd(plan: MissionPlan): string {
 	}
 	lines.push("");
 
+	if (plan.framing) {
+		lines.push("## Frame", "", `> 问题定义(FRAME 相位产出)`, "");
+		for (const c of plan.framing.constraints) lines.push(`- 约束:${c}`);
+		for (const n of plan.framing.nonGoals) lines.push(`- 不做:${n}`);
+		lines.push("");
+	}
+
 	if (plan.tier === "complex") {
 		lines.push("## Milestones", "");
 		for (const ms of plan.milestones) {
@@ -168,6 +186,7 @@ export function parseMissionMd(content: string): MissionPlan | null {
 			missionId: payload.missionId,
 			tier: payload.tier,
 			goal: payload.goal,
+			framing: payload.framing,
 			acceptanceCriteria: payload.acceptanceCriteria,
 			milestones: payload.milestones,
 			verifyScript: payload.verifyScript,
@@ -183,6 +202,7 @@ function fencePayload(plan: MissionPlan) {
 		missionId: plan.missionId,
 		tier: plan.tier,
 		goal: plan.goal,
+		framing: plan.framing,
 		acceptanceCriteria: plan.acceptanceCriteria,
 		milestones: plan.milestones,
 		verifyScript: plan.verifyScript,

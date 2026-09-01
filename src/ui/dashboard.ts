@@ -50,6 +50,7 @@ export interface WidgetTheme {
 }
 
 const PHASE_COLOR: Record<string, string> = {
+	frame: "accent",
 	plan: "accent",
 	do: "accent",
 	check: "accent",

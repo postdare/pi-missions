@@ -15,6 +15,7 @@ import type { RepoLayout } from "./paths.ts";
 
 const TEMPLATES: Array<{ rel: (l: RepoLayout) => string; template: string; executable?: boolean }> = [
 	{ rel: (l) => path.join(l.root, "README.md"), template: "missions-README.md" },
+	{ rel: (l) => path.join(l.phases, "frame.md"), template: "phases/frame.md" },
 	{ rel: (l) => path.join(l.phases, "plan.md"), template: "phases/plan.md" },
 	{ rel: (l) => path.join(l.phases, "do.md"), template: "phases/do.md" },
 	{ rel: (l) => path.join(l.phases, "check.md"), template: "phases/check.md" },

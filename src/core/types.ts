@@ -8,11 +8,14 @@
 
 // ─────────────────────────────── 基础枚举 ───────────────────────────────
 
-export type Phase = "plan" | "do" | "check" | "act" | "done" | "halted";
+export type Phase = "frame" | "plan" | "do" | "check" | "act" | "done" | "halted";
 
 export type Tier = "quick" | "standard" | "complex";
 
-/** 升级阶梯:1=改实现 2=改方案 3=改问题定义 */
+/**
+ * 升级阶梯:1=改实现 2=改方案 3=改问题定义。
+ * 每一级对应相位图上的一条反向边:L1 回 DO、L2 回 PLAN、L3 回 FRAME。
+ */
 export type EscalationLevel = 1 | 2 | 3;
 
 export type Role = "planner" | "executor" | "verifier" | "escalator";
@@ -109,6 +112,8 @@ export interface MissionState {
 	pendingHandoff: string | null;
 	/** taskId → 执行该任务的 session 文件路径(换脑后更新) */
 	sessionMap: Record<string, string>;
+	/** FRAME 相位已用掉的提问轮数(预算见 core/frame.ts)。老 STATE.json 缺此字段按 0 算 */
+	frameAsks?: number;
 	/** 按角色分账的累计成本(美元),来自 message_end 的 usage.cost.total */
 	cost: Partial<Record<Role, number>>;
 	metrics: MissionMetrics;
@@ -118,6 +123,10 @@ export interface MissionState {
 // ─────────────────────────────── 状态机 I/O ───────────────────────────────
 
 export type MissionEvent =
+	/** FRAME 用掉一轮提问(预算判定在 core/frame.ts,机器只记账) */
+	| { type: "FRAME_ASKED"; at: number }
+	/** 问题定义完成,进入 PLAN。goal 由调用方写进 plan,机器只管相位 */
+	| { type: "FRAME_DONE"; at: number }
 	| { type: "PLAN_FROZEN"; at: number; taskOrder?: string[] }
 	| { type: "SUBMIT"; at: number }
 	| { type: "VERDICT"; at: number; verdict: Verdict }

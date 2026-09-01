@@ -20,9 +20,15 @@ const unknown: Verdict = { outcome: "inconclusive", failing: [], reason: "env dr
 
 const has = (effects: Effect[], type: Effect["type"]) => effects.some((e) => e.type === type);
 
+/** 把 mission 推到 plan 相位(standard/complex 起于 frame) */
+function toPlan(tier: "quick" | "standard" | "complex" = "standard"): MissionState {
+	const s = mk(tier);
+	return s.phase === "frame" ? transition(s, { type: "FRAME_DONE", at: AT }).state : s;
+}
+
 /** 把 mission 推到 do 相位 */
 function toDo(tier: "quick" | "standard" | "complex" = "standard"): MissionState {
-	return transition(mk(tier), { type: "PLAN_FROZEN", at: AT }).state;
+	return transition(toPlan(tier), { type: "PLAN_FROZEN", at: AT }).state;
 }
 
 /** 把 mission 推到 check 相位 */
@@ -33,7 +39,7 @@ function toCheck(tier: "quick" | "standard" | "complex" = "standard"): MissionSt
 // ─────────────── PLAN → DO ───────────────
 
 test("PLAN_FROZEN 冻结 AC 并进入首个任务", () => {
-	const r = transition(mk(), { type: "PLAN_FROZEN", at: AT });
+	const r = transition(toPlan(), { type: "PLAN_FROZEN", at: AT });
 	assert.equal(r.state.phase, "do");
 	assert.equal(r.state.currentTask, "T1");
 	assert.equal(r.state.tasks.T1.attempts, 1);
@@ -50,8 +56,39 @@ test("PLAN_FROZEN 只能在 plan 相位", () => {
 
 test("空任务列表无法进入 DO", () => {
 	const s = initialState({ missionId: "m1", tier: "standard", taskOrder: [] });
-	const r = transition(s, { type: "PLAN_FROZEN", at: AT });
+	const r = transition(transition(s, { type: "FRAME_DONE", at: AT }).state, { type: "PLAN_FROZEN", at: AT });
 	assert.ok(r.error);
+});
+
+// ─────────────── FRAME ───────────────
+
+test("standard/complex 起于 FRAME,quick 直接起于 PLAN", () => {
+	assert.equal(mk("standard").phase, "frame");
+	assert.equal(mk("complex").phase, "frame");
+	assert.equal(mk("quick").phase, "plan", "quick 的判定依据是 --verify,没有 AC 要定义");
+});
+
+test("FRAME_DONE 进 PLAN 并切到 planner 工具集", () => {
+	const r = transition(mk(), { type: "FRAME_DONE", at: AT });
+	assert.equal(r.state.phase, "plan");
+	assert.ok(has(r.effects, "SET_TOOLS"));
+	assert.ok(has(r.effects, "SET_ROLE"));
+});
+
+test("FRAME 相位之外不能发 FRAME_DONE / FRAME_ASKED", () => {
+	assert.ok(transition(toPlan(), { type: "FRAME_DONE", at: AT }).error);
+	assert.ok(transition(toDo(), { type: "FRAME_ASKED", at: AT }).error);
+});
+
+test("FRAME_ASKED 记账提问轮数(预算判定在 core/frame.ts)", () => {
+	const r = transition(mk(), { type: "FRAME_ASKED", at: AT });
+	assert.equal(r.state.frameAsks, 1);
+	assert.equal(r.state.phase, "frame", "提问不迁移相位,等人回答");
+});
+
+test("换脑挂起时 FRAME_DONE 被拒", () => {
+	const s = transition(mk(), { type: "HANDOFF_REQUEST", at: AT, reason: "x" }).state;
+	assert.ok(transition(s, { type: "FRAME_DONE", at: AT }).error);
 });
 
 // ─────────────── SUBMIT / PASS 推进 ───────────────
@@ -193,7 +230,8 @@ test("L3 升级挂起等人工确认,确认后归档并换脑回 plan", () => {
 	assert.notEqual(r3.state.phase, "plan", "L3 确认前不迁移相位");
 
 	const okd = transition(r3.state, { type: "ESCALATION_CONFIRMED", at: AT });
-	assert.equal(okd.state.phase, "plan");
+	assert.equal(okd.state.phase, "frame", "L3 = 改问题定义,落点是 FRAME 不是 PLAN");
+	assert.equal(okd.state.frameAsks, 0, "新的问题定义值得再问一轮");
 	assert.ok(has(okd.effects, "ARCHIVE_PLAN"));
 	assert.ok(has(okd.effects, "HANDOFF"));
 	assert.ok(okd.state.pendingHandoff);

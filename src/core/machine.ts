@@ -10,18 +10,24 @@
  * 机器内部直接判定 retry / escalate / halt,签名计数也在机器内更新。
  * hooks 层只是"采集证据 → judge → 发 VERDICT → 执行 effects"的哑管道。
  *
- *                 ┌──────────────────────────────────────┐
- *                 │                                      │
- *   ┌──────┐      ▼      ┌──────┐  submit  ┌───────┐     │
- *   │ PLAN │──freeze──▶ │  DO  │─────────▶│ CHECK │     │
- *   └──────┘             └──────┘           └───┬───┘     │
- *       ▲                   ▲                   │         │
- *       │                   │  PASS ┌───────────┴───┐FAIL │
- *       │                   │       ▼               ▼     │
- *       │                   │  next task ──▶   ┌─────┐    │
- *       │                   └──────────────────│ ACT │────┘
- *       │                    ADJUST_DONE       └──┬──┘
- *       └──────────── ESCALATE(L2/L3)◀───────────┘
+ * 升级阶梯就是相位图上的反向边 —— 往回走一格,而不是一套外挂机制:
+ *
+ *   FRAME ──▶ PLAN ──▶ DO ⇄ CHECK ──▶ ACT
+ *     ▲         ▲        ▲                │
+ *     └─ L3 ────┴─ L2 ───┴──── L1 ────────┘
+ *   改问题定义   改方案        改实现
+ *
+ *   ┌───────┐ frame  ┌──────┐      ┌──────┐  submit  ┌───────┐
+ *   │ FRAME │──done─▶│ PLAN │─freeze─▶│  DO  │───────▶│ CHECK │
+ *   └───────┘        └──────┘      └──────┘           └───┬───┘
+ *       ▲                ▲            ▲                   │
+ *       │                │            │  PASS ┌───────────┴───┐FAIL
+ *       │                │            │       ▼               ▼
+ *       │                │            │  next task ──▶   ┌─────┐
+ *       │                │            └──────────────────│ ACT │
+ *       │                │             ADJUST_DONE(L1)   └──┬──┘
+ *       │                └──── ESCALATE L2 ─────────────────┤
+ *       └────────── ESCALATE L3(人工确认后)────────────────┘
  */
 
 import type {
@@ -40,6 +46,9 @@ import { applyFailure, decide, resetAfterEscalation } from "./breaker.ts";
 import { tierRank } from "./tier.ts";
 
 export const ROLE_OF: Record<Phase, Role | null> = {
+	// FRAME 与 PLAN 共用 planner:同一种"读代码 + 想清楚问题"的工作,
+	// 不为一个只跑一两轮的相位在 models.json 和成本分账里多开一个维度。
+	frame: "planner",
 	plan: "planner",
 	do: "executor",
 	check: "verifier",
@@ -75,6 +84,26 @@ export function transition(state: MissionState, event: MissionEvent): Transition
 				],
 				event.at,
 			);
+
+		// ─────────────── FRAME:问一轮 / 定义完成 ───────────────
+		case "FRAME_ASKED": {
+			if (state.phase !== "frame") return reject(state, "FRAME_ASKED 只能在 frame 相位");
+			return ok(
+				{ ...state, frameAsks: (state.frameAsks ?? 0) + 1 },
+				[log("FRAME 提问一轮,等待人工回答")],
+				event.at,
+			);
+		}
+
+		case "FRAME_DONE": {
+			if (state.phase !== "frame") return reject(state, "FRAME_DONE 只能在 frame 相位");
+			if (state.pendingHandoff) return reject(state, "换脑挂起中,请先 /mission next");
+			return ok(
+				{ ...state, phase: "plan" as const },
+				[...enter("plan"), log("FRAME done, 问题定义已确定 → PLAN")],
+				event.at,
+			);
+		}
 
 		// ─────────────── PLAN → DO ───────────────
 		case "PLAN_FROZEN": {
@@ -253,18 +282,22 @@ export function transition(state: MissionState, event: MissionEvent): Transition
 			if (state.escalation.level !== 3) return reject(state, "当前无待确认的 L3 升级");
 			const taskId = state.currentTask;
 			const tasks = taskId ? setTask(state.tasks, taskId, resetAfterEscalation) : state.tasks;
+			// L3 = 改问题定义,落点是 FRAME 而不是 PLAN:AC 本身错了,
+			// 直接重新分解方案只会在同一个错误的问题上换个姿势。
+			// 提问预算一并重置 —— 新的问题定义值得再问一轮。
 			return ok(
 				{
 					...state,
-					phase: "plan" as const,
+					phase: "frame" as const,
 					tasks,
+					frameAsks: 0,
 					pendingHandoff: "escalate L3",
 				},
 				[
-					log("L3 confirmed, rewriting mission definition"),
+					log("L3 confirmed, rewriting mission definition → FRAME"),
 					{ type: "ARCHIVE_PLAN", reason: "L3 escalation" },
 					{ type: "HANDOFF", reason: "escalate L3" },
-					...enter("plan"),
+					...enter("frame"),
 				],
 				event.at,
 			);
@@ -474,6 +507,17 @@ function compact(s: string): string {
 	return s.replace(/\s+/g, " ").trim().slice(0, 120);
 }
 
+/**
+ * mission 的起始相位。
+ * quick 档没有 AC 也没有 PLAN(判定依据是 --verify 冻结的命令),建好立刻冻结进 DO;
+ * standard/complex 先过 FRAME —— 需求模糊时写不出 AC,这是 I2 的入口条件。
+ */
+export const START_PHASE: Record<Tier, Phase> = {
+	quick: "plan",
+	standard: "frame",
+	complex: "frame",
+};
+
 /** 便于 hooks 层与测试构造初始状态 */
 export function initialState(params: {
 	missionId: string;
@@ -488,7 +532,7 @@ export function initialState(params: {
 	return {
 		missionId: params.missionId,
 		tier: params.tier,
-		phase: "plan",
+		phase: START_PHASE[params.tier],
 		currentTask: null,
 		taskOrder: params.taskOrder,
 		tasks,
@@ -496,6 +540,7 @@ export function initialState(params: {
 		envFingerprint: params.envFingerprint ?? null,
 		pendingHandoff: null,
 		sessionMap: {},
+		frameAsks: 0,
 		cost: {},
 		metrics: { touchedFiles: [], touchedPublicApi: false },
 		updatedAt: 0,

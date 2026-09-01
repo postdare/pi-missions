@@ -24,6 +24,7 @@ interface Theme {
 }
 
 const PHASE_STYLE: Record<string, { icon: string; color: string; label: string }> = {
+	frame: { icon: "◇", color: "accent", label: "定义" },
 	plan: { icon: "◌", color: "accent", label: "规划" },
 	do: { icon: "●", color: "accent", label: "执行" },
 	check: { icon: "◍", color: "accent", label: "判定" },

@@ -12,13 +12,17 @@ import type { Phase, Tier } from "../core/types.ts";
 
 export const BUILTIN_ALL = ["read", "bash", "edit", "write", "grep", "find", "ls"];
 
-export const MISSION_TOOLS = ["mission_write_plan", "mission_submit", "mission_escalate"];
+export const MISSION_TOOLS = ["mission_ask", "mission_frame", "mission_write_plan", "mission_submit", "mission_escalate"];
 
 const READONLY = new Set(["read", "grep", "find", "ls"]);
 
 /** 相位 → 工具集(§3 能力矩阵) */
 export function toolsForPhase(phase: Phase): string[] {
 	switch (phase) {
+		case "frame":
+			// 只读 + 问一轮 + 交定义。写工具与 mission_write_plan 都不给:
+			// 问题还没定义清楚就动手,正是 FRAME 要拦住的事。
+			return [...READONLY, "mission_ask", "mission_frame"];
 		case "plan":
 			return [...READONLY, "mission_write_plan"];
 		case "do":

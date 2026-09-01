@@ -1,5 +1,10 @@
 /**
- * pi-missions · LLM 可调用的工具(仅三个;mission_verdict 在子进程里)
+ * pi-missions · LLM 可调用的工具(五个,按相位分发;mission_verdict 在子进程里)
+ *
+ *   FRAME: mission_ask / mission_frame
+ *   PLAN:  mission_write_plan
+ *   DO:    mission_submit
+ *   ACT:   mission_escalate
  *
  * 工具越少越好。状态推进由 L0 驱动,不给 LLM 直接改 STATE.json 的工具。
  */
@@ -35,6 +40,67 @@ const MilestoneSchema = Type.Object({
 });
 
 export function registerMissionTools(pi: any, getRuntime: GetRuntime): void {
+	pi.registerTool({
+		name: "mission_ask",
+		description:
+			"[FRAME 相位] 把\"不知道就写不出验收标准\"的问题交给人。" +
+			"每个 mission 只许问一轮、最多 3 个问题 —— 这是系统强制的,不是建议。" +
+			"提问后本轮结束,等人回答;不需要提问就直接调用 mission_frame。",
+		parameters: Type.Object({
+			questions: Type.Array(Type.String(), {
+				minItems: 1,
+				maxItems: 3,
+				description: "只问那些答案会改变验收标准的问题。措辞具体,给出选项更好。",
+			}),
+		}),
+		async execute(_id: string, params: any, _signal: any, _onUpdate: any, ctx: any) {
+			const r = await getRuntime(ctx).ask(ctx, params.questions ?? []);
+			if ("error" in r) return toolError(r.error);
+			return {
+				content: [
+					{
+						type: "text",
+						text: `问题已交给人(${r.questions.length} 个)。本轮到此为止:不要继续分析,不要自问自答,等回答之后再调用 mission_frame。`,
+					},
+				],
+				details: { ok: true },
+			};
+		},
+	});
+
+	pi.registerTool({
+		name: "mission_frame",
+		description:
+			"[FRAME 相位] 提交问题定义:一句说得清的目标 + 已确认的约束 + 明确不做的事。" +
+			"提交后进入 PLAN 相位设计验收标准。",
+		parameters: Type.Object({
+			goal: Type.String({ description: "锐化后的目标。别人照着这句话就能判断做完没有" }),
+			constraints: Type.Array(Type.String(), {
+				description: "已确认的约束/前提:人回答的、代码里读到的事实。没有就给空数组",
+			}),
+			nonGoals: Type.Array(Type.String(), {
+				description: "明确不做的事。边界写不出来,验收标准就会漂",
+			}),
+		}),
+		async execute(_id: string, params: any, _signal: any, _onUpdate: any, ctx: any) {
+			const r = await getRuntime(ctx).frame(ctx, {
+				goal: params.goal,
+				constraints: params.constraints ?? [],
+				nonGoals: params.nonGoals ?? [],
+			});
+			if ("error" in r) return toolError(r.error);
+			return {
+				content: [
+					{
+						type: "text",
+						text: "问题定义已确定,进入 PLAN 相位。现在设计可执行的验收标准与任务分解,然后调用 mission_write_plan。",
+					},
+				],
+				details: { ok: true },
+			};
+		},
+	});
+
 	pi.registerTool({
 		name: "mission_write_plan",
 		description:

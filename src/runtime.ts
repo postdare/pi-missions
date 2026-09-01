@@ -14,6 +14,7 @@ import { initialState, transition, ROLE_OF } from "./core/machine.ts";
 import { judge } from "./core/verdict.ts";
 import { evaluateAdmission, evaluatePromotion } from "./core/tier.ts";
 import { evaluateBaseline, shouldProbeBaseline, type BaselineProbe } from "./core/baseline.ts";
+import { evaluateAsk } from "./core/frame.ts";
 import type { MissionPlan } from "./store/mission.ts";
 import {
 	allTasks,
@@ -69,6 +70,15 @@ export interface ActiveMission {
 	quickVerifyCommand?: string;
 }
 
+/** 换脑后给新会话的第一句推动语。按落点相位分流 —— 换脑不只发生在 DO */
+const HANDOFF_NUDGE: Record<string, string> = {
+	frame: "开始重新定义问题",
+	plan: "开始重新规划",
+	do: "开始执行当前任务",
+	act: "开始分析上一轮失败",
+	check: "等待系统判定",
+};
+
 const EVIDENCE_TAIL = 4000;
 /** 基线探针的单分支超时。与 CHECK 同量级:基线本来就该快速失败 */
 const BASELINE_TIMEOUT_MS = 600_000;
@@ -107,7 +117,11 @@ export class Runtime {
 	// ─────────────────────────── 生命周期 ───────────────────────────
 
 	/** /mission new:scaffold + 初始状态 + 进入 plan 相位 */
-	async startNew(ctx: any, goal: string, tier: "standard" | "complex"): Promise<{ id: string } | { error: string }> {
+	async startNew(
+		ctx: any,
+		goal: string,
+		tier: "standard" | "complex",
+	): Promise<{ id: string; phase: Phase } | { error: string }> {
 		if (this.busy()) return { error: "已有进行中的 mission,先 /mission abort 或 /mission resume" };
 		const l = this.layout;
 		ensureScaffold(l);
@@ -129,10 +143,12 @@ export class Runtime {
 		writeCurrentPointer(currentPointer(l), id);
 		this.savedProfile = saveProfile(this.pi, ctx);
 		this.persistProfile();
-		this.pi.setActiveTools(toolsForPhase("plan"));
-		await applyRole(this.pi, ctx, "planner", this.modelsConfig(), (m) => this.warn(ctx, m));
+		const phase = this.active.state.phase; // standard/complex 起于 FRAME(见 core/machine START_PHASE)
+		this.pi.setActiveTools(toolsForPhase(phase));
+		const role = ROLE_OF[phase];
+		if (role) await applyRole(this.pi, ctx, role, this.modelsConfig(), (m) => this.warn(ctx, m));
 		this.refreshWidget(ctx);
-		return { id };
+		return { id, phase };
 	}
 
 	/**
@@ -534,7 +550,7 @@ export class Runtime {
 			return;
 		}
 
-		if (phase === "do" || phase === "plan") {
+		if (phase === "do" || phase === "plan" || phase === "frame") {
 			// 机械升档(升档自动,降档手动)
 			const promo = evaluatePromotion({
 				tier: a.state.tier,
@@ -642,9 +658,63 @@ export class Runtime {
 			},
 			withSession: async (ctx2: any) => {
 				// ⚠️ 只能用 ctx2:外层捕获的 pi/ctx 在会话替换后已失效
-				await ctx2.sendUserMessage("开始执行当前任务");
+				await ctx2.sendUserMessage(HANDOFF_NUDGE[a.state.phase] ?? "继续当前相位的工作");
 			},
 		});
+		return { ok: true };
+	}
+
+	// ─────────────────────────── FRAME(mission_ask / mission_frame) ───────────────────────────
+
+	/**
+	 * FRAME 提问。预算判定在 core(evaluateAsk):一个 mission 只许问一轮、最多 3 个。
+	 * 问题以卡片呈现给人,本轮到此为止 —— 回答由人以普通消息给出。
+	 */
+	async ask(ctx: any, questions: string[]): Promise<{ ok: true; questions: string[] } | { error: string }> {
+		const a = this.active;
+		if (!a) return { error: "无活动 mission" };
+		if (a.state.phase !== "frame") return { error: `当前相位是 ${a.state.phase},只有 frame 相位可以提问` };
+
+		const verdict = evaluateAsk({ askedRounds: a.state.frameAsks ?? 0, questions });
+		if (!verdict.ok) return { error: verdict.reason };
+
+		const r = await this.applyEvent({ type: "FRAME_ASKED", at: Date.now() }, ctx);
+		if (r.error) return { error: r.error };
+
+		this.pi.appendEntry("missions-card", {
+			title: `${a.state.missionId} · 需要你回答(${verdict.questions.length} 个)`,
+			body: verdict.questions.map((q, i) => `${i + 1}. ${q}`).join("\n"),
+		});
+		if (!a.inMemory) {
+			appendLog(
+				statePaths(this.layout, a.state.missionId).logMd,
+				`FRAME 提问:${verdict.questions.map((q) => q.replace(/\s+/g, " ")).join(" / ")}`,
+			);
+		}
+		return { ok: true, questions: verdict.questions };
+	}
+
+	/** FRAME 完成:锐化目标 + 边界写进 plan,进入 PLAN 相位 */
+	async frame(
+		ctx: any,
+		params: { goal: string; constraints: string[]; nonGoals: string[] },
+	): Promise<{ ok: true } | { error: string }> {
+		const a = this.active;
+		if (!a) return { error: "无活动 mission" };
+		if (a.state.phase !== "frame") return { error: `当前相位是 ${a.state.phase},只有 frame 相位可以定义问题` };
+		const goal = params.goal?.trim();
+		if (!goal) return { error: "goal 为空:FRAME 的产出就是一句说得清的目标" };
+
+		a.plan = {
+			...a.plan,
+			goal,
+			framing: { constraints: params.constraints ?? [], nonGoals: params.nonGoals ?? [], at: Date.now() },
+		};
+		const r = await this.applyEvent({ type: "FRAME_DONE", at: Date.now() }, ctx);
+		if (r.error) return { error: r.error };
+		if (!a.inMemory) {
+			appendLog(statePaths(this.layout, a.state.missionId).logMd, `FRAME 定义:${goal.replace(/\s+/g, " ")}`);
+		}
 		return { ok: true };
 	}
 
@@ -822,9 +892,21 @@ export function renderStateCard(plan: MissionPlan, state: MissionState, dirName 
 		`AC(冻结,不可修改):`,
 		acs,
 	];
+	if (plan.framing) {
+		const f = plan.framing;
+		if (f.constraints.length) lines.push(`约束(FRAME 已确认):${f.constraints.join(" · ")}`);
+		if (f.nonGoals.length) lines.push(`不做:${f.nonGoals.join(" · ")}`);
+	}
 	if (task) lines.push(`CURRENT TASK: ${task.id} ${task.title}(verify: ${task.verify.join(", ") || "submit 时提供"})`);
 	if (t?.lastFailureReason) lines.push(`PREV FAILURE: ${t.lastFailureReason}`);
 	if (state.pendingHandoff) lines.push(`⏸ 换脑挂起中:${state.pendingHandoff}。请执行 /mission next。`);
+	if (state.phase === "frame") {
+		lines.push(
+			(state.frameAsks ?? 0) > 0
+				? "提问机会已用完:根据已有回答调用 mission_frame;仍不足以定义就说明缺什么,由人重新描述。"
+				: "先定义问题:读代码,必要时 mission_ask 问一轮(最多 3 个),然后 mission_frame。不要写代码或设计方案。",
+		);
+	}
 	if (state.phase === "do" && task) {
 		lines.push(`你只需完成 ${task.id}。完成后调用 mission_submit,不要自行判定通过。`);
 	}
@@ -855,6 +937,10 @@ function renderHandoffBrief(plan: MissionPlan, state: MissionState, dirName = "m
 		"",
 		`工作流规则见 ${dirName}/README.md;当前相位规则见 ${dirName}/phases/${state.phase}.md。`,
 		state.phase === "plan" ? `重规划:先读 ${dirName}/state 下该 mission 的 LOG.md 失败记录,再调用 mission_write_plan。` : "",
+		state.phase === "frame"
+			? `重新定义问题(L3):先读 ${dirName}/state 下该 mission 的 LOG.md 与 archive/ 里的旧 MISSION.md,` +
+				"弄清原来的问题定义错在哪。提问预算已重置,可以再问一轮,然后调用 mission_frame。"
+			: "",
 	]
 		.filter(Boolean)
 		.join("\n");

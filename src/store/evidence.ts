@@ -94,7 +94,7 @@ export function scanMissions(l: RepoLayout): ScannedMission[] {
 		}
 		out.push({ missionId: d.name, state, plan, stateDir: sp.dir });
 	}
-	const ACTIVE = new Set(["plan", "do", "check", "act"]);
+	const ACTIVE = new Set(["frame", "plan", "do", "check", "act"]);
 	return out.sort((a, b) => {
 		const aa = ACTIVE.has(a.state.phase) ? 0 : 1;
 		const bb = ACTIVE.has(b.state.phase) ? 0 : 1;

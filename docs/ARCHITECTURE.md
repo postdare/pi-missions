@@ -42,6 +42,7 @@ pi-missions 是跑在 [pi](https://github.com/earendil-works/pi-coding-agent) �
 │  │       │                                             │   │
 │  │  ┌────▼─── src/core/ ── 纯函数,唯一裁判 ────────┐  │   │
 │  │  │  machine.ts   相位状态机 (state,event)→effects│  │   │
+│  │  │  frame.ts     FRAME 的提问预算                 │  │   │
 │  │  │  breaker.ts   失败签名 + 熔断 + 升级判定       │  │   │
 │  │  │  verdict.ts   证据 → pass/fail/inconclusive    │  │   │
 │  │  │  baseline.ts  冻结时的基线红绿校验              │  │   │
@@ -88,6 +89,7 @@ pi-missions 是跑在 [pi](https://github.com/earendil-works/pi-coding-agent) �
 
 | 相位 | PDCA | 谁在动 | 工具集(`src/hooks/gate.ts:20`) |
 |---|---|---|---|
+| `frame` | — | LLM(planner) | 只读 + `mission_ask` + `mission_frame` |
 | `plan` | P | LLM(planner) | 只读 + `mission_write_plan` |
 | `do` | D | LLM(executor) | 全部内置工具 + `mission_submit` |
 | `check` | C | **L0,没有 LLM 回合** | 只读 |
@@ -97,20 +99,31 @@ pi-missions 是跑在 [pi](https://github.com/earendil-works/pi-coding-agent) �
 
 ### 迁移图
 
+升级阶梯就是这张图上的反向边 —— 升级 = 往回走一格,不是一套外挂机制:
+
 ```
-   ┌──────┐  PLAN_FROZEN  ┌──────┐  SUBMIT  ┌───────┐
-   │ PLAN │──────────────▶│  DO  │─────────▶│ CHECK │
-   └──────┘               └──────┘          └───┬───┘
-       ▲                     ▲                  │ VERDICT
-       │                     │                  │
-       │        ADJUST_DONE  │      ┌───────────┴───────────┐
-       │       ┌─────────────┘      │ pass → 下一任务/done  │
-       │       │                    │ fail → breaker 判定    │
-       │   ┌───┴──┐                 │ inconclusive → 回 DO   │
-       │   │ ACT  │◀────────────────┘  (连 3 次 → halted)    │
-       │   └───┬──┘  retry                                   │
-       └───────┘  escalate L2 / L3(L3 需人工确认)
+FRAME ──▶ PLAN ──▶ DO ⇄ CHECK ──▶ ACT
+  ▲         ▲        ▲                │
+  └─ L3 ────┴─ L2 ───┴──── L1 ────────┘
+改问题定义   改方案        改实现
 ```
+
+```
+   ┌───────┐ FRAME_DONE ┌──────┐ PLAN_FROZEN ┌──────┐ SUBMIT ┌───────┐
+   │ FRAME │───────────▶│ PLAN │────────────▶│  DO  │───────▶│ CHECK │
+   └───────┘            └──────┘             └──────┘        └───┬───┘
+       ▲                    ▲                   ▲               │ VERDICT
+       │                    │       ADJUST_DONE │   ┌───────────┴───────────┐
+       │                    │      ┌────────────┘   │ pass → 下一任务/done  │
+       │                    │      │                │ fail → breaker 判定    │
+       │                    │  ┌───┴──┐             │ inconclusive → 回 DO   │
+       │                    │  │ ACT  │◀────────────┘  (连 3 次 → halted)    │
+       │                    │  └───┬──┘  retry(L1)
+       │                    └──────┤  escalate L2
+       └───────────────────────────┘  escalate L3(人工确认后)
+```
+
+`FRAME_ASKED` 不迁移相位,只记提问账。
 
 ### 纯 reducer
 
@@ -121,9 +134,10 @@ transition(state: MissionState, event: MissionEvent): { state, effects, error? }
 `src/core/machine.ts:62`。非法迁移**不抛异常**,返回 `error` 字段且状态不变,
 调用方记录并忽略该事件。
 
-**11 个事件**(`src/core/types.ts:117-138`):
-`PLAN_FROZEN` `SUBMIT` `VERDICT` `ADJUST_DONE` `ESCALATE` `ESCALATION_CONFIRMED`
-`ESCALATION_REJECTED` `HANDOFF_REQUEST` `HANDOFF_DONE` `PROMOTE_TIER` `ABORT`
+**13 个事件**(`src/core/types.ts`):
+`FRAME_ASKED` `FRAME_DONE` `PLAN_FROZEN` `SUBMIT` `VERDICT` `ADJUST_DONE` `ESCALATE`
+`ESCALATION_CONFIRMED` `ESCALATION_REJECTED` `HANDOFF_REQUEST` `HANDOFF_DONE`
+`PROMOTE_TIER` `ABORT`
 
 **11 个效果**(`src/core/types.ts:144-160`):
 `SET_TOOLS` `SET_ROLE` `HANDOFF` `LOG` `CONFIRM` `ADVANCE_TASK` `FREEZE_AC`
@@ -147,7 +161,7 @@ transition(state: MissionState, event: MissionEvent): { state, effects, error? }
 |---|---|---|---|
 | L1 | 改实现 | 代码 | ACT → DO(默认级别,`escalation.level` 初值 1) |
 | L2 | 改方案 | 任务分解,**AC 不变** | 回 PLAN,强制换脑 |
-| L3 | 改问题定义 | **可改 AC**,需人工确认 | 回 PLAN,归档旧计划 + 换脑 |
+| L3 | 改问题定义 | **可改 AC**,需人工确认 | 回 **FRAME**,归档旧计划 + 换脑 + 重置提问预算 |
 
 `escalation.level` 是 **mission 级**的单调递增值,`src/core/machine.ts:255` 拒绝降级。
 
@@ -158,6 +172,7 @@ transition(state: MissionState, event: MissionEvent): { state, effects, error? }
 | | quick | standard | complex |
 |---|---|---|---|
 | 入口 | `/mission quick --verify "<命令>"` | `/mission new` | `/mission new --tier=complex` |
+| 起始相位 | `plan`(建好即冻结进 DO) | `frame` | `frame` |
 | 落盘 | 否(`inMemory: true`) | 是 | 是,里程碑分文件 |
 | 判定依据 | 一条裸命令 `quickVerifyCommand`,**进 DO 前冻结** | verify.sh 分支 + 子进程 Verifier | 同左 + 里程碑回归 |
 | 熔断阈值 | 2 | 3 | 3 |
@@ -193,6 +208,32 @@ transition(state: MissionState, event: MissionEvent): { state, effects, error? }
 
 相位到角色的映射是常量表 `ROLE_OF`(`src/core/machine.ts:42`),
 `done`/`halted` 映射到 `null`。
+
+### 4.4 FRAME(问题定义)
+
+`Phase = "frame"`,standard/complex 的起始相位(`START_PHASE`,`src/core/machine.ts`)。
+
+**存在的理由**:AC 必须在 PLAN 冻结且必须可执行(I2)。需求模糊时写不出这样的 AC,
+系统的入口条件就不成立;此时 agent 的行为是可预测的 —— **它会编一条 AC 出来凑格式**,
+然后整套判定建立在一条假标准上。FRAME 把 L3(改问题定义)提到最前面。
+
+**两个工具**:
+
+- `mission_ask(questions[])` —— 把"不知道就写不出 AC"的问题交给人。
+  预算由 L0 强制(`evaluateAsk()`,`src/core/frame.ts`):**整个 mission 只许问一轮、
+  最多 3 个**,第二次调用直接拒绝,超额直接拒绝。轮数记在 `state.frameAsks`
+  (事件 `FRAME_ASKED`,老 STATE.json 缺此字段按 0 算)。
+- `mission_frame({goal, constraints, nonGoals})` —— 交出锐化后的目标与边界,
+  写进 `plan.framing`,发 `FRAME_DONE` 进 PLAN。约束与非目标会出现在 State Card
+  和 MISSION.md 的 `## Frame` 段,`mission` fence 里也带,resume 时能还原。
+
+**退出条件要诚实**:FRAME 的产出是一句话,不是可执行的东西,**没有**机械判据能证明
+"这个目标已经足够清楚"。真正的过滤器仍在下游 —— `validatePlan()` 与冻结基线(4.5.1)。
+FRAME 的价值是让"想不清楚"在烧掉一轮 PLAN 之前暴露,并给人一次介入机会;
+这里唯一机械可测的是提问预算,而它约束的是**追问次数**,不是答案质量。
+
+**角色复用 planner**:同一种"读代码 + 想清楚问题"的工作,不为一个只跑一两轮的相位
+在 models.json 和成本分账里多开一个维度。代价是 FRAME 的花费并进 planner 账下。
 
 ### 4.4 AC(验收标准)与 verify 分支
 
@@ -408,10 +449,12 @@ README 标题里的"双层循环":
 
 ### 4.16 LLM 可调用的工具
 
-只有三个(`src/tools.ts`),外加子进程里的第四个:
+五个(`src/tools.ts`),按相位分发,外加子进程里的第六个:
 
 | 工具 | 相位 | 作用 |
 |---|---|---|
+| `mission_ask` | FRAME | 问一轮(≤3 个,整个 mission 只许一次,L0 强制) |
+| `mission_frame` | FRAME | 交出目标 + 约束 + 非目标,进入 PLAN |
 | `mission_write_plan` | PLAN | 原子提交 AC + 任务分解 + verify.sh 内容 |
 | `mission_submit` | DO | 声明已提交,触发判定(**不等于通过**)。无参数——判定依据早已冻结 |
 | `mission_escalate` | ACT | 主动升级 L2/L3 |
@@ -422,6 +465,22 @@ README 标题里的"双层循环":
 ---
 
 ## 5. 一次完整的 DO→CHECK 时序
+
+在此之前,一个 standard mission 的开头是:
+
+```
+/mission new "让登录快一点"
+  │  startNew → START_PHASE.standard = frame → SET_TOOLS(frame) + planner
+  ▼
+FRAME:LLM 读代码 → mission_ask(≤3 个)→ 本轮结束,等人回答
+  │                └→ evaluateAsk 拒掉超额与第二轮
+  │  人回答(普通消息)
+  ▼
+mission_frame → plan.framing 落定 → FRAME_DONE → PLAN
+  ▼
+PLAN:mission_write_plan → validatePlan → 人工确认 → 基线跑 → 冻结 → DO
+```
+
 
 ```
 LLM 写代码
@@ -460,7 +519,7 @@ followUp 发 DO brief 或 ACT brief,循环继续
 ```
 <repo>/missions/
 ├── README.md                      工作流规则(脚手架铺设,已存在不覆盖)
-├── phases/{plan,do,check,act}.md  相位提示词 ← 进哪个相位读哪个
+├── phases/{frame,plan,do,check,act}.md  相位提示词 ← 进哪个相位读哪个
 ├── scripts/
 │   ├── verify.sh                  AC 的唯一执行入口,planner 起草,随 AC 冻结
 │   ├── env-fingerprint.sh         环境指纹
@@ -496,7 +555,7 @@ followUp 发 DO brief 或 ACT brief,循环继续
 | I5 | 每次升级必须换干净上下文 | `pendingHandoff` 硬阻断 + 磁盘握手 |
 | I6 | 不在仓库里的等于不存在 | `missions/` 全套 + `ensureScaffold()` |
 | I7 | 确定性判定归代码,语义判断归模型 | hard 证据零模型成本;升档判据机械可测 |
-| I8 | 上下文按相位分层加载 | `before_agent_start` 读 `phases/<phase>.md` |
+| I8 | 上下文按相位分层加载 | `before_agent_start` 读 `phases/<phase>.md`(含 `frame.md`) |
 | I9 | 环境不一致判 INCONCLUSIVE | 指纹比对 + `verdict.ts` 第 1 条 |
 
 ---
@@ -534,12 +593,22 @@ quick 档不落盘、不走 `validatePlan()`,`acceptanceCriteria` 恒为空,
 仍然成立的限制:那条命令本身的判别力没有任何机械校验 —— `--verify "true"`
 能过。这与 8.1 是同一个洞的两个入口。
 
-### 8.3 签名归一化粒度未经真实数据校准
+### 8.3 FRAME 的退出没有机械判据
+
+提问预算是机械的,"问题是否已经定义清楚"不是。一个 agent 完全可以不问任何问题、
+把原始需求原样抄进 `goal` 就调用 `mission_frame` —— 系统不会拦。
+
+这不是疏漏,是这一层的性质:目标的清晰度无法用退出码表达。设计上的补偿是
+把真正的关卡放在下游(`validatePlan` + 冻结基线),FRAME 只负责让问题**更早**暴露、
+并给人一次介入机会。如果 FRAME 被敷衍过去,代价会在冻结基线那一关显现 ——
+写不出能红的 AC。
+
+### 8.4 签名归一化粒度未经真实数据校准
 
 `src/core/breaker.ts` 自己标注了这是最需要按实际数据调的参数,当前只有构造用例覆盖。
 真实项目的失败输出形态(尤其非 JVM/TS 生态)会暴露归一化的偏差。
 
-### 8.4 其他运行时限制
+### 8.5 其他运行时限制
 
 - mission 是**前台**的:占用当前会话,一次一个。后台批量编排用 pi-subagents。
 - 相位切换用 `setActiveTools` 改写工具集,plan/act/check 相位会隐藏其它扩展的工具。

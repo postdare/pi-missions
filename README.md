@@ -9,12 +9,14 @@ LLM 永远不能自己宣布"我做完了"——它只能提交,由 L0 依据证
 
 ```
 /mission new "把登录鉴权从 session 迁移到 JWT"
-   │  PLAN 相位:LLM 只读分析 → mission_write_plan 原子提交(人工确认后冻结 AC)
+   │  FRAME 相位:读代码 → 必要时问一轮(最多 3 个)→ mission_frame 定义问题
+   │  PLAN  相位:LLM 只读分析 → mission_write_plan 原子提交
+   │            (人工确认 → 基线跑:每条 AC 此刻必须是红的 → 冻结)
    ▼
    DO → mission_submit → CHECK(L0 亲自跑 verify.sh + 独立 Verifier 子进程)
    ▲                     │ pass → 下一任务;fail → ACT(诊断一轮)→ 回到 DO
    │                     │ 同一失败签名 ×N → 熔断升级:L2 改方案(回 PLAN,换脑)
-   │                     │                          L3 改问题定义(人工确认)
+   │                     │                          L3 改问题定义(回 FRAME,人工确认)
    └── 全部任务通过 → done,恢复现场
 ```
 
@@ -58,8 +60,9 @@ Node ≥ 22.6(core 单测用 `node --test` + type stripping)。
 | `/mission abort` | 终止当前任务(halted) |
 | `/mission models` | 角色模型映射 + 按角色分账的花费 |
 
-LLM 可调用的工具只有三个:`mission_write_plan`(PLAN)、`mission_submit`(DO,无参数)、
-`mission_escalate`(ACT)。状态推进由 L0 驱动。
+LLM 可调用的工具五个,按相位分发:`mission_ask` / `mission_frame`(FRAME)、
+`mission_write_plan`(PLAN)、`mission_submit`(DO,无参数)、`mission_escalate`(ACT)。
+状态推进由 L0 驱动。
 
 ## 仓库布局(I6 · 仓库即规范)
 
@@ -67,7 +70,7 @@ LLM 可调用的工具只有三个:`mission_write_plan`(PLAN)、`mission_submit`
 <repo>/
 ├── missions/
 │   ├── README.md              # 工作流规则(脚手架自动铺设)
-│   ├── phases/{plan,do,check,act}.md   # 相位提示词,可定制
+│   ├── phases/{frame,plan,do,check,act}.md  # 相位提示词,可定制
 │   ├── scripts/
 │   │   ├── verify.sh          # AC 的唯一执行入口,由 planner 起草、随 AC 冻结
 │   │   ├── env-fingerprint.sh # 环境指纹(I9)
@@ -86,6 +89,7 @@ LLM 可调用的工具只有三个:`mission_write_plan`(PLAN)、`mission_submit`
 | | quick | standard | complex |
 |---|---|---|---|
 | 入口 | `/mission quick --verify "<命令>"` | `/mission new` | `/mission new --tier=complex` |
+| 起始相位 | PLAN(建好即冻结进 DO) | FRAME | FRAME |
 | MISSION.md | 不落盘(升档时补落盘) | 落盘,任务级 | 落盘,里程碑分文件 |
 | 验证 | hard(`--verify` 的命令,进 DO 前冻结) | hard + 子进程 semi | hard + semi + 里程碑回归 |
 | 换脑 | 不换 | 水位/升级触发 | 每任务换 + 升级换 |
@@ -105,6 +109,36 @@ LLM 可调用的工具只有三个:`mission_write_plan`(PLAN)、`mission_submit`
 - **soft**:执行者自述,只能触发 ACT,永远不能触发 PASS。
 
 环境指纹不符 → INCONCLUSIVE(不计入熔断);连续 3 次 INCONCLUSIVE → 停机等人。
+
+## FRAME:先定义问题(I2 的入口条件)
+
+AC 必须在 PLAN 冻结,而且必须可执行。需求模糊时根本写不出这样的 AC —— 此时 agent
+的行为是可预测的:**它会编一条 AC 出来凑格式**("AC1: 用户体验良好"),整套判定
+就建立在一条假标准上。
+
+FRAME 把升级阶梯的 L3(改问题定义)提到最前面,于是三级阶梯不再是外挂机制,
+而是相位图上的反向边 —— 升级就是往回走一格:
+
+```
+FRAME ──▶ PLAN ──▶ DO ⇄ CHECK ──▶ ACT
+  ▲         ▲        ▲                │
+  └─ L3 ────┴─ L2 ───┴──── L1 ────────┘
+改问题定义   改方案        改实现
+```
+
+standard/complex 起于 FRAME(`core/machine.ts` 的 `START_PHASE`);quick 档没有 AC
+要定义,建好即冻结进 DO。FRAME 只有只读工具加两个:
+
+- `mission_ask` —— 把"不知道就写不出 AC"的问题交给人,**整个 mission 只许问一轮、
+  最多 3 个**。这条由 L0 强制(`core/frame.ts` 的 `evaluateAsk`),第二次调用直接拒绝。
+  问不完说明该退回去重新描述需求 —— 连环追问二十条比直接说"我没法定义"更糟。
+- `mission_frame` —— 交出锐化后的目标 + 已确认的约束 + 明确不做的事,进入 PLAN。
+  约束与边界写进 State Card 和 MISSION.md 的 `## Frame` 段。
+
+**关于退出条件要诚实:** FRAME 的产出是一句话,不是可执行的东西,没有机械判据能证明
+"这个目标已经足够清楚"。真正的过滤器仍在下游 —— `validatePlan` 与冻结基线。
+FRAME 的价值是让"想不清楚"在烧掉一轮 PLAN 之前暴露,并且给人一次介入的机会;
+这里唯一机械可测的是提问预算。
 
 ## 冻结基线(I2)
 
