@@ -106,6 +106,29 @@ LLM 可调用的工具只有三个:`mission_write_plan`(PLAN)、`mission_submit`
 
 环境指纹不符 → INCONCLUSIVE(不计入熔断);连续 3 次 INCONCLUSIVE → 停机等人。
 
+## 冻结基线(I2)
+
+`validatePlan` 只能证明 AC 指向的 verify 分支**存在**,证明不了它有判别力 ——
+`ac1) exit 0 ;;` 是个完全合法的分支。所以人工确认之后、冻结之前,L0 把每条 AC
+的分支各跑一遍:
+
+| AC 的 `baseline` | 冻结时要求 | 用途 |
+|---|---|---|
+| `red`(缺省) | 必须失败 | 红→绿才是证据。一上来就绿 = 空壳,或这条 AC 不该进这个 mission |
+| `green` | 必须已通过 | 回归项("现有测试不许挂")。此刻就红 = 基线本来就坏了,先修再冻结 |
+
+外加一条:**至少要有一条 `red`** —— 全是回归项的 mission 不产出可验证的新东西。
+分支跑不起来(exit 126/127)不算红。
+
+不符就打回,计划不冻结、不落 MISSION.md,相位停在 PLAN,错误信息直接回给 planner。
+判定见 `core/baseline.ts`(纯函数,9 条单测)。
+
+反向作弊(把分支写成恒 `exit 1`)骗得过基线,但任务永远绿不了,熔断会把它推到停机 ——
+代价落在作弊者自己身上,这是刻意的不对称。
+
+基线**只在首次冻结跑**:L2/L3 重规划时世界已被执行者改过,红绿不再是干净信号,
+再卡就会把重规划锁死(L2 不许改 AC,planner 无路可走)。
+
 ## 换脑(I5)
 
 `agent_settled` 判定需要换脑 → 自动 followUp 触发 `/mission next` → 命令里
@@ -156,7 +179,8 @@ src/
 │   ├── machine.ts      # 相位状态机(熔断判定已并入 VERDICT 处理)
 │   ├── breaker.ts      # 失败签名归一化 + 熔断 + 升级阶梯
 │   ├── verdict.ts      # 证据分级与判定
-│   └── tier.ts         # 三档与自动升档
+│   ├── baseline.ts     # 冻结时的基线红绿校验(挡空壳 AC)
+│   └── tier.ts         # 三档与自动升档 + 进 DO 的准入守卫
 ├── store/              # 仓库布局、MISSION.md fence、STATE.json、LOG.md、git、证据归档
 ├── roles/              # models.json 角色模型 + 子进程 Verifier
 ├── hooks/              # tool_call 闸门 + 编辑级增量反馈
@@ -167,7 +191,7 @@ templates/              # scaffold 进目标仓库的工作流文件
 ## 测试
 
 ```bash
-npm test    # core 层 49 个单测(node --test,无需构建)
+npm test    # core 单测 + runtime/UI 冒烟(node --test,无需构建)
 ```
 
 ## 已知限制

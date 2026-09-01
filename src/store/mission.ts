@@ -8,12 +8,19 @@
  */
 
 import type { Tier } from "../core/types.ts";
+import type { Baseline } from "../core/baseline.ts";
 
 export interface AcceptanceCriterion {
 	id: string;
 	text: string;
 	/** verify.sh 的分支名 —— AC 的可执行入口,不写裸命令(I9) */
 	verify: string;
+	/**
+	 * 冻结时该分支应有的状态。缺省 "red"。
+	 * red = 现在必须失败(红→绿才是证据);green = 回归项,现在必须已经通过。
+	 * 校验见 core/baseline.ts。
+	 */
+	baseline?: Baseline;
 }
 
 export interface PlanTask {
@@ -118,7 +125,7 @@ export function renderMissionMd(plan: MissionPlan): string {
 		"",
 	];
 	for (const ac of plan.acceptanceCriteria) {
-		lines.push(`- ${ac.id} (verify: \`${ac.verify}\`): ${ac.text}`);
+		lines.push(`- ${ac.id} (verify: \`${ac.verify}\`, baseline: ${ac.baseline ?? "red"}): ${ac.text}`);
 	}
 	lines.push("");
 

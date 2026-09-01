@@ -44,7 +44,8 @@ pi-missions 是跑在 [pi](https://github.com/earendil-works/pi-coding-agent) �
 │  │  │  machine.ts   相位状态机 (state,event)→effects│  │   │
 │  │  │  breaker.ts   失败签名 + 熔断 + 升级判定       │  │   │
 │  │  │  verdict.ts   证据 → pass/fail/inconclusive    │  │   │
-│  │  │  tier.ts      三档与自动升档                    │  │   │
+│  │  │  baseline.ts  冻结时的基线红绿校验              │  │   │
+│  │  │  tier.ts      三档与自动升档 + 进 DO 的准入      │  │   │
 │  │  └────────────────────────────────────────────────┘  │   │
 │  │                                                     │   │
 │  │  src/store/   仓库读写(计划/状态/日志/证据/路径)   │   │
@@ -196,7 +197,7 @@ transition(state: MissionState, event: MissionEvent): { state, effects, error? }
 ### 4.4 AC(验收标准)与 verify 分支
 
 ```ts
-{ id: "AC1", text: "人类可读的验收描述", verify: "auth-integration" }
+{ id: "AC1", text: "人类可读的验收描述", verify: "auth-integration", baseline: "red" }
 ```
 
 **`verify` 不是命令,是 `missions/scripts/verify.sh` 的一个分支名**
@@ -214,9 +215,39 @@ transition(state: MissionState, event: MissionEvent): { state, effects, error? }
 
 ### 4.5 冻结(Freeze)
 
-`mission_write_plan` 是**原子提交**:MISSION.md 内容 + verify.sh 内容一次写入,
-人工确认(`src/runtime.ts:653`),然后发 `PLAN_FROZEN`,触发 `FREEZE_AC` 效果
-(`src/runtime.ts:332`):记录环境指纹、落盘、提示提交 git。
+`mission_write_plan` 是**原子提交**:MISSION.md 内容 + verify.sh 内容一次写入。
+冻结路径有四道关,顺序固定:
+
+1. **结构校验** —— `validatePlan()`:AC/任务/verify 分支的完整性
+2. **人工确认** —— `ctx.ui.confirm`,最重要的一次人工介入
+3. **基线跑** —— 落 verify.sh,逐条跑 AC 分支,`evaluateBaseline()` 核对红绿(见 4.5.1)
+4. **冻结** —— 落 MISSION.md、发 `PLAN_FROZEN`,`FREEZE_AC` 效果记录环境指纹并提示提交 git
+
+前三关任意一关不过,计划都不冻结,相位停在 PLAN,错误信息回给 planner 自己修。
+基线跑放在人工确认**之后**是刻意的:PLAN 相位不执行任何东西(工具集里没有 bash),
+这一跑属于进入 DO 的过渡动作,而且跑的是人刚刚批准的那份脚本。
+
+#### 4.5.1 基线判定
+
+`evaluateBaseline()`(`src/core/baseline.ts`,纯函数):
+
+| AC 的 `baseline` | 冻结时要求 | 含义 |
+|---|---|---|
+| `red`(缺省) | 必须失败 | 红→绿才是证据;一上来就绿 = 空壳,或该 AC 不该进这个 mission |
+| `green` | 必须已通过 | 回归项;此刻就红 = 基线本来就坏了,无法区分是谁改坏的 |
+
+外加:**至少一条 `red`**;分支跑不起来(exit 126/127)不算红。
+
+这一关补的是 `validatePlan` 补不了的洞:结构校验只能证明分支**存在**,
+`ac1) exit 0 ;;` 完全合法。基线跑要求分支拿出一次真实的红。
+
+反向作弊(恒 `exit 1`)骗得过基线,但任务永远绿不了,熔断推到停机 ——
+代价落在作弊者自己身上,是刻意的不对称。
+
+**基线只在首次冻结跑**(`shouldProbeBaseline()`)。L2/L3 重规划时执行者已经改过世界,
+先前的红可能因为部分任务做完而变绿;此时仍要求"red AC 必须红"会把重规划直接锁死 ——
+而 L2 的定义就是 AC 不变、只改方案,planner 连改 AC 脱身的余地都没有。
+冻结时刻的红绿只在干净基线上是可判定的信号。
 
 冻结后 AC 只读,由三道锁保护:
 
@@ -459,7 +490,7 @@ followUp 发 DO brief 或 ACT brief,循环继续
 | # | 不变量 | 实现位置 |
 |---|---|---|
 | I1 | 状态是仓库里的文件,不是会话里的对话 | `src/store/state.ts` + CURRENT 指针 + `ensureAttached()` |
-| I2 | AC 在 Plan 冻结,执行期只读 | `FREEZE_AC` + `src/hooks/gate.ts:57-68` + 工具集切换 |
+| I2 | AC 在 Plan 冻结,执行期只读 | `FREEZE_AC` + `src/hooks/gate.ts:57-68` + 工具集切换;判定依据先于执行冻结:`evaluateAdmission()` + `evaluateBaseline()` |
 | I3 | 判定证据必须来自执行者之外 | 子进程 Verifier + soft 永不触发 pass |
 | I4 | 熔断优先于重试 | `breaker.decide()`,并入 `VERDICT(fail)` 处理 |
 | I5 | 每次升级必须换干净上下文 | `pendingHandoff` 硬阻断 + 磁盘握手 |
@@ -474,11 +505,21 @@ followUp 发 DO brief 或 ACT brief,循环继续
 
 以下都是**当前代码的真实状态**,不是待办清单。
 
-### 8.1 "AC 可执行" ≠ "AC 有判别力"
+### 8.1 "AC 可执行" ≠ "AC 有判别力"(已收口大半)
 
-冻结时只校验 verify 分支**存在**(`scriptHasBranch()` 正则文本匹配)。
-`ac1) exit 0 ;;` 能通过校验。也就是说:AC 必须可执行这条约束挡住了"用户体验良好"
-这类不可判定的 AC,但挡不住空壳 target。
+已经堵住的:冻结时的基线跑(4.5.1)要求每条 red AC 拿出一次真实的失败,
+`ac1) exit 0 ;;` 这类空壳分支会被当场打回。
+
+仍然成立的限制:
+
+- **恒红分支骗得过基线**。`ac1) exit 1 ;;` 基线合格,但任务永远绿不了。
+  这是自罚型作弊(熔断会推到停机),不会产出假的"通过",但会白烧一轮 mission。
+- **红的理由没有校验**。分支因为"功能没实现"而红,和因为"脚本自己写错了"而红,
+  机器分不出来。后者会在 DO 阶段表现为怎么改都不绿,最终走熔断。
+- **分支存在性仍是正则粗检**。`scriptHasBranch()` 可能匹配到注释里的同名字符串;
+  真正的机械解法是要求 verify.sh 实现 `--list` 子命令并核对其输出,
+  这需要先给 scaffold 补一个 verify.sh 骨架(目前脚手架不铺 verify.sh,
+  它完全由 planner 起草)。
 
 ### 8.2 quick 档仍然没有 AC,只有一条命令
 

@@ -13,6 +13,13 @@ const ACSchema = Type.Object({
 	id: Type.String({ description: "AC id,如 AC1" }),
 	text: Type.String({ description: "人类可读的验收描述" }),
 	verify: Type.String({ description: "verify.sh 的分支名 —— AC 的唯一执行入口,不写裸命令" }),
+	baseline: Type.Optional(
+		Type.Union([Type.Literal("red"), Type.Literal("green")], {
+			description:
+				"冻结时该分支应有的状态,缺省 red。red=现在必须失败(冻结时系统会跑一遍核对,`exit 0` 这类空壳分支会被当场打回);" +
+				"green=回归项(如\"现有测试不许挂\"),现在必须已经通过。至少要有一条 red。",
+		}),
+	),
 });
 
 const TaskSchema = Type.Object({
@@ -32,7 +39,8 @@ export function registerMissionTools(pi: any, getRuntime: GetRuntime): void {
 		name: "mission_write_plan",
 		description:
 			"[PLAN 相位] 原子提交 Mission 计划:验收标准(AC)+ 任务分解 + verify.sh 内容。" +
-			"提交即冻结 AC(需人工确认),之后进入 DO 相位。",
+			"人工确认后系统会跑一遍基线(每条 AC 的分支必须与其 baseline 声明一致)," +
+			"通过才冻结 AC 并进入 DO 相位。",
 		parameters: Type.Object({
 			goal: Type.String({ description: "Mission 目标" }),
 			acceptanceCriteria: Type.Array(ACSchema, { minItems: 1 }),

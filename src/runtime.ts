@@ -13,6 +13,7 @@ import type { Effect, MissionEvent, MissionState, Phase, Role, Tier, TransitionR
 import { initialState, transition, ROLE_OF } from "./core/machine.ts";
 import { judge } from "./core/verdict.ts";
 import { evaluateAdmission, evaluatePromotion } from "./core/tier.ts";
+import { evaluateBaseline, shouldProbeBaseline, type BaselineProbe } from "./core/baseline.ts";
 import type { MissionPlan } from "./store/mission.ts";
 import {
 	allTasks,
@@ -69,6 +70,8 @@ export interface ActiveMission {
 }
 
 const EVIDENCE_TAIL = 4000;
+/** 基线探针的单分支超时。与 CHECK 同量级:基线本来就该快速失败 */
+const BASELINE_TIMEOUT_MS = 600_000;
 const DIFF_TAIL = 12000;
 
 export class Runtime {
@@ -377,10 +380,7 @@ export class Runtime {
 				fs.writeFileSync(pp.milestoneFile(ms.id), renderMilestoneMd(a.plan, ms), "utf8");
 			}
 		}
-		if (a.plan.verifyScript.trim()) {
-			fs.writeFileSync(verifySh(l), a.plan.verifyScript, "utf8");
-			fs.chmodSync(verifySh(l), 0o755);
-		}
+		this.writeVerifyScript(a.plan);
 		a.inMemory = false;
 		writeCurrentPointer(currentPointer(l), a.plan.missionId);
 		if (a.git) ensureInfoExclude(this.cwd, `${this.config.missionsDir}/state/`);
@@ -677,11 +677,63 @@ export class Runtime {
 			if (!confirmed) return { error: "人工拒绝了计划。请根据反馈修改后重新调用 mission_write_plan。" };
 		}
 
+		// 基线跑:AC 指向的分支存在还不够,它现在必须是红的(空壳分支在这里被打回)。
+		// 放在人工确认之后 —— PLAN 相位不执行任何东西,这一跑属于进入 DO 的过渡动作,
+		// 且跑的是人刚刚批准的那份脚本。
+		this.writeVerifyScript(plan);
+		if (shouldProbeBaseline(a.state.escalation.history.length)) {
+			const probes = await this.runBaseline(plan);
+			const baselineErrors = evaluateBaseline(probes);
+			this.logBaseline(probes, baselineErrors);
+			if (baselineErrors.length > 0) {
+				ctx.ui.notify(`基线未通过,计划未冻结(${baselineErrors.length} 项)`, "error");
+				return {
+					error:
+						`基线校验未通过(计划未冻结,仍在 PLAN 相位):\n${baselineErrors.map((e) => `- ${e}`).join("\n")}\n` +
+						"修正 AC 或 verify.sh 后重新调用 mission_write_plan。",
+				};
+			}
+			ctx.ui.notify(`基线通过:${probes.map((p) => `${p.acId}=${p.expected}`).join(" ")}`, "info");
+		} else if (!a.inMemory) {
+			appendLog(statePaths(this.layout, a.state.missionId).logMd, "baseline skipped (重规划:世界已被执行者改过)");
+		}
+
+		// 通过之后才认这份计划:被拒的 AC 不能留在 a.plan 里,
+		// 否则下一轮 State Card 会把它当成"已冻结"喂给 planner
 		a.plan = plan;
 		await this.persistPlanFiles();
 		const r = await this.applyEvent({ type: "PLAN_FROZEN", at: Date.now(), taskOrder: taskOrder(plan) }, ctx);
 		if (r.error) return { error: r.error };
 		return { ok: true, taskOrder: taskOrder(plan) };
+	}
+
+	/** 逐条跑 AC 的 verify 分支,采集冻结时刻的基线退出码 */
+	private async runBaseline(plan: MissionPlan): Promise<BaselineProbe[]> {
+		const script = verifySh(this.layout);
+		const probes: BaselineProbe[] = [];
+		for (const ac of plan.acceptanceCriteria) {
+			const r = await this.exec("bash", [script, ac.verify], { timeout: BASELINE_TIMEOUT_MS });
+			probes.push({ acId: ac.id, verify: ac.verify, expected: ac.baseline ?? "red", exitCode: r.code });
+		}
+		return probes;
+	}
+
+	private logBaseline(probes: BaselineProbe[], errors: string[]): void {
+		const a = this.active;
+		if (!a || a.inMemory) return;
+		const line = probes.map((p) => `${p.acId}:${p.verify} exit=${p.exitCode} want=${p.expected}`).join(" · ");
+		const md = statePaths(this.layout, a.state.missionId).logMd;
+		appendLog(md, `baseline ${line}`);
+		for (const e of errors) appendLog(md, `baseline REJECTED: ${e}`);
+	}
+
+	/** 单独落 verify.sh(基线跑要在冻结之前拿到脚本;persistPlanFiles 会再写一次,幂等) */
+	private writeVerifyScript(plan: MissionPlan): void {
+		if (!plan.verifyScript.trim()) return;
+		const l = this.layout;
+		ensureScaffold(l);
+		fs.writeFileSync(verifySh(l), plan.verifyScript, "utf8");
+		fs.chmodSync(verifySh(l), 0o755);
 	}
 
 	// ─────────────────────────── 杂项 ───────────────────────────

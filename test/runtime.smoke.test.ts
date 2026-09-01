@@ -297,3 +297,109 @@ test("PLAN 相位的 State Card 不能把'尚未冻结'说成 quick 档口径", 
 	assert.ok(!card.includes("quick 档"), "standard mission 的卡片不该出现 quick 档口径");
 	assert.ok(card.includes("尚未冻结"));
 });
+
+test("空壳 AC(冻结时就绿)被基线打回,计划不冻结", async () => {
+	const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "pi-missions-smoke-"));
+	const pi = mockPi();
+	const ctx = mockCtx(tmp);
+	const rt = new Runtime(pi, tmp);
+	await rt.startNew(ctx, "x", "standard");
+
+	const r = await rt.writePlan(ctx, {
+		goal: "x",
+		acceptanceCriteria: [{ id: "AC1", text: "看起来可执行,其实是空壳", verify: "always-ok" }],
+		milestones: [{ id: "M1", title: "m", tasks: [{ id: "T1", title: "t", verify: ["always-ok"] }] }],
+		verifyScript: '#!/usr/bin/env bash\ncase "$1" in\n  always-ok) exit 0 ;;\n  *) exit 2 ;;\nesac\n',
+	});
+
+	assert.ok("error" in r, "exit 0 的分支必须被拒");
+	assert.match((r as any).error, /在动手之前就已经通过/);
+	assert.equal(rt.active!.state.phase, "plan", "计划未冻结,仍在 PLAN");
+	assert.ok(!fs.existsSync(path.join(tmp, "missions", "plans", rt.active!.state.missionId, "MISSION.md")), "被拒的计划不落 MISSION.md");
+	const log = fs.readFileSync(path.join(tmp, "missions", "state", rt.active!.state.missionId, "LOG.md"), "utf8");
+	assert.ok(log.includes("baseline REJECTED"));
+});
+
+test("回归项显式声明 baseline green 才放行,并与红项共存", async () => {
+	const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "pi-missions-smoke-"));
+	const pi = mockPi();
+	const ctx = mockCtx(tmp);
+	const rt = new Runtime(pi, tmp);
+	await rt.startNew(ctx, "x", "standard");
+
+	const script = '#!/usr/bin/env bash\ncase "$1" in\n  hello-exists) test -f hello.txt ;;\n  no-regression) exit 0 ;;\n  *) exit 2 ;;\nesac\n';
+
+	// 回归项不声明 green → 被当成 red,基线不符,拒
+	const bad = await rt.writePlan(ctx, {
+		goal: "x",
+		acceptanceCriteria: [
+			{ id: "AC1", text: "hello.txt 存在", verify: "hello-exists" },
+			{ id: "AC2", text: "现有测试不许挂", verify: "no-regression" },
+		],
+		milestones: [{ id: "M1", title: "m", tasks: [{ id: "T1", title: "t", verify: ["hello-exists"] }] }],
+		verifyScript: script,
+	});
+	assert.ok("error" in bad);
+	assert.match((bad as any).error, /AC2/);
+
+	// 显式声明 green → 放行
+	const ok = await rt.writePlan(ctx, {
+		goal: "x",
+		acceptanceCriteria: [
+			{ id: "AC1", text: "hello.txt 存在", verify: "hello-exists" },
+			{ id: "AC2", text: "现有测试不许挂", verify: "no-regression", baseline: "green" },
+		],
+		milestones: [{ id: "M1", title: "m", tasks: [{ id: "T1", title: "t", verify: ["hello-exists"] }] }],
+		verifyScript: script,
+	});
+	assert.ok("ok" in ok, JSON.stringify(ok));
+	assert.equal(rt.active!.state.phase, "do");
+	const md = fs.readFileSync(path.join(tmp, "missions", "plans", rt.active!.state.missionId, "MISSION.md"), "utf8");
+	assert.ok(md.includes("baseline: green"), "MISSION.md 要写明基线声明");
+	assert.ok(md.includes("baseline: red"));
+});
+
+test("L2 重规划不被基线锁死:已经做完的部分变绿也能重新冻结", async () => {
+	const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "pi-missions-smoke-"));
+	const { ctx, rt } = await newMission(tmp);
+
+	// 执行者已经把 AC1 做绿了(T1 完成),但 mission 因为别的原因走到 L2
+	fs.writeFileSync(path.join(tmp, "hello.txt"), "hello\n");
+	await rt.applyEvent({ type: "ESCALATE", at: Date.now(), to: 2, reason: "方案错了" }, ctx);
+	assert.equal(rt.active!.state.phase, "plan");
+	await rt.applyEvent({ type: "HANDOFF_DONE", at: Date.now() }, ctx);
+
+	// 同一份 AC(L2 不许改 AC)此刻已经是绿的 —— 若仍跑基线,planner 将无路可走
+	const r = await rt.writePlan(ctx, {
+		goal: "create hello.txt",
+		acceptanceCriteria: [{ id: "AC1", text: "hello.txt 存在且含 hello", verify: "hello-exists" }],
+		milestones: [{ id: "M1", title: "only", tasks: [{ id: "T1", title: "create hello.txt", verify: ["hello-exists"] }] }],
+		verifyScript: VERIFY_SH,
+	});
+
+	assert.ok("ok" in r, JSON.stringify(r));
+	assert.equal(rt.active!.state.phase, "do");
+	const log = fs.readFileSync(path.join(tmp, "missions", "state", rt.active!.state.missionId, "LOG.md"), "utf8");
+	assert.ok(log.includes("baseline skipped"));
+});
+
+test("被基线拒掉的计划不会污染 State Card(a.plan 不提前认账)", async () => {
+	const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "pi-missions-smoke-"));
+	const pi = mockPi();
+	const ctx = mockCtx(tmp);
+	const rt = new Runtime(pi, tmp);
+	await rt.startNew(ctx, "x", "standard");
+
+	const r = await rt.writePlan(ctx, {
+		goal: "x",
+		acceptanceCriteria: [{ id: "AC1", text: "空壳", verify: "always-ok" }],
+		milestones: [{ id: "M1", title: "m", tasks: [{ id: "T1", title: "t", verify: ["always-ok"] }] }],
+		verifyScript: '#!/usr/bin/env bash\ncase "$1" in\n  always-ok) exit 0 ;;\n  *) exit 2 ;;\nesac\n',
+	});
+	assert.ok("error" in r);
+
+	assert.equal(rt.active!.plan.acceptanceCriteria.length, 0, "被拒的 AC 不进 a.plan");
+	const card = renderStateCard(rt.active!.plan, rt.active!.state, "missions");
+	assert.ok(!card.includes("空壳"), "被拒的 AC 不该以冻结口径出现在卡片里");
+	assert.ok(card.includes("尚未冻结"));
+});
