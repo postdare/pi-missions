@@ -72,7 +72,10 @@ export function modelRows(d: ModelsPageData, selected: number, t: Theme, visible
 		const cursor = pad(i === selected ? "▸" : " ", 2, visible);
 		const name = pad(role, 11, visible);
 		const icon = t.fg(STATE_COLOR[v.state] ?? "dim", STATE_ICON[v.state] ?? "?");
-		const label = v.state === "unavailable" ? t.fg("error", v.label) : t.fg(v.state === "inherit" ? "dim" : "fg", v.label);
+		// 已配置且可用的那一行用默认前景色 —— 主题里没有名为 "fg" 的颜色,
+		// 传进去 pi 会抛 Unknown theme color 并把整个 TUI 带崩
+		const label =
+			v.state === "unavailable" ? t.fg("error", v.label) : v.state === "inherit" ? t.fg("dim", v.label) : v.label;
 		const thinking = v.thinkingIsDefault ? t.fg("dim", `${v.thinking}(默认)`) : t.fg("accent", v.thinking);
 		const spent = d.cost[role];
 		const money = spent ? t.fg("dim", `  $${spent.toFixed(4)}`) : "";
