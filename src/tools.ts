@@ -30,7 +30,20 @@ const ACSchema = Type.Object({
 const TaskSchema = Type.Object({
 	id: Type.String({ description: "任务 id,如 T1" }),
 	title: Type.String(),
-	verify: Type.Array(Type.String(), { description: "本任务必须通过的 verify.sh 分支名" }),
+	verify: Type.Array(Type.String(), {
+		description: "本任务必须通过的 verify.sh 分支名。spike 任务必须给空数组",
+	}),
+	kind: Type.Optional(
+		Type.Union([Type.Literal("impl"), Type.Literal("spike")], {
+			description:
+				"缺省 impl(写代码)。spike = 探针:答案只能靠看代码/量一下才知道时用它。" +
+				"产出是书面结论不是代码,闸门只放行写结论文件,一次机会不重试," +
+				"完成后系统带着结论回 PLAN 重写计划。每个 mission 最多一个。",
+		}),
+	),
+	question: Type.Optional(
+		Type.String({ description: "spike 必填:这根探针要回答的那一个问题。判定就是核对结论有没有回答它" }),
+	),
 });
 
 const MilestoneSchema = Type.Object({

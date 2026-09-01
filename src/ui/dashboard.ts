@@ -199,8 +199,13 @@ export function taskLines(plan: MissionPlan, state: MissionState): string[] {
 		for (const t of ms.tasks) {
 			const ts = state.tasks[t.id];
 			const icon = TASK_ICON[ts?.status ?? "pending"] ?? "○";
-			const verify = t.verify.length > 0 ? ` (verify: ${t.verify.join(", ")})` : "";
-			lines.push(`  ${icon} ${t.id} ${t.title} · attempt ${ts?.attempts ?? 0}${verify}`);
+			const suffix =
+				t.kind === "spike"
+					? " · spike(产出结论,完成后重写计划)"
+					: t.verify.length > 0
+						? ` (verify: ${t.verify.join(", ")})`
+						: "";
+			lines.push(`  ${icon} ${t.id} ${t.title} · attempt ${ts?.attempts ?? 0}${suffix}`);
 			if (ts?.lastFailureReason && ts.status !== "done") {
 				lines.push(`      上次失败: ${ts.lastFailureReason}`);
 			}

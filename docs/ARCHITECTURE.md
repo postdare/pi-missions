@@ -43,6 +43,7 @@ pi-missions 是跑在 [pi](https://github.com/earendil-works/pi-coding-agent) �
 │  │  ┌────▼─── src/core/ ── 纯函数,唯一裁判 ────────┐  │   │
 │  │  │  machine.ts   相位状态机 (state,event)→effects│  │   │
 │  │  │  frame.ts     FRAME 的提问预算                 │  │   │
+│  │  │  spike.ts     探针任务的额度与结论判据          │  │   │
 │  │  │  breaker.ts   失败签名 + 熔断 + 升级判定       │  │   │
 │  │  │  verdict.ts   证据 → pass/fail/inconclusive    │  │   │
 │  │  │  baseline.ts  冻结时的基线红绿校验              │  │   │
@@ -313,6 +314,33 @@ FRAME 的价值是让"想不清楚"在烧掉一轮 PLAN 之前暴露,并给人�
 `mission_verdict` 返回结论。它**不能写文件** —— `templates/phases/check.md` 写明理由:
 "验证者一旦能改代码,就会顺手修一下然后判自己通过"。
 
+### 4.6.1 探针任务(spike)
+
+`PlanTask.kind = "spike"`(缺省 `"impl"`)。用于**答案不在人那里、在代码里**的模糊:
+私有 API 用在几处、瓶颈在哪一层、升级报几个错。这类问题 `mission_ask` 无效。
+
+三条约束,每条都有机械实现:
+
+| 约束 | 实现位置 |
+|---|---|
+| 产物是书面结论 | `gateCheck` 的 `spikeReportPath`:edit/write 只放行结论文件;bash 的写操作全挡 |
+| 一次 attempt,不进 ACT/熔断 | `spikeTransition()`(`src/core/machine.ts`)在 `failTransition` 之前分流 |
+| 强制以重写 PLAN 结尾 | 同上:pass/fail 都 → `phase: "plan"` + `ARCHIVE_PLAN` + `HANDOFF` |
+
+**判定**复用现有证据分级,不引入第四种证据:
+
+- **hard** —— `reportIsSubstantive()`:结论文件 ≥ 80 字(挡 `TODO` 与空文件),零模型成本
+- **semi** —— `renderSpikeVerifierBrief()`:独立验证者核对结论是否**正面回答了 `question`**,
+  并抽查它引用的事实;答非所问、只有"需要进一步调研"、或探针改了实现,判 fail
+
+**额度**:每个 mission 最多一个 spike(`validateSpikePlan()`)。计数记在
+`state.spikesRun` 而不是扫 `tasks` —— 重写计划时 `PLAN_FROZEN` 只保留新 taskOrder 里的
+任务,跑过的 spike 会从 `tasks` 里消失,靠扫描会把额度还回来。
+
+**为什么强制回 PLAN 而不是直接接着做**:spike 后面的任务是基于未知写的,本来就该重写;
+更重要的是,允许探针的产出直接进实现,等于给了一条"在没有 AC 的状态下改代码"的通路,
+绕过整个验证闸门。换脑也是必须的 —— 探针上下文里全是调研噪音(I5)。
+
 ### 4.7 判定(Verdict)
 
 `judge(evidences, options)`(`src/core/verdict.ts:28`),七条优先级自上而下命中即返回:
@@ -455,7 +483,7 @@ README 标题里的"双层循环":
 |---|---|---|
 | `mission_ask` | FRAME | 问一轮(≤3 个,整个 mission 只许一次,L0 强制) |
 | `mission_frame` | FRAME | 交出目标 + 约束 + 非目标,进入 PLAN |
-| `mission_write_plan` | PLAN | 原子提交 AC + 任务分解 + verify.sh 内容 |
+| `mission_write_plan` | PLAN | 原子提交 AC + 任务分解(含 spike)+ verify.sh 内容 |
 | `mission_submit` | DO | 声明已提交,触发判定(**不等于通过**)。无参数——判定依据早已冻结 |
 | `mission_escalate` | ACT | 主动升级 L2/L3 |
 | `mission_verdict` | — | 只存在于 Verifier 子进程,逐条 AC 提交结论 |
@@ -528,6 +556,7 @@ followUp 发 DO brief 或 ACT brief,循环继续
 ├── plans/<id>/
 │   ├── MISSION.md                 冻结计划(正文给人,尾部 fence 给机器)
 │   └── M1.md …                    complex 档的里程碑分文件
+├── spikes/<id>/<taskId>.md        探针结论(执行者在 spike 任务里唯一能写的文件)
 └── state/
     ├── CURRENT                    活跃 mission 指针
     └── <id>/
@@ -603,12 +632,24 @@ quick 档不落盘、不走 `validatePlan()`,`acceptanceCriteria` 恒为空,
 并给人一次介入机会。如果 FRAME 被敷衍过去,代价会在冻结基线那一关显现 ——
 写不出能红的 AC。
 
-### 8.4 签名归一化粒度未经真实数据校准
+### 8.4 spike 的"不许改代码"仍有逃逸口
+
+闸门挡住了 edit/write 到非结论文件,以及 bash 里的重定向、`sed -i`、`rm`/`mv`/`cp`、
+`git apply` 这类写操作。挡不住的是:
+
+- **构建/工具链的副作用** —— `npm install`、编译产物、缓存目录的写入无法与"改实现"区分
+- **语言运行时** —— `python -c "open('x','w')..."`、`node -e` 这类可以绕过命令模式匹配
+
+真正严密的做法是在 CHECK 时比对工作区快照(spike 开始时记文件列表,结束时要求没有新增
+改动),代价是要为此存一份快照并处理 mission 开始前就存在的脏改动。当前实现选择了
+命令层拦截 + 独立验证者核对(它看得到 git diff,探针改了实现会判 fail)这一组合。
+
+### 8.5 签名归一化粒度未经真实数据校准
 
 `src/core/breaker.ts` 自己标注了这是最需要按实际数据调的参数,当前只有构造用例覆盖。
 真实项目的失败输出形态(尤其非 JVM/TS 生态)会暴露归一化的偏差。
 
-### 8.5 其他运行时限制
+### 8.6 其他运行时限制
 
 - mission 是**前台**的:占用当前会话,一次一个。后台批量编排用 pi-subagents。
 - 相位切换用 `setActiveTools` 改写工具集,plan/act/check 相位会隐藏其它扩展的工具。

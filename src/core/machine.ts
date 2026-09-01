@@ -114,14 +114,20 @@ export function transition(state: MissionState, event: MissionEvent): Transition
 			const first = order[0];
 			if (!first) return reject(state, "计划中没有任务,无法进入 DO");
 
+			const spikes = new Set(event.spikes ?? []);
 			let tasks: Record<string, TaskState> = {};
 			for (const id of order) {
-				tasks[id] = state.tasks[id] ?? {
-					id,
-					status: "pending" as const,
-					attempts: 0,
-					sameSignatureCount: 0,
-					inconclusiveStreak: 0,
+				const prev = state.tasks[id];
+				tasks[id] = {
+					...(prev ?? {
+						id,
+						status: "pending" as const,
+						attempts: 0,
+						sameSignatureCount: 0,
+						inconclusiveStreak: 0,
+					}),
+					// kind 随每次计划重写更新:同一个 id 可以从 spike 变成 impl
+					kind: spikes.has(id) ? ("spike" as const) : ("impl" as const),
 				};
 			}
 			tasks = setTask(tasks, first, (t) => ({
@@ -202,6 +208,13 @@ export function transition(state: MissionState, event: MissionEvent): Transition
 					],
 					event.at,
 				);
+			}
+
+			// 探针任务:成败都回 PLAN 带着结论重新规划。
+			// 不进 ACT(时间盒:一次 attempt),不进熔断(探针失败本身就是一条结论),
+			// 也不推进到下一任务 —— 它后面的任务是基于未知写的,本来就该重写。
+			if (task?.kind === "spike") {
+				return spikeTransition(state, event.at, taskId, verdict);
 			}
 
 			if (verdict.outcome === "fail") {
@@ -368,6 +381,47 @@ export function transition(state: MissionState, event: MissionEvent): Transition
 }
 
 // ─────────────────────────── 失败处理(breaker 并入点) ───────────────────────────
+
+/**
+ * 探针任务的收尾:不论 pass/fail 都回 PLAN。
+ *
+ * 换脑是必须的 —— 探针的上下文里全是调研噪音,拿它去重新规划正是 I5 要避免的事。
+ * 归档旧计划保留审计链:这份计划是基于未知写的,它被结论取代了。
+ */
+function spikeTransition(state: MissionState, at: number, taskId: string, verdict: Verdict): TransitionResult {
+	const passed = verdict.outcome === "pass";
+	const tasks = setTask(state.tasks, taskId, (t) => ({
+		...t,
+		status: passed ? ("done" as const) : ("blocked" as const),
+		inconclusiveStreak: 0,
+		lastFailureReason: passed ? undefined : compact(verdict.reason),
+	}));
+	const reason = `spike ${taskId} ${passed ? "结论已产出" : "未产出结论"}`;
+	return ok(
+		{
+			...state,
+			phase: "plan" as const,
+			currentTask: null,
+			tasks,
+			spikesRun: (state.spikesRun ?? 0) + 1,
+			pendingHandoff: reason,
+		},
+		[
+			log(`${taskId} verdict=${passed ? "PASS" : "FAIL"} (spike) → 回 PLAN 重新规划 why=${compact(verdict.reason)}`),
+			{ type: "ARCHIVE_PLAN", reason },
+			{ type: "HANDOFF", reason },
+			...enter("plan"),
+			{
+				type: "NOTIFY",
+				level: passed ? "info" : "warning",
+				message: passed
+					? `探针 ${taskId} 已出结论,回到 PLAN 重新规划`
+					: `探针 ${taskId} 没跑出结论(${verdict.reason}),仍回到 PLAN —— 探针只打一次`,
+			},
+		],
+		at,
+	);
+}
 
 /**
  * VERDICT(fail) 的处理。签名计数在机器内更新(applyFailure),
@@ -541,6 +595,7 @@ export function initialState(params: {
 		pendingHandoff: null,
 		sessionMap: {},
 		frameAsks: 0,
+		spikesRun: 0,
 		cost: {},
 		metrics: { touchedFiles: [], touchedPublicApi: false },
 		updatedAt: 0,

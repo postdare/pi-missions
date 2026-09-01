@@ -503,3 +503,145 @@ test("L3 落点是 FRAME:归档旧计划、重置提问预算、换脑简报按�
 	assert.ok("ok" in fr, JSON.stringify(fr));
 	assert.equal(rt.active!.state.phase, "plan");
 });
+
+const SPIKE_REPORT = [
+	"# 结论:旧 ORM 私有 API 的使用面",
+	"",
+	"grep 了 src/,`_rawQuery` 出现在 3 个模块共 12 处;其中 4 处依赖 v2 才有的 `_hints` 参数,",
+	"新 ORM 没有等价物,需要改写成显式 join。其余 8 处可以直接换 API。",
+].join("\n");
+
+/** 起一个只含探针任务的计划 */
+async function spikeMission(tmp: string) {
+	const pi = mockPi();
+	const ctx = mockCtx(tmp);
+	const rt = new Runtime(pi, tmp);
+	await rt.startNew(ctx, "迁移到新 ORM", "standard");
+	await rt.frame(ctx, { goal: "迁移到新 ORM", constraints: [], nonGoals: [] });
+	const wp = await rt.writePlan(ctx, {
+		goal: "迁移到新 ORM",
+		acceptanceCriteria: [{ id: "AC1", text: "hello.txt 存在", verify: "hello-exists" }],
+		milestones: [
+			{
+				id: "M1",
+				title: "先摸清改动面",
+				tasks: [
+					{ id: "T1", title: "摸清旧 ORM 私有 API 的使用面", kind: "spike", question: "私有 API 用在多少处?哪些没有等价物?", verify: [] },
+					{ id: "T2", title: "改造", verify: ["hello-exists"] },
+				],
+			},
+		],
+		verifyScript: VERIFY_SH,
+	});
+	assert.ok("ok" in wp, JSON.stringify(wp));
+	return { pi, ctx, rt };
+}
+
+test("spike:闸门只放行写结论文件,改实现与 bash 写操作都被拦", async () => {
+	const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "pi-missions-smoke-"));
+	const { rt } = await spikeMission(tmp);
+
+	assert.equal(rt.active!.state.currentTask, "T1");
+	assert.equal(rt.active!.state.tasks.T1.kind, "spike");
+	const report = rt.currentSpikeReport()!;
+	assert.ok(report.rel.includes("missions/spikes/"));
+	assert.ok(fs.existsSync(path.dirname(report.abs)), "结论目录要先建好");
+
+	// 只放行结论文件
+	assert.equal(rt.gate("write", { path: report.rel }), null);
+	const blocked = rt.gate("write", { path: "src/main.ts" });
+	assert.ok(blocked && blocked.includes("只能写结论文件"));
+	assert.ok(rt.gate("edit", { path: "src/orm.ts" }));
+
+	// 只读调查放行,写操作拦下
+	assert.equal(rt.gate("bash", { command: "grep -rn _rawQuery src/" }), null);
+	assert.equal(rt.gate("bash", { command: "npx tsc --noEmit" }), null);
+	assert.ok(rt.gate("bash", { command: "sed -i s/a/b/ src/main.ts" }));
+	assert.ok(rt.gate("bash", { command: "echo x > src/main.ts" }));
+});
+
+test("spike:出结论 → 回 PLAN 重新规划,并强制换脑", async () => {
+	const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "pi-missions-smoke-"));
+	const { ctx, rt } = await spikeMission(tmp);
+	const report = rt.currentSpikeReport()!;
+	fs.writeFileSync(report.abs, SPIKE_REPORT, "utf8");
+
+	await rt.applyEvent({ type: "SUBMIT", at: Date.now() }, ctx);
+	await rt.runCheck(ctx);
+
+	assert.equal(rt.active!.state.phase, "plan", "探针不推进到下一任务,回 PLAN");
+	assert.equal(rt.active!.state.tasks.T1.status, "done");
+	assert.equal(rt.active!.state.currentTask, null);
+	assert.ok(rt.active!.state.pendingHandoff, "拿调研噪音去重新规划正是 I5 要避免的");
+	assert.ok(fs.readdirSync(path.join(tmp, "missions", "state", rt.active!.state.missionId, "archive")).length > 0);
+
+	// 探针只打一次:重写的计划里不能再排 spike
+	await rt.applyEvent({ type: "HANDOFF_DONE", at: Date.now() }, ctx);
+	const again = await rt.writePlan(ctx, {
+		goal: "迁移到新 ORM",
+		acceptanceCriteria: [{ id: "AC1", text: "hello.txt 存在", verify: "hello-exists" }],
+		milestones: [
+			{
+				id: "M1",
+				title: "再探一次",
+				tasks: [{ id: "T3", title: "再看看", kind: "spike", question: "还有别的吗?", verify: [] }],
+			},
+		],
+		verifyScript: VERIFY_SH,
+	});
+	assert.ok("error" in again);
+	assert.match((again as any).error, /已经跑过一次 spike/);
+});
+
+test("spike:没写结论就提交 → 判 fail,但同样回 PLAN 不重试", async () => {
+	const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "pi-missions-smoke-"));
+	const { ctx, rt } = await spikeMission(tmp);
+	fs.writeFileSync(rt.currentSpikeReport()!.abs, "TODO", "utf8"); // 太短,不算结论
+
+	await rt.applyEvent({ type: "SUBMIT", at: Date.now() }, ctx);
+	await rt.runCheck(ctx);
+
+	assert.equal(rt.active!.state.phase, "plan", "探针失败也不进 ACT、不熔断");
+	assert.equal(rt.active!.state.tasks.T1.status, "blocked");
+	assert.equal(rt.active!.state.tasks.T1.attempts, 1, "一次机会");
+	assert.equal(rt.active!.state.tasks.T1.sameSignatureCount, 0, "不进熔断计数");
+});
+
+test("spike 的结构约束:必须有 question,不能有 verify 分支", async () => {
+	const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "pi-missions-smoke-"));
+	const pi = mockPi();
+	const ctx = mockCtx(tmp);
+	const rt = new Runtime(pi, tmp);
+	await rt.startNew(ctx, "x", "standard");
+	await rt.frame(ctx, { goal: "x", constraints: [], nonGoals: [] });
+
+	const bad = await rt.writePlan(ctx, {
+		goal: "x",
+		acceptanceCriteria: [{ id: "AC1", text: "hello.txt 存在", verify: "hello-exists" }],
+		milestones: [
+			{ id: "M1", title: "m", tasks: [{ id: "T1", title: "探", kind: "spike", verify: ["hello-exists"] }] },
+		],
+		verifyScript: VERIFY_SH,
+	});
+	assert.ok("error" in bad);
+	assert.match((bad as any).error, /必须写明它要回答的那一个问题/);
+	assert.match((bad as any).error, /不能有 verify 分支/);
+});
+
+test("spike 的结论文件放行不能变成绕过闸门的通道", async () => {
+	const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "pi-missions-smoke-"));
+	const { rt } = await spikeMission(tmp);
+	const report = rt.currentSpikeReport()!;
+
+	// 相对路径与绝对路径两种写法都放行
+	assert.equal(rt.gate("write", { path: report.rel }), null);
+	assert.equal(rt.gate("write", { path: report.abs }), null);
+
+	// 尾部凑巧相同的别处路径不放行
+	assert.ok(rt.gate("write", { path: `../elsewhere/${report.rel}` }));
+	assert.ok(rt.gate("write", { path: `evil${report.rel}` }));
+
+	// 冻结件仍然受保护(spike 的放行分支不早退)
+	assert.ok(rt.gate("write", { path: `missions/plans/${rt.active!.state.missionId}/MISSION.md` }));
+	assert.ok(rt.gate("write", { path: "missions/scripts/verify.sh" }));
+});

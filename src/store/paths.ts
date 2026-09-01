@@ -12,6 +12,8 @@ export interface RepoLayout {
 	root: string;
 	plans: string;
 	state: string;
+	/** 探针结论:missions/spikes/<missionId>/<taskId>.md */
+	spikes: string;
 	phases: string;
 	scripts: string;
 }
@@ -36,6 +38,7 @@ export function layout(cwd: string, dirName: string): RepoLayout {
 		root,
 		plans: path.join(root, "plans"),
 		state: path.join(root, "state"),
+		spikes: path.join(root, "spikes"),
 		phases: path.join(root, "phases"),
 		scripts: path.join(root, "scripts"),
 	};
@@ -64,6 +67,14 @@ export function statePaths(l: RepoLayout, missionId: string): MissionStatePaths 
 /** 当前活跃 mission 指针(session_start 重建用) */
 export function currentPointer(l: RepoLayout): string {
 	return path.join(l.state, "CURRENT");
+}
+
+/**
+ * 探针结论文件。放在 missions/spikes/ 而不是 state/ —— 它是给人和 planner 读的产物,
+ * 值得进仓库;state/ 是 L0 的账本,执行者根本写不进去。
+ */
+export function spikeReport(l: RepoLayout, missionId: string, taskId: string): string {
+	return path.join(l.spikes, missionId, `${taskId}.md`);
 }
 
 export function verifySh(l: RepoLayout): string {

@@ -107,6 +107,41 @@ ${input.diff}
 - 核对完调用 mission_verdict,然后结束`;
 }
 
+/**
+ * 探针的核对简报。判的不是"改动对不对"(探针不该有改动),
+ * 而是"这份结论有没有真的回答那个问题"。
+ */
+export function renderSpikeVerifierBrief(input: {
+	goal: string;
+	taskId: string;
+	question: string;
+	report: string;
+	diff: string;
+}): string {
+	return `你是独立验证者,正在核对一次探针任务(spike)的结论。你不能写文件(没有写工具),只能 read + bash 核对,然后调用 mission_verdict 提交结论。
+
+# Mission 目标
+${input.goal}
+
+# 探针要回答的问题(${input.taskId})
+${input.question}
+
+# 执行者交出的结论
+${input.report}
+
+# 工作区改动(探针不该改实现,有改动就是越界)
+${input.diff || "(无)"}
+
+# 规则
+- 只判一条,acId 用 "spike"
+- pass 的条件:结论**正面回答了上面那个问题**,且给出了它依据的事实(文件、数量、报错、测量值)
+- fail 的条件:答非所问、只有"需要进一步调研"这类空话、或结论与仓库里能读到的事实矛盾;
+  探针改了实现代码也判 fail
+- 证据不足以判断就给 inconclusive,不要猜
+- 你可以自己 grep / 跑只读命令去抽查结论里的关键事实
+- 核对完调用 mission_verdict,然后结束`;
+}
+
 function indent(s: string): string {
 	return s
 		.split("\n")

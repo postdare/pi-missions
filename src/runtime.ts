@@ -15,6 +15,7 @@ import { judge } from "./core/verdict.ts";
 import { evaluateAdmission, evaluatePromotion } from "./core/tier.ts";
 import { evaluateBaseline, shouldProbeBaseline, type BaselineProbe } from "./core/baseline.ts";
 import { evaluateAsk } from "./core/frame.ts";
+import { reportIsSubstantive, validateSpikePlan } from "./core/spike.ts";
 import type { MissionPlan } from "./store/mission.ts";
 import {
 	allTasks,
@@ -24,6 +25,7 @@ import {
 	parseMissionMd,
 	renderMilestoneMd,
 	renderMissionMd,
+	spikeTaskIds,
 	taskOrder,
 	validatePlan,
 } from "./store/mission.ts";
@@ -34,6 +36,7 @@ import {
 	layout,
 	modelsJson,
 	planPaths,
+	spikeReport,
 	statePaths,
 	verifySh,
 	verifierToolsTs,
@@ -55,7 +58,7 @@ import {
 	type ModelsConfig,
 	type SavedProfile,
 } from "./roles/models.ts";
-import { renderVerifierBrief, runVerifier } from "./roles/verifier.ts";
+import { renderSpikeVerifierBrief, renderVerifierBrief, runVerifier } from "./roles/verifier.ts";
 import { BUILTIN_ALL, gateCheck, MISSION_TOOLS, toolsForPhase } from "./hooks/gate.ts";
 import { IncrementalDiagnostics } from "./hooks/diagnostics.ts";
 
@@ -344,9 +347,11 @@ export class Runtime {
 					break;
 				}
 				case "ADVANCE_TASK":
+					this.ensureSpikeDir();
 					break; // State Card 与 widget 已反映
 				case "FREEZE_AC":
 					await this.onFreezeAc(ctx);
+					this.ensureSpikeDir();
 					break;
 				case "PERSIST_PLAN":
 					await this.persistPlanFiles();
@@ -382,6 +387,12 @@ export class Runtime {
 			ctx.ui.notify("非 git 仓库:AC 冻结仅靠 L0 闸门,无 git 审计链(降级模式)", "warning");
 		}
 		appendLog(sp.logMd, `env fingerprint=${a.state.envFingerprint}`);
+	}
+
+	/** 探针任务开始前先把结论目录建好,免得执行者第一次写文件就撞在 ENOENT 上 */
+	private ensureSpikeDir(): void {
+		const s = this.currentSpikeReport();
+		if (s) fs.mkdirSync(path.dirname(s.abs), { recursive: true });
 	}
 
 	private async persistPlanFiles(): Promise<void> {
@@ -428,7 +439,43 @@ export class Runtime {
 		let requiredAcIds: string[] = [];
 		let hardResults: Array<{ acId: string; pass: boolean; outputTail: string }> = [];
 
-		if (a.state.tier === "quick") {
+		const spike = this.currentSpikeReport();
+		if (spike) {
+			// 探针的判定:hard = 结论文件够不够实(机械、零模型成本);
+			// semi = 独立验证者核对它有没有真的回答那个问题。
+			const report = fs.existsSync(spike.abs) ? fs.readFileSync(spike.abs, "utf8") : null;
+			const substantive = reportIsSubstantive(report);
+			requiredAcIds = ["spike"];
+			evidences.push({
+				level: "hard",
+				acId: "spike",
+				result: substantive ? "pass" : "fail",
+				raw: substantive
+					? `结论文件 ${spike.rel}(${report!.trim().length} 字)`
+					: `结论文件 ${spike.rel} 缺失或过短 —— 探针的产出就是这份结论`,
+				exitCode: substantive ? 0 : 1,
+				envFingerprint: fp,
+			});
+
+			if (substantive && a.git && fs.existsSync(verifierToolsTs(l))) {
+				const semi = await runVerifier(this.exec, {
+					cwd: this.cwd,
+					toolsPath: verifierToolsTs(l),
+					provider: this.modelsConfig().verifier?.provider,
+					model: this.modelsConfig().verifier?.model,
+					timeoutMs: this.config.verifierTimeoutMs ?? 300_000,
+					envFingerprint: fp,
+					brief: renderSpikeVerifierBrief({
+						goal: a.plan.goal,
+						taskId: task?.id ?? "",
+						question: task?.question ?? "",
+						report: tail(report!, EVIDENCE_TAIL),
+						diff: await this.gitDiff(),
+					}),
+				});
+				if (semi) evidences.push(...semi);
+			}
+		} else if (a.state.tier === "quick") {
 			// quick 档:验证命令在 startQuick 时就已冻结(无命令的输入会被升档挡在 DO 之外)
 			const cmd = a.quickVerifyCommand;
 			if (cmd) {
@@ -525,7 +572,7 @@ export class Runtime {
 		if (s.phase === "act") {
 			this.pi.sendUserMessage(renderActBrief(a.plan, s), { deliverAs: "followUp" });
 		} else if (s.phase === "do") {
-			this.pi.sendUserMessage(renderDoBrief(a.plan, s), { deliverAs: "followUp" });
+			this.pi.sendUserMessage(renderDoBrief(a.plan, s, this.currentSpikeReport()?.rel), { deliverAs: "followUp" });
 		}
 	}
 
@@ -545,7 +592,7 @@ export class Runtime {
 			// ACT = 一轮诊断对话,结束后自动回 DO(L1 改实现)
 			const r = await this.applyEvent({ type: "ADJUST_DONE", at: Date.now() }, ctx);
 			if (!r.error && !a.state.pendingHandoff) {
-				this.pi.sendUserMessage(renderDoBrief(a.plan, a.state), { deliverAs: "followUp" });
+				this.pi.sendUserMessage(renderDoBrief(a.plan, a.state, this.currentSpikeReport()?.rel), { deliverAs: "followUp" });
 			}
 			return;
 		}
@@ -616,6 +663,18 @@ export class Runtime {
 		a.state.cost[role] = (a.state.cost[role] ?? 0) + total;
 	}
 
+	// ─────────────────────────── 探针(spike) ───────────────────────────
+
+	/** 当前任务是 spike 时返回它的结论文件路径;否则 null */
+	currentSpikeReport(): { abs: string; rel: string } | null {
+		const a = this.active;
+		if (!a?.state.currentTask) return null;
+		const task = findTask(a.plan, a.state.currentTask);
+		if (task?.kind !== "spike") return null;
+		const abs = spikeReport(this.layout, a.state.missionId, task.id);
+		return { abs, rel: path.relative(this.cwd, abs).replace(/\\/g, "/") };
+	}
+
 	// ─────────────────────────── 闸门 ───────────────────────────
 
 	gate(toolName: string, input: Record<string, unknown>): string | null {
@@ -628,6 +687,7 @@ export class Runtime {
 			toolName,
 			input,
 			missionsDirName: this.config.missionsDir,
+			spikeReportPath: this.currentSpikeReport()?.rel ?? null,
 		});
 	}
 
@@ -735,6 +795,13 @@ export class Runtime {
 
 		const plan: MissionPlan = { ...a.plan, ...params };
 		const errors = validatePlan(plan);
+		// 探针的额度是 mission 级的,validatePlan(纯函数、只看计划)判不了,放在这里
+		errors.push(
+			...validateSpikePlan({
+				spikeTaskIds: spikeTaskIds(plan),
+				alreadyRanSpike: (a.state.spikesRun ?? 0) > 0,
+			}),
+		);
 		if (errors.length > 0) return { error: `计划不合法:\n${errors.map((e) => `- ${e}`).join("\n")}` };
 
 		// PLAN 冻结前人工确认 —— 最重要的一次介入(§7.4)
@@ -772,7 +839,10 @@ export class Runtime {
 		// 否则下一轮 State Card 会把它当成"已冻结"喂给 planner
 		a.plan = plan;
 		await this.persistPlanFiles();
-		const r = await this.applyEvent({ type: "PLAN_FROZEN", at: Date.now(), taskOrder: taskOrder(plan) }, ctx);
+		const r = await this.applyEvent(
+			{ type: "PLAN_FROZEN", at: Date.now(), taskOrder: taskOrder(plan), spikes: spikeTaskIds(plan) },
+			ctx,
+		);
 		if (r.error) return { error: r.error };
 		return { ok: true, taskOrder: taskOrder(plan) };
 	}
@@ -897,7 +967,16 @@ export function renderStateCard(plan: MissionPlan, state: MissionState, dirName 
 		if (f.constraints.length) lines.push(`约束(FRAME 已确认):${f.constraints.join(" · ")}`);
 		if (f.nonGoals.length) lines.push(`不做:${f.nonGoals.join(" · ")}`);
 	}
-	if (task) lines.push(`CURRENT TASK: ${task.id} ${task.title}(verify: ${task.verify.join(", ") || "submit 时提供"})`);
+	if (task?.kind === "spike") {
+		lines.push(
+			`CURRENT TASK: ${task.id} ${task.title} —— 探针(spike),产出是书面结论,不是代码`,
+			`  要回答:${task.question ?? ""}`,
+			`  结论写到:./${dirName}/spikes/${state.missionId}/${task.id}.md(闸门只放行这一个文件)`,
+			"  一次机会,不重试;提交后系统会带着结论回到 PLAN 重新规划。",
+		);
+	} else if (task) {
+		lines.push(`CURRENT TASK: ${task.id} ${task.title}(verify: ${task.verify.join(", ") || "submit 时提供"})`);
+	}
 	if (t?.lastFailureReason) lines.push(`PREV FAILURE: ${t.lastFailureReason}`);
 	if (state.pendingHandoff) lines.push(`⏸ 换脑挂起中:${state.pendingHandoff}。请执行 /mission next。`);
 	if (state.phase === "frame") {
@@ -907,15 +986,25 @@ export function renderStateCard(plan: MissionPlan, state: MissionState, dirName 
 				: "先定义问题:读代码,必要时 mission_ask 问一轮(最多 3 个),然后 mission_frame。不要写代码或设计方案。",
 		);
 	}
-	if (state.phase === "do" && task) {
+	if (state.phase === "do" && task && task.kind !== "spike") {
 		lines.push(`你只需完成 ${task.id}。完成后调用 mission_submit,不要自行判定通过。`);
 	}
 	return lines.join("\n");
 }
 
-function renderDoBrief(plan: MissionPlan, state: MissionState): string {
+function renderDoBrief(plan: MissionPlan, state: MissionState, spikeReportRel?: string | null): string {
 	const task = state.currentTask ? findTask(plan, state.currentTask) : undefined;
 	const t = state.currentTask ? state.tasks[state.currentTask] : undefined;
+	if (task?.kind === "spike") {
+		return [
+			`[pi-missions] 进入 DO:${task.id} ${task.title} —— 这是一次**探针(spike)**,不是实现任务。`,
+			`要回答的问题:${task.question ?? ""}`,
+			`只做调查(读代码、grep、跑只读命令),把结论写进 ${spikeReportRel ?? "结论文件"} ——`,
+			"闸门只放行写这一个文件,改实现会被拦。结论要给出依据的事实(文件、数量、报错、测量值),",
+			"不要写\"需要进一步调研\"。写完调用 mission_submit;之后系统会带着结论回到 PLAN 重新规划。",
+			"探针只打一次,没有第二次尝试。",
+		].join("\n");
+	}
 	const lines = [`[pi-missions] 进入 DO:${state.currentTask} ${task?.title ?? ""}(第 ${t?.attempts ?? 1} 次尝试)`];
 	if (t?.lastFailureReason) lines.push(`上一轮失败:${t.lastFailureReason} —— 换思路,不要重复同一修法。`);
 	lines.push("完成后调用 mission_submit。");

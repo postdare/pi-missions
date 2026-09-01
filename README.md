@@ -77,6 +77,7 @@ LLM 可调用的工具五个,按相位分发:`mission_ask` / `mission_frame`(FRA
 │   │   └── verifier-tools.ts  # 子进程 Verifier 的扩展
 │   ├── models.json            # 角色模型映射(可选)
 │   ├── plans/<id>/MISSION.md  # 冻结计划(正文给人,尾部 ```mission fence 给机器)
+│   ├── spikes/<id>/<task>.md  # 探针结论(执行者唯一能写的产物)
 │   └── state/<id>/            # STATE.json · LOG.md · evidence/ · archive/
 ```
 
@@ -139,6 +140,34 @@ standard/complex 起于 FRAME(`core/machine.ts` 的 `START_PHASE`);quick 档没�
 "这个目标已经足够清楚"。真正的过滤器仍在下游 —— `validatePlan` 与冻结基线。
 FRAME 的价值是让"想不清楚"在烧掉一轮 PLAN 之前暴露,并且给人一次介入的机会;
 这里唯一机械可测的是提问预算。
+
+## 探针任务(spike)
+
+有些模糊不是描述不清,是**答案不在人那里,在代码里**:旧 API 到底用在 3 处还是 300 处、
+瓶颈在 SQL 还是序列化、升级会报几个错。这类问题上 `mission_ask` 无效 —— 你问人,人也不知道。
+
+没有 spike 时系统只有两个出口,都不对:planner 硬猜一个方案(猜错走 L2,烧掉整轮),
+或者写一条含糊的 AC 把不确定性带进 DO(现在会被冻结基线打回)。
+
+spike 是第三条路:**先花一小笔钱去看一眼,拿着结论回来重新规划。**
+在计划里把任务标成 `kind: "spike"` 并写明 `question`(要回答的那一个问题),
+`verify` 给空数组。三条约束都是机械的:
+
+| 约束 | 实现 |
+|---|---|
+| 产物是书面结论,不是代码 | 闸门只放行写 `missions/spikes/<id>/<taskId>.md`;bash 的写操作(重定向 / `sed -i` / `rm`·`mv`·`cp` / `git apply`)一并挡住 |
+| 一次 attempt,不进 ACT、不进熔断 | 探针的失败本身就是一条结论 |
+| 强制以重写 PLAN 结尾 | 不论成败都回 PLAN,归档旧计划 + 强制换脑 |
+
+第三条是关键:没有它,agent 会一边"调研"一边顺手把代码改了,最后你既没拿到干净的结论,
+也没拿到干净的方案 —— 而且那些改动是在没有 AC 的状态下做的,等于绕过了整个验证闸门。
+
+判定复用现有的证据分级:**hard** = 结论文件够不够实(≥80 字,机械、零模型成本);
+**semi** = 独立验证者核对它有没有真的回答那个问题(答非所问、"需要进一步调研"、
+或探针改了实现,都判 fail)。
+
+**每个 mission 最多一个 spike**(记在 `state.spikesRun`,重写计划不会把额度还回来)——
+再探一次在机制上等于无限期推迟动手;真是问题定义错了,走 L3 回 FRAME。
 
 ## 冻结基线(I2)
 

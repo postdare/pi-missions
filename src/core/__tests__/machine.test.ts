@@ -290,3 +290,48 @@ test("ABORT 从任意活跃相位停机,done 后忽略", () => {
 	assert.ok(has(r.effects, "RESTORE"));
 	assert.ok(transition(r.state, { type: "ABORT", at: AT, reason: "again" }).error);
 });
+
+// ─────────────── 探针(spike) ───────────────
+
+/** 把一个 spike 任务推到 check 相位 */
+function toSpikeCheck(): MissionState {
+	const s = transition(toPlan(), { type: "PLAN_FROZEN", at: AT, spikes: ["T1"] }).state;
+	return transition(s, { type: "SUBMIT", at: AT }).state;
+}
+
+test("spike PASS 不推进下一任务,而是回 PLAN + 换脑 + 归档", () => {
+	const r = transition(toSpikeCheck(), { type: "VERDICT", at: AT, verdict: pass });
+	assert.equal(r.state.phase, "plan");
+	assert.equal(r.state.currentTask, null);
+	assert.equal(r.state.tasks.T1.status, "done");
+	assert.equal(r.state.spikesRun, 1);
+	assert.ok(r.state.pendingHandoff);
+	assert.ok(has(r.effects, "ARCHIVE_PLAN"));
+	assert.ok(has(r.effects, "HANDOFF"));
+});
+
+test("spike FAIL 也回 PLAN:不进 ACT、不计熔断(时间盒)", () => {
+	const r = transition(toSpikeCheck(), { type: "VERDICT", at: AT, verdict: failed() });
+	assert.equal(r.state.phase, "plan", "探针的失败本身就是一条结论");
+	assert.equal(r.state.tasks.T1.status, "blocked");
+	assert.equal(r.state.tasks.T1.sameSignatureCount, 0);
+	assert.equal(r.state.tasks.T1.attempts, 1);
+	assert.equal(r.state.spikesRun, 1, "失败也算用掉一次额度");
+});
+
+test("spikesRun 是独立记账:重写计划丢掉旧任务也不会把额度还回来", () => {
+	const after = transition(toSpikeCheck(), { type: "VERDICT", at: AT, verdict: pass }).state;
+	const replanned = transition(
+		{ ...after, pendingHandoff: null },
+		{ type: "PLAN_FROZEN", at: AT, taskOrder: ["T9"] },
+	).state;
+	assert.equal(replanned.tasks.T1, undefined, "旧任务确实被丢掉了");
+	assert.equal(replanned.spikesRun, 1, "额度还在");
+});
+
+test("kind 随每次冻结重算:同一 id 可以从 spike 变回 impl", () => {
+	const asSpike = transition(toPlan(), { type: "PLAN_FROZEN", at: AT, spikes: ["T1"] }).state;
+	assert.equal(asSpike.tasks.T1.kind, "spike");
+	const asImpl = transition({ ...asSpike, phase: "plan" as const }, { type: "PLAN_FROZEN", at: AT }).state;
+	assert.equal(asImpl.tasks.T1.kind, "impl");
+});
