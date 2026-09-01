@@ -7,10 +7,10 @@
 
 import * as fs from "node:fs";
 import type { Runtime } from "./runtime.ts";
-import { parseMissionMd } from "./store/mission.ts";
-import { planPaths, statePaths } from "./store/paths.ts";
+import { allTasks, parseMissionMd, type MissionPlan } from "./store/mission.ts";
+import { planPaths, statePaths, spikeReport } from "./store/paths.ts";
 import { readLog } from "./store/log.ts";
-import { latestEvidenceResults } from "./store/evidence.ts";
+import { latestEvidenceResults, readTaskEvidenceHistory, type TaskEvidenceAttempt } from "./store/evidence.ts";
 import { loadStateFile } from "./store/state.ts";
 import { openStatusView, statusFallbackText, type StatusViewData } from "./ui/status-view.ts";
 import { applyTierSelection, clearTierIndicator } from "./ui/tier-indicator.ts";
@@ -18,6 +18,7 @@ import { openMissionsPanel } from "./ui/panel.ts";
 import { STATE_ICON } from "./ui/models-page.ts";
 import { ROLE_ORDER, resolveRoleView } from "./roles/models.ts";
 import { ROLE_OF } from "./core/machine.ts";
+import type { MissionState } from "./core/types.ts";
 
 type Ctx = any;
 type GetRuntime = (ctx: Ctx) => Runtime;
@@ -39,12 +40,22 @@ export function registerCommands(pi: any, getRuntime: GetRuntime): void {
 						ctx.ui.notify(`找不到 mission "${id}" 的计划或状态`, "error");
 						return;
 					}
-					const isActive = rt0.active?.state.missionId === id;
+					const canResume = d.state.phase !== "done";
+					const canAbort = d.state.phase !== "done" && d.state.phase !== "halted";
 					await openStatusView(ctx, () => statusDataFor(rt0, id), {
-						onResume: isActive
+						onResume: canResume
 							? (mid) => pi.sendUserMessage(`/mission resume ${mid}`, { deliverAs: "followUp" })
 							: undefined,
+						onAbort: canAbort
+							? () => pi.sendUserMessage(`/mission abort`, { deliverAs: "followUp" })
+							: undefined,
 					});
+				},
+				onResume: (id) => {
+					pi.sendUserMessage(`/mission resume ${id}`, { deliverAs: "followUp" });
+				},
+				onAbort: (_id) => {
+					pi.sendUserMessage(`/mission abort`, { deliverAs: "followUp" });
 				},
 				models: {
 					getData: () => {
@@ -149,14 +160,19 @@ export function registerCommands(pi: any, getRuntime: GetRuntime): void {
 					const d = statusDataFor(rt, id);
 					if (!d) return notifyUsage(ctx, `找不到 mission "${id}" 的计划或状态`);
 					if (ctx.hasUI) {
-						// 只有看的是活动 mission 时才提供恢复入口(detail 页 Ctrl+R)
-						const isActive = rt.active?.state.missionId === id;
+						const canResume = d.state.phase !== "done";
+						const canAbort = d.state.phase !== "done" && d.state.phase !== "halted";
 						await openStatusView(
 							ctx,
 							() => statusDataFor(rt, id),
-							isActive
-								? { onResume: (mid) => pi.sendUserMessage(`/mission resume ${mid}`, { deliverAs: "followUp" }) }
-								: undefined,
+							{
+								onResume: canResume
+									? (mid) => pi.sendUserMessage(`/mission resume ${mid}`, { deliverAs: "followUp" })
+									: undefined,
+								onAbort: canAbort
+									? () => pi.sendUserMessage(`/mission abort`, { deliverAs: "followUp" })
+									: undefined,
+							},
 						);
 					} else {
 						pi.appendEntry("missions-card", {
@@ -268,25 +284,47 @@ function statusDataFor(rt: Runtime, missionId: string): StatusViewData | null {
 	const dirName = rt.config.missionsDir;
 	const cur = rt.active?.state.missionId === missionId ? rt.active : null;
 	const sp = statePaths(rt.layout, missionId);
+	let plan: MissionPlan | null = null;
+	let state: MissionState | null = null;
+	let logLines: string[] = [];
+
 	if (cur) {
-		return {
-			plan: cur.plan,
-			state: cur.state,
-			evidence: { latest: latestEvidenceResults(sp.evidenceDir) },
-			logLines: cur.inMemory ? [] : readLog(sp.logMd).trim().split("\n").filter(Boolean),
-			dirName,
-		};
+		plan = cur.plan;
+		state = cur.state;
+		logLines = cur.inMemory ? [] : readLog(sp.logMd).trim().split("\n").filter(Boolean);
+	} else {
+		const pp = planPaths(rt.layout, missionId);
+		const md = fs.existsSync(pp.missionMd) ? fs.readFileSync(pp.missionMd, "utf8") : null;
+		plan = md ? parseMissionMd(md) : null;
+		state = loadStateFile(sp.stateJson);
+		if (!plan || !state) return null;
+		logLines = readLog(sp.logMd).trim().split("\n").filter(Boolean);
 	}
-	const pp = planPaths(rt.layout, missionId);
-	const md = fs.existsSync(pp.missionMd) ? fs.readFileSync(pp.missionMd, "utf8") : null;
-	const plan = md ? parseMissionMd(md) : null;
-	const state = loadStateFile(sp.stateJson);
 	if (!plan || !state) return null;
+
+	const taskEvidence: Record<string, TaskEvidenceAttempt[]> = {};
+	const spikeReports: Record<string, string> = {};
+	for (const t of allTasks(plan)) {
+		taskEvidence[t.id] = cur?.inMemory ? [] : readTaskEvidenceHistory(sp.evidenceDir, t.id);
+		if (t.kind === "spike") {
+			try {
+				const spPath = spikeReport(rt.layout, missionId, t.id);
+				if (fs.existsSync(spPath)) {
+					spikeReports[t.id] = fs.readFileSync(spPath, "utf8");
+				}
+			} catch {
+				/* 忽略读取错误 */
+			}
+		}
+	}
+
 	return {
 		plan,
 		state,
 		evidence: { latest: latestEvidenceResults(sp.evidenceDir) },
-		logLines: readLog(sp.logMd).trim().split("\n").filter(Boolean),
+		taskEvidence,
+		spikeReports,
+		logLines,
 		dirName,
 	};
 }

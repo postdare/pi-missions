@@ -282,36 +282,49 @@ const TASK_STYLE: Record<string, { icon: string; color: string }> = {
 	blocked: { icon: "✗", color: "error" },
 };
 
-export function taskLines(
+export interface TaskBlock {
+	taskId: string;
+	lines: string[];
+}
+
+export function taskBlocks(
 	plan: MissionPlan,
 	state: MissionState,
 	t: LineTheme = PLAIN,
 	width = 96,
-): string[] {
-	const lines: string[] = [];
+): TaskBlock[] {
+	const blocks: TaskBlock[] = [];
 	const dim = (s2: string) => t.fg("dim", s2);
 	// verify 分支名很长,窄栏里它会把标题挤没 —— 分支与 AC 的对应关系在「验收」段有
 	const showVerify = width >= 56;
+
 	for (const [mi, ms] of plan.milestones.entries()) {
-		if (mi > 0) lines.push("");
-		if (plan.tier === "complex" || plan.milestones.length > 1) {
-			const msDone = ms.tasks.every((x) => state.tasks[x.id]?.status === "done");
-			lines.push(
-				`${t.fg(msDone ? "success" : "accent", msDone ? "✓" : "▾")} ${t.bold(`${ms.id} ${ms.title}`)}`,
-			);
-		}
-		for (const task of ms.tasks) {
+		const msDone = ms.tasks.every((x) => state.tasks[x.id]?.status === "done");
+		const showMsHeader = plan.tier === "complex" || plan.milestones.length > 1;
+
+		for (const [ti, task] of ms.tasks.entries()) {
+			const blockLines: string[] = [];
+			// 里程碑标题与间隔空行归入首个任务块,避免任务选择时标题脱离
+			if (ti === 0) {
+				if (mi > 0) blockLines.push("");
+				if (showMsHeader) {
+					blockLines.push(
+						`${t.fg(msDone ? "success" : "accent", msDone ? "✓" : "▾")} ${t.bold(`${ms.id} ${ms.title}`)}`,
+					);
+				}
+			}
+
 			const ts = state.tasks[task.id];
 			const st = TASK_STYLE[ts?.status ?? "pending"] ?? TASK_STYLE.pending;
 			const running = ts?.status === "running";
 			const prefix = `  ${st.icon} ${task.id} `;
 			const indent = " ".repeat(visibleWidth(prefix));
 			const titleLines = wrap(task.title, Math.max(16, width - visibleWidth(prefix)), 2);
-			lines.push(
+			blockLines.push(
 				`  ${t.fg(st.color, st.icon)} ${t.fg(st.color, task.id)} ` +
 					(running ? t.bold(titleLines[0]) : titleLines[0]),
 			);
-			for (const extra of titleLines.slice(1)) lines.push(indent + (running ? t.bold(extra) : extra));
+			for (const extra of titleLines.slice(1)) blockLines.push(indent + (running ? t.bold(extra) : extra));
 
 			// 元信息挂在标题末尾:attempt 为 0 说明还没动过,不占版面
 			const meta: string[] = [];
@@ -321,20 +334,32 @@ export function taskLines(
 			if (showVerify && task.kind !== "spike" && task.verify.length > 0) {
 				meta.push(`verify ${task.verify.join(", ")}`);
 			}
-			if (meta.length > 0) lines[lines.length - 1] += dim(` · ${meta.join(" · ")}`);
+			if (meta.length > 0) blockLines[blockLines.length - 1] += dim(` · ${meta.join(" · ")}`);
 
 			if (ts?.lastFailureReason && ts.status !== "done") {
 				const reason = wrap(ts.lastFailureReason, Math.max(16, width - 6), 2);
-				lines.push(`      ${dim("上次失败:")} ${t.fg("error", reason[0])}`);
-				for (const l of reason.slice(1)) lines.push(`      ${t.fg("error", l)}`);
+				blockLines.push(`      ${dim("上次失败:")} ${t.fg("error", reason[0])}`);
+				for (const l of reason.slice(1)) blockLines.push(`      ${t.fg("error", l)}`);
 			}
 			if (ts && ts.sameSignatureCount > 1) {
-				lines.push(`      ${t.fg("warning", `签名 ${ts.lastSignature} ×${ts.sameSignatureCount}`)}`);
+				blockLines.push(`      ${t.fg("warning", `签名 ${ts.lastSignature} ×${ts.sameSignatureCount}`)}`);
 			}
+
+			blocks.push({ taskId: task.id, lines: blockLines });
 		}
 	}
-	if (lines.length === 0) lines.push(dim("(计划尚未冻结,无任务列表)"));
-	return lines;
+	return blocks;
+}
+
+export function taskLines(
+	plan: MissionPlan,
+	state: MissionState,
+	t: LineTheme = PLAIN,
+	width = 96,
+): string[] {
+	const blocks = taskBlocks(plan, state, t, width);
+	if (blocks.length === 0) return [t.fg("dim", "(计划尚未冻结,无任务列表)")];
+	return blocks.flatMap((b) => b.lines);
 }
 
 // ─────────────────────────── tab:验收 ───────────────────────────

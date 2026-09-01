@@ -179,7 +179,7 @@ test("面板里不出现贴边框的竖线 —— 那会被读成边框裂了一
 	}
 });
 
-test("renderStatus:双栏与窄屏单栏在各宽度/各焦点下都恰好铺满", () => {
+test("renderStatus:双栏与窄屏单栏在各宽度/各焦点/各任务选中态下都恰好铺满", () => {
 	const d = {
 		plan: MISSIONS[0].plan!,
 		state: MISSIONS[0].state,
@@ -195,29 +195,147 @@ test("renderStatus:双栏与窄屏单栏在各宽度/各焦点下都恰好铺满
 				},
 			},
 		},
+		taskEvidence: {
+			T1: [{ taskId: "T1", attempt: 1, at: NOW - 60000, evidences: [{ level: "hard" as const, acId: "auth-integration", result: "pass" as const, raw: "OK", exitCode: 0 }] }],
+			T2: [{ taskId: "T2", attempt: 1, at: NOW - 30000, evidences: [{ level: "hard" as const, acId: "auth-integration", result: "fail" as const, raw: "AssertionError: 401", exitCode: 1 }] }],
+		},
+		spikeReports: {},
 		logLines: ["14:02 PLAN_FROZEN ac=2 tasks=4", "14:18 T2 a=1 verdict=FAIL sig=9f2c1a4b7e30"],
 		dirName: "missions",
 	};
 	for (const width of WIDTHS) {
 		for (const focus of [0, 1, 2] as const) {
-			const lines = renderStatus({
-				theme,
-				width,
-				rows: 30,
-				now: NOW,
-				data: d,
-				focus,
-				scroll: [0, 0, 0],
-				canResume: true,
-			});
-			assertWidths(lines, Math.max(56, width), `status w=${width} focus=${focus}`);
+			for (const selectedTask of [0, 1, 3]) {
+				const lines = renderStatus({
+					theme,
+					width,
+					rows: 30,
+					now: NOW,
+					data: d,
+					focus,
+					scroll: [0, 0, 0],
+					canResume: true,
+					mode: "mission",
+					selectedTask,
+				});
+				assertWidths(lines, Math.max(56, width), `status w=${width} focus=${focus} selTask=${selectedTask}`);
+			}
+		}
+	}
+});
+
+test("renderStatus:任务详情页在各宽度/滚动偏移下都恰好铺满", () => {
+	const d = {
+		plan: MISSIONS[0].plan!,
+		state: MISSIONS[0].state,
+		evidence: { latest: {} },
+		taskEvidence: {
+			T2: [
+				{
+					taskId: "T2",
+					attempt: 1,
+					at: NOW - 60000,
+					evidences: [{ level: "hard" as const, acId: "auth-integration", result: "fail" as const, raw: "Error on line 10\nStack trace\nMore info", exitCode: 1 }],
+				},
+				{
+					taskId: "T2",
+					attempt: 2,
+					at: NOW - 10000,
+					evidences: [{ level: "hard" as const, acId: "auth-integration", result: "fail" as const, raw: "Second failure on refresh token", exitCode: 1 }],
+				},
+			],
+		},
+		spikeReports: {},
+		logLines: [],
+		dirName: "missions",
+	};
+	for (const width of WIDTHS) {
+		for (const selectedTask of [0, 1]) {
+			for (const taskDetailScroll of [0, 5, 20]) {
+				const lines = renderStatus({
+					theme,
+					width,
+					rows: 30,
+					now: NOW,
+					data: d,
+					focus: 1,
+					scroll: [0, 0, 0],
+					canResume: true,
+					mode: "task-detail",
+					selectedTask,
+					taskDetailScroll,
+				});
+				assertWidths(lines, Math.max(56, width), `taskDetail w=${width} sel=${selectedTask} scroll=${taskDetailScroll}`);
+			}
+		}
+	}
+});
+
+test("状态页与任务详情页不出现贴边框竖线", () => {
+	const d = {
+		plan: MISSIONS[0].plan!,
+		state: MISSIONS[0].state,
+		evidence: { latest: {} },
+		taskEvidence: {
+			T1: [{ taskId: "T1", attempt: 1, at: NOW, evidences: [{ level: "hard" as const, acId: "auth-integration", result: "pass" as const, raw: "ok" }] }],
+		},
+		spikeReports: {},
+		logLines: ["line 1", "line 2"],
+		dirName: "missions",
+	};
+	for (const mode of ["mission", "task-detail"] as const) {
+		const lines = renderStatus({
+			theme,
+			width: 96,
+			rows: 30,
+			now: NOW,
+			data: d,
+			focus: 1,
+			scroll: [0, 0, 0],
+			canResume: true,
+			mode,
+			selectedTask: 0,
+		});
+		for (const line of lines) {
+			const stripped = line.replace(/\x1b\[[0-9;]*m/g, "");
+			assert.ok(!/^.{0,2}[▎▍▌┃]/.test(stripped), `${mode} 模式下仍有贴边竖线: ${JSON.stringify(stripped)}`);
 		}
 	}
 });
 
 test("renderStatus:无活动 mission 时也铺满", () => {
 	for (const width of WIDTHS) {
-		const lines = renderStatus({ theme, width, rows: 24, now: NOW, data: null, focus: 0, scroll: [0, 0, 0], canResume: false });
+		const lines = renderStatus({ theme, width, rows: 24, now: NOW, data: null, focus: 0, scroll: [0, 0, 0], canResume: false, canAbort: false });
 		assertWidths(lines, Math.max(56, width), `空 status w=${width}`);
+	}
+});
+
+test("renderStatus: 支持 canAbort 与 canResume 组合且宽度安全", () => {
+	const d = {
+		plan: MISSIONS[0].plan!,
+		state: MISSIONS[0].state,
+		evidence: { latest: {} },
+		taskEvidence: {},
+		spikeReports: {},
+		logLines: ["line 1", "line 2"],
+		dirName: "missions",
+	};
+	for (const width of WIDTHS) {
+		for (const canResume of [false, true]) {
+			for (const canAbort of [false, true]) {
+				const lines = renderStatus({
+					theme,
+					width,
+					rows: 24,
+					now: NOW,
+					data: d,
+					focus: 0,
+					scroll: [0, 0, 0],
+					canResume,
+					canAbort,
+				});
+				assertWidths(lines, Math.max(56, width), `status w=${width} resume=${canResume} abort=${canAbort}`);
+			}
+		}
 	}
 });

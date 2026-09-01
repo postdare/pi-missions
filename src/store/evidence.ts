@@ -27,6 +27,45 @@ export interface EvidenceRecord {
 	rawTail?: string;
 }
 
+export interface TaskEvidenceAttempt {
+	taskId: string;
+	attempt: number;
+	at: number;
+	evidences: Evidence[];
+}
+
+/** 按任务读取所有 attempt 证据历史,按 attempt 升序排列 */
+export function readTaskEvidenceHistory(evidenceDir: string, taskId: string): TaskEvidenceAttempt[] {
+	if (!evidenceDir || !taskId) return [];
+	let files: string[];
+	try {
+		files = fs.readdirSync(evidenceDir).filter((f) => f.endsWith(".json"));
+	} catch {
+		return [];
+	}
+	const out: TaskEvidenceAttempt[] = [];
+	for (const f of files) {
+		try {
+			const data = JSON.parse(fs.readFileSync(path.join(evidenceDir, f), "utf8")) as {
+				taskId?: string;
+				attempt?: number;
+				at?: number;
+				evidences?: Evidence[];
+			};
+			if (data.taskId !== taskId) continue;
+			out.push({
+				taskId,
+				attempt: typeof data.attempt === "number" ? data.attempt : 0,
+				at: typeof data.at === "number" ? data.at : 0,
+				evidences: Array.isArray(data.evidences) ? data.evidences : [],
+			});
+		} catch {
+			/* 跳过坏文件 */
+		}
+	}
+	return out.sort((a, b) => a.attempt - b.attempt || a.at - b.at);
+}
+
 /** 聚合每条 AC(verify 分支)最近一次判定结果,供状态面板展示 */
 export function latestEvidenceResults(evidenceDir: string): Record<string, EvidenceRecord> {
 	const out: Record<string, EvidenceRecord> = {};

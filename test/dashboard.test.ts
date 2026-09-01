@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { visibleWidth } from "@earendil-works/pi-tui";
-import { overviewLines, PHASE_STYLE, renderWidgetCard, renderStatusDashboard } from "../src/ui/dashboard.ts";
+import { overviewLines, PHASE_STYLE, renderWidgetCard, renderStatusDashboard, taskBlocks, taskLines } from "../src/ui/dashboard.ts";
 import { initialState } from "../src/core/machine.ts";
 import type { MissionPlan } from "../src/store/mission.ts";
 
@@ -122,6 +122,46 @@ test("dashboard:任务清单 + AC 证据状态 + 成本分账 + 日志", () => {
 	assert.ok(out.includes("AC2") && out.includes("尚无证据"), "无证据的 AC 必须明示");
 	assert.ok(out.includes("executor $0.870"));
 	assert.ok(out.includes("verdict=FAIL"));
+});
+
+test("taskBlocks 与 taskLines 输出一致且结构化切分准确", () => {
+	const s = runningState();
+	const blocks = taskBlocks(plan, s, mockTheme, 80);
+	assert.equal(blocks.length, 2);
+	assert.equal(blocks[0].taskId, "T1");
+	assert.equal(blocks[1].taskId, "T2");
+
+	// 展平 blocks 必须与 taskLines 完全一致
+	const flat = blocks.flatMap((b) => b.lines);
+	const direct = taskLines(plan, s, mockTheme, 80);
+	assert.deepEqual(flat, direct);
+});
+
+test("taskBlocks: complex 多里程碑下标题正确归入首个任务块", () => {
+	const complexPlan: MissionPlan = {
+		missionId: "complex-m",
+		tier: "complex",
+		goal: "重构",
+		acceptanceCriteria: [{ id: "AC1", text: "t", verify: "b1" }],
+		milestones: [
+			{ id: "M1", title: "第一阶段", tasks: [{ id: "T1", title: "t1", verify: ["b1"] }, { id: "T2", title: "t2", verify: ["b1"] }] },
+			{ id: "M2", title: "第二阶段", tasks: [{ id: "T3", title: "t3", verify: ["b1"] }] },
+		],
+		verifyScript: "",
+		createdAt: Date.now(),
+	};
+	const s = initialState({ missionId: "complex-m", tier: "complex", taskOrder: ["T1", "T2", "T3"] });
+	const blocks = taskBlocks(complexPlan, s, mockTheme, 80);
+	assert.equal(blocks.length, 3);
+	// M1 标题在 T1
+	assert.ok(blocks[0].lines.some((l) => l.includes("M1 第一阶段")));
+	assert.ok(!blocks[1].lines.some((l) => l.includes("M1 第一阶段")));
+	// M2 标题在 T3
+	assert.ok(blocks[2].lines.some((l) => l.includes("M2 第二阶段")));
+
+	const flat = blocks.flatMap((b) => b.lines);
+	const direct = taskLines(complexPlan, s, mockTheme, 80);
+	assert.deepEqual(flat, direct);
 });
 
 test("相位图标只用好渲染的那几个字形(◌ ◍ ◑ 会被渲染成大圆盘)", () => {

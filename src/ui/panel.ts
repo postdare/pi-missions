@@ -223,7 +223,7 @@ type PageId = (typeof PAGES)[number]["id"];
 const HINTS: Record<PageId | "picking", Array<[string, string]>> = {
 	picking: [["↑↓", "选择"], ["Enter", "确认"], ["Backspace", "删字"], ["Esc", "取消"]],
 	models: [["↑↓", "导航"], ["Enter", "选模型"], ["T", "thinking"], ["X", "清除"], ["Tab", "切页"], ["Esc", "关闭"]],
-	missions: [["↑↓", "导航"], ["Enter", "选择"], ["Ctrl+L", "档位"], ["Ctrl+D", "详情"], ["Tab", "切页"], ["Esc", "关闭"]],
+	missions: [["↑↓", "导航"], ["Enter", "详情"], ["Ctrl+R", "恢复"], ["Ctrl+A", "中止"], ["Ctrl+D", "展开"], ["Tab", "切页"], ["Esc", "关闭"]],
 };
 
 /** 模型选择器的子模式状态 */
@@ -427,6 +427,10 @@ export interface PanelCallbacks {
 	onSelectTier: (tier: TierId) => void;
 	/** 在 mission 行按 Enter:面板关闭,打开该 mission 的 detail 页 */
 	onDetail: (missionId: string) => void;
+	/** 在 mission 行按 Ctrl+R:恢复执行该 mission */
+	onResume?: (missionId: string) => void;
+	/** 在 mission 行按 Ctrl+A:中止执行该 mission */
+	onAbort?: (missionId: string) => void;
 	/** 「模型」页的数据与写入(runtime 提供);缺省则该页显示为不可用 */
 	models?: ModelsBridge;
 }
@@ -634,6 +638,28 @@ export async function openMissionsPanel(ctx: any, l: RepoLayout, cb: PanelCallba
 					if (selected > 0) {
 						detail = !detail;
 						return tui.requestRender();
+					}
+					return;
+				}
+				if (matchesKey(input, Key.ctrl("r"))) {
+					if (selected > 0) {
+						const m = filtered[selected - 1];
+						if (m && m.state.phase !== "done" && cb.onResume) {
+							close();
+							cb.onResume(m.missionId);
+							return;
+						}
+					}
+					return;
+				}
+				if (matchesKey(input, Key.ctrl("a"))) {
+					if (selected > 0) {
+						const m = filtered[selected - 1];
+						if (m && m.state.phase !== "done" && m.state.phase !== "halted" && cb.onAbort) {
+							close();
+							cb.onAbort(m.missionId);
+							return;
+						}
 					}
 					return;
 				}

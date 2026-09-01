@@ -80,6 +80,16 @@ pi-missions 是跑在 [pi](https://github.com/earendil-works/pi-coding-agent) �
 
 所有"对不对 / 升不升 / 停不停"的决定都在 core 里。
 
+### UI 呈现与纯函数渲染
+
+UI 层同样保持纯函数设计,所有视图接收不可变数据对象并输出终端行数组:
+- `src/ui/chrome.ts`: 基础框架积木(圆角盒 `boxTop`/`boxRow`/`boxBot`、`wrap` 悬挂折行、`ruleLabel`、`hintBar`、`tabs`、`miniBar`)。
+- `src/ui/panel.ts`: `/missions` 主面板(任务列表、模型页)。
+- `src/ui/status-view.ts`: `/mission status` 状态视图与按键交互(支持 `mode: "mission" | "task-detail"` 切换,任务列表焦点下 `↑↓` 选中任务,`Enter` 展开详情,`Esc`/`Backspace` 返回)。
+- `src/ui/task-detail.ts`: 任务详情视图纯渲染(任务定义、执行状态、验收标准、全部 attempt 的 stdout/stderr 原始证据、spike 结论正文)。
+- `src/ui/dashboard.ts`: 状态卡片与内容分块(`taskBlocks`、`taskLines`、`overviewLines`、`acLines`、`renderWidgetCard`)。
+- `src/store/evidence.ts:readTaskEvidenceHistory()`: 只读聚合磁盘 `missions/state/<id>/evidence/` 历史 JSON,容错解析损坏文件。
+
 ---
 
 ## 3. 相位状态机

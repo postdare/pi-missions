@@ -15,6 +15,7 @@
  *
  * 三块内容(概览+验收 / 任务 / 日志)各自滚动,Tab 切换焦点 ——
  * 焦点段的标题用 accent 加粗,其余 muted,配 ruleLabel 的横线把段落切开。
+ * 焦点在任务区时,↑↓ 逐项选择任务,Enter 进入同一组件内的任务详情页。
  * 非 TUI 环境退化为 entry 卡片(renderStatusDashboard)。
  */
 
@@ -26,14 +27,17 @@ import {
 	boxTop,
 	clip,
 	contentBudget,
+	CURSOR,
 	tabs,
 	hintBar,
 	miniBar,
 	pad,
 	ruleLabel,
+	windowLines,
 } from "./chrome.ts";
 import type { MissionState } from "../core/types.ts";
-import type { MissionPlan } from "../store/mission.ts";
+import { allTasks, findMilestoneOf, type MissionPlan } from "../store/mission.ts";
+import type { TaskEvidenceAttempt } from "../store/evidence.ts";
 import {
 	acLines,
 	costTotal,
@@ -41,17 +45,23 @@ import {
 	overviewLines,
 	PHASE_STYLE,
 	renderStatusDashboard,
-	taskLines,
+	taskBlocks,
 	type EvidenceSummary,
+	type TaskBlock,
 } from "./dashboard.ts";
+import { renderTaskDetail } from "./task-detail.ts";
 
 export interface StatusViewData {
 	plan: MissionPlan;
 	state: MissionState;
 	evidence: EvidenceSummary;
+	taskEvidence?: Record<string, TaskEvidenceAttempt[]>;
+	spikeReports?: Record<string, string>;
 	logLines: string[];
 	dirName: string;
 }
+
+export type StatusMode = "mission" | "task-detail";
 
 type Focus = 0 | 1 | 2; // 0 = 左栏(概览+验收) 1 = 任务 2 = 日志
 
@@ -60,7 +70,7 @@ const NARROW = 72;
 
 interface Theme {
 	fg(color: string, text: string): string;
-	bg(color: string, text: string): string;
+	bg?(color: string, text: string): string;
 	bold(text: string): string;
 }
 
@@ -96,6 +106,40 @@ export interface StatusView {
 	/** 三块的滚动偏移;renderStatus 会夹取到合法区间并原地写回 */
 	scroll: [number, number, number];
 	canResume: boolean;
+	canAbort?: boolean;
+	mode?: StatusMode;
+	selectedTask?: number;
+	taskDetailScroll?: number;
+}
+
+/** 为任务块附加光标与选中背景,并计算每个任务块在展开行中的起止区间 */
+function decorateTaskBlocks(
+	blocks: TaskBlock[],
+	selectedIdx: number,
+	isFocused: boolean,
+	t: Theme,
+	colWidth: number,
+): { allLines: string[]; ranges: Array<{ start: number; end: number }> } {
+	const allLines: string[] = [];
+	const ranges: Array<{ start: number; end: number }> = [];
+
+	for (const [bi, b] of blocks.entries()) {
+		const start = allLines.length;
+		const isSelected = isFocused && bi === selectedIdx;
+
+		for (const line of b.lines) {
+			if (isSelected && line.startsWith("  ") && !line.startsWith("   ")) {
+				const decorated = line.replace(/^  /, `${t.fg("accent", CURSOR)} `);
+				const painted = t.bg ? t.bg("selectedBg", pad(decorated, colWidth)) : decorated;
+				allLines.push(painted);
+			} else {
+				allLines.push(line);
+			}
+		}
+		ranges.push({ start, end: allLines.length });
+	}
+
+	return { allLines, ranges };
 }
 
 /** 状态页全部行(含盒外提示条)。纯函数,scroll 就地夹取 */
@@ -106,14 +150,6 @@ export function renderStatus(v: StatusView): string[] {
 	const budget = contentBudget(v.rows);
 	const bodyH = Math.max(6, budget - 3); // 盒顶 / 头行 / 分隔 / 盒底 / 提示条
 
-	const hints: Array<[string, string]> = [
-		["Tab", "切面板"],
-		["↑↓", "滚动"],
-		...(v.canResume ? ([["Ctrl+R", "恢复"]] as Array<[string, string]>) : []),
-		["R", "刷新"],
-		["Esc", "关闭"],
-	];
-
 	if (!v.data) {
 		const out = [boxTop(t, width, "mission")];
 		for (let i = 0; i < bodyH; i++) out.push(boxRow(t, width, i === 0 ? t.fg("dim", "无活动 mission") : ""));
@@ -122,6 +158,79 @@ export function renderStatus(v: StatusView): string[] {
 	}
 
 	const d = v.data;
+	const tasks = allTasks(d.plan);
+	const taskCount = tasks.length;
+	const taskDone = Object.values(d.state.tasks).filter((x) => x.status === "done").length;
+	const selectedTaskIdx = Math.max(0, Math.min(v.selectedTask ?? 0, Math.max(0, taskCount - 1)));
+	const mode = v.mode ?? "mission";
+
+	// ── 任务详情页 ──
+	if (mode === "task-detail" && taskCount > 0) {
+		const currentTask = tasks[selectedTaskIdx];
+		const ms = findMilestoneOf(d.plan, currentTask.id);
+		const taskState = d.state.tasks[currentTask.id];
+		const attempts = d.taskEvidence?.[currentTask.id] ?? [];
+		const spikeReport = d.spikeReports?.[currentTask.id];
+		const detailLines = renderTaskDetail(
+			{
+				task: currentTask,
+				taskState,
+				milestone: ms,
+				criteria: d.plan.acceptanceCriteria,
+				attempts,
+				spikeReport,
+				tier: d.state.tier,
+			},
+			t,
+			inner,
+		);
+
+		const detailOff = Math.max(0, Math.min(v.taskDetailScroll ?? 0, Math.max(0, detailLines.length - bodyH)));
+		if (v.taskDetailScroll !== undefined) v.taskDetailScroll = detailOff;
+
+		const out: string[] = [
+			boxTop(
+				t,
+				width,
+				`${clip(d.state.missionId, 24)} · 详情 ${currentTask.id}`,
+				`任务 ${selectedTaskIdx + 1}/${taskCount}`,
+			),
+			boxRow(t, width, headerLine(d, t, inner)),
+			boxSep(t, width),
+		];
+
+		const visibleDetail = detailLines.slice(detailOff, detailOff + bodyH);
+		for (let i = 0; i < bodyH; i++) {
+			out.push(boxRow(t, width, clip(visibleDetail[i] ?? "", inner)));
+		}
+
+		out.push(boxBot(t, width));
+		const detailHints: Array<[string, string]> = [
+			["↑↓", "滚动"],
+			["Esc", "返回任务列表"],
+			["R", "刷新"],
+			["Q", "关闭"],
+		];
+		const pos =
+			detailLines.length > bodyH
+				? `行 ${detailOff + 1}-${Math.min(detailOff + bodyH, detailLines.length)}/${detailLines.length}`
+				: undefined;
+		out.push(hintBar(t, width, detailHints, pos));
+		return out;
+	}
+
+	// ── Mission 状态总览页 ──
+	const hints: Array<[string, string]> = [
+		["Tab", "切面板"],
+		...(v.focus === 1 && taskCount > 0
+			? ([["↑↓", "选择任务"], ["Enter", "任务详情"]] as Array<[string, string]>)
+			: ([["↑↓", "滚动"]] as Array<[string, string]>)),
+		...(v.canResume ? ([["Ctrl+R", "恢复"]] as Array<[string, string]>) : []),
+		...(v.canAbort ? ([["Ctrl+A", "中止"]] as Array<[string, string]>) : []),
+		["R", "刷新"],
+		["Esc", "关闭"],
+	];
+
 	const out: string[] = [
 		// mission id 是从目标自动生成的 slug,可能很长 —— 截断它,把顶边留给 meta
 		boxTop(t, width, `${clip(d.state.missionId, 32)} · ${d.state.tier}`, headerMeta(d, v.now)),
@@ -137,7 +246,6 @@ export function renderStatus(v: StatusView): string[] {
 	// 盒标题给了 id/档位,头行给了相位与进度 —— 概览栏不再重复,空间留给目标
 	const overview = overviewLines(d.plan, d.state, { now: v.now, theme: t, width: leftW, omitIdentity: true });
 	const ac = acLines(d.plan, d.evidence, d.dirName, t, leftW);
-	const taskAll = taskLines(d.plan, d.state, t, narrow ? inner : rightW);
 	const logAll = d.logLines.length > 0 ? d.logLines.map((l) => t.fg("dim", l)) : [t.fg("dim", "(暂无日志)")];
 
 	const clamp = (i: Focus, len: number, winH: number) => {
@@ -145,22 +253,38 @@ export function renderStatus(v: StatusView): string[] {
 		return v.scroll[i];
 	};
 
-	// 段标题的计数说明的是**内容条目数**(任务数 / 日志行数),不是渲染行数 ——
-	// 任务的失败原因/签名会各占一行,拿行数当任务数会数错
 	const scrolled = (off: number, win: number, len: number) =>
 		len > win ? ` · 行 ${off + 1}-${Math.min(off + win, len)}/${len}` : "";
-	const taskCount = d.plan.milestones.reduce((n, ms) => n + ms.tasks.length, 0);
-	const taskDone = Object.values(d.state.tasks).filter((x) => x.status === "done").length;
 
 	// ── 窄屏:双栏会挤成两条细缝,退化成单栏 —— 只渲染焦点段,Tab 切换 ──
 	if (narrow) {
+		const rawBlocks = taskBlocks(d.plan, d.state, t, inner);
+		const { allLines: allTaskLines, ranges } = decorateTaskBlocks(
+			rawBlocks,
+			selectedTaskIdx,
+			v.focus === 1,
+			t,
+			inner,
+		);
+		const finalTaskLines = allTaskLines.length > 0 ? allTaskLines : [t.fg("dim", "(计划尚未冻结,无任务列表)")];
+
+		const winH = bodyH - 1;
+		let off = 0;
+		if (v.focus === 1 && rawBlocks.length > 0) {
+			const anchor = ranges[selectedTaskIdx] ?? null;
+			const win = windowLines(finalTaskLines, v.scroll[1], winH, anchor);
+			v.scroll[1] = win.offset;
+			off = win.offset;
+		} else {
+			off = clamp(v.focus, v.focus === 0 ? overview.length + ac.length + 2 : logAll.length, winH);
+		}
+
 		const secs: Array<{ label: string; lines: string[] }> = [
 			{ label: "概览/验收", lines: [...overview, "", ruleLabel(t, inner, "验收"), ...ac] },
-			{ label: `任务 ${taskDone}/${taskCount}`, lines: taskAll },
+			{ label: `任务 ${taskDone}/${taskCount}`, lines: finalTaskLines },
 			{ label: `日志 ${d.logLines.length} 行`, lines: logAll },
 		];
-		const winH = bodyH - 1;
-		const off = clamp(v.focus, secs[v.focus].lines.length, winH);
+
 		out.push(
 			boxRow(t, width, tabs(t, secs.map((sec, i) => ({ id: String(i), label: sec.label })), String(v.focus))),
 		);
@@ -184,15 +308,35 @@ export function renderStatus(v: StatusView): string[] {
 	while (leftLines.length < bodyH) leftLines.push("");
 
 	// ── 右栏:任务段 + 日志段,各自滚动;任务占一半(上限其内容 + 段头),日志吃剩余 ──
-	const taskSecH = Math.min(taskAll.length + 1, Math.max(3, Math.floor(bodyH / 2)));
+	const rawBlocks = taskBlocks(d.plan, d.state, t, rightW);
+	const { allLines: allTaskLines, ranges } = decorateTaskBlocks(
+		rawBlocks,
+		selectedTaskIdx,
+		v.focus === 1,
+		t,
+		rightW,
+	);
+	const finalTaskLines = allTaskLines.length > 0 ? allTaskLines : [t.fg("dim", "(计划尚未冻结,无任务列表)")];
+
+	const taskSecH = Math.min(finalTaskLines.length + 1, Math.max(3, Math.floor(bodyH / 2)));
 	const taskWinH = taskSecH - 1;
 	const logWinH = Math.max(1, bodyH - taskSecH - 1);
-	const taskOff = clamp(1, taskAll.length, taskWinH);
+
+	const anchor = rawBlocks.length > 0 ? (ranges[selectedTaskIdx] ?? null) : null;
+	const win = windowLines(finalTaskLines, v.scroll[1], taskWinH, anchor);
+	v.scroll[1] = win.offset;
+	const taskOff = win.offset;
 	const logOff = clamp(2, logAll.length, logWinH);
+
 	const rightLines: string[] = [
-		ruleLabel(t, rightW, `任务 ${taskDone}/${taskCount}${scrolled(taskOff, taskWinH, taskAll.length)}`, v.focus === 1),
+		ruleLabel(
+			t,
+			rightW,
+			`任务 ${taskDone}/${taskCount}${scrolled(taskOff, taskWinH, finalTaskLines.length)}`,
+			v.focus === 1,
+		),
 	];
-	for (const l of taskAll.slice(taskOff, taskOff + taskWinH)) rightLines.push(clip(l, rightW));
+	for (const l of win.lines) rightLines.push(clip(l, rightW));
 	while (rightLines.length < taskSecH) rightLines.push("");
 	rightLines.push(
 		ruleLabel(t, rightW, `日志 ${d.logLines.length} 行${scrolled(logOff, logWinH, logAll.length)}`, v.focus === 2),
@@ -213,10 +357,15 @@ export function renderStatus(v: StatusView): string[] {
 	return out;
 }
 
+export interface StatusViewOpts {
+	onResume?: (missionId: string) => void;
+	onAbort?: (missionId: string) => void;
+}
+
 export async function openStatusView(
 	ctx: any,
 	getData: () => StatusViewData | null,
-	opts?: { onResume?: (missionId: string) => void },
+	opts?: StatusViewOpts,
 ): Promise<void> {
 	// 非 TUI:退化为一次性卡片
 	if (!ctx.hasUI) return;
@@ -224,6 +373,9 @@ export async function openStatusView(
 	await ctx.ui.custom((tui: any, theme: Theme, _kb: any, done: (r: void) => void) => {
 		let data = getData();
 		let focus: Focus = 0;
+		let mode: StatusMode = "mission";
+		let selectedTask = 0;
+		let taskDetailScroll = 0;
 		const scroll: [number, number, number] = [0, 0, 0]; // 左栏 / 任务 / 日志
 		let closed = false;
 
@@ -232,6 +384,15 @@ export async function openStatusView(
 				data = getData() ?? data;
 			} catch {
 				/* keep last good */
+			}
+			if (data) {
+				const taskCount = allTasks(data.plan).length;
+				if (taskCount > 0) {
+					selectedTask = Math.max(0, Math.min(selectedTask, taskCount - 1));
+				} else {
+					selectedTask = 0;
+					if (mode === "task-detail") mode = "mission";
+				}
 			}
 			if (!closed) tui.requestRender();
 		};
@@ -255,9 +416,42 @@ export async function openStatusView(
 					focus,
 					scroll,
 					canResume: !!opts?.onResume,
+					canAbort: !!opts?.onAbort,
+					mode,
+					selectedTask,
+					taskDetailScroll,
 				}),
 			invalidate: () => {},
 			handleInput: (input: string) => {
+				const taskCount = data ? allTasks(data.plan).length : 0;
+				if (taskCount > 0) {
+					selectedTask = Math.max(0, Math.min(selectedTask, taskCount - 1));
+				} else {
+					selectedTask = 0;
+					if (mode === "task-detail") mode = "mission";
+				}
+
+				// ── 任务详情模式 ──
+				if (mode === "task-detail") {
+					if (matchesKey(input, Key.escape) || matchesKey(input, Key.backspace)) {
+						mode = "mission";
+						taskDetailScroll = 0;
+						return tui.requestRender();
+					}
+					if (matchesKey(input, "q")) return close();
+					if (matchesKey(input, Key.up)) {
+						taskDetailScroll = Math.max(0, taskDetailScroll - 1);
+						return tui.requestRender();
+					}
+					if (matchesKey(input, Key.down)) {
+						taskDetailScroll = taskDetailScroll + 1;
+						return tui.requestRender();
+					}
+					if (matchesKey(input, "r")) return refresh();
+					return;
+				}
+
+				// ── Mission 状态总览模式 ──
 				if (matchesKey(input, Key.escape) || matchesKey(input, "q")) return close();
 				if (matchesKey(input, Key.ctrl("r"))) {
 					// 从 missions 面板进入的 detail 页可直接恢复执行
@@ -265,6 +459,14 @@ export async function openStatusView(
 						const id = data.state.missionId;
 						close();
 						opts.onResume(id);
+					}
+					return;
+				}
+				if (matchesKey(input, Key.ctrl("a"))) {
+					if (opts?.onAbort && data) {
+						const id = data.state.missionId;
+						close();
+						opts.onAbort(id);
 					}
 					return;
 				}
@@ -277,12 +479,28 @@ export async function openStatusView(
 					return tui.requestRender();
 				}
 				if (matchesKey(input, Key.up)) {
-					scroll[focus] = Math.max(0, scroll[focus] - 1);
+					if (focus === 1 && taskCount > 0) {
+						selectedTask = Math.max(0, selectedTask - 1);
+					} else {
+						scroll[focus] = Math.max(0, scroll[focus] - 1);
+					}
 					return tui.requestRender();
 				}
 				if (matchesKey(input, Key.down)) {
-					scroll[focus] = scroll[focus] + 1;
+					if (focus === 1 && taskCount > 0) {
+						selectedTask = Math.min(taskCount - 1, selectedTask + 1);
+					} else {
+						scroll[focus] = scroll[focus] + 1;
+					}
 					return tui.requestRender();
+				}
+				if (matchesKey(input, Key.enter)) {
+					if (focus === 1 && taskCount > 0) {
+						mode = "task-detail";
+						taskDetailScroll = 0;
+						return tui.requestRender();
+					}
+					return;
 				}
 				if (matchesKey(input, "r")) return refresh();
 			},

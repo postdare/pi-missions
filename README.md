@@ -116,7 +116,7 @@ pi remove git:github.com/postdare/pi-missions
 | `/missions` | 主面板,两页(`Tab` 切换):**任务**(新建 + 历史,`Ctrl+L` 换档位)· **模型**(角色 → 模型/thinking) |
 | `/mission new <目标> [--tier=standard\|complex]` | 新建并进入 PLAN 相位 |
 | `/mission quick <任务> --verify "<命令>"` | 单任务快捷档,不落盘。**`--verify` 是判定的唯一依据,必须给**;不给则自动升 standard 走 PLAN |
-| `/mission status` | 当前任务详情(双栏内联页:左「概览/验收」· 右「任务 + 日志」,`Tab` 切焦点分别滚动;窄终端自动退化成单栏) |
+| `/mission status` | 当前 mission 状态总览(双栏内联页:左「概览/验收」· 右「任务 + 日志」,`Tab` 切焦点分别滚动;焦点在任务段时 `↑↓` 选任务,`Enter` 查看任务详情页;窄终端自动退化成单栏) |
 | `/mission tier <quick\|standard\|complex\|off>` | 设定/清除待用档位:编辑器边框随档位换色,输入框预填命令 |
 | `/mission next` | 换脑:创建干净会话继续(唯一解除 pendingHandoff 的出口) |
 | `/mission verify` | do 相位手动触发一次 CHECK |
@@ -130,6 +130,46 @@ pi remove git:github.com/postdare/pi-missions
 LLM 可调用的工具五个,按相位分发:`mission_ask` / `mission_frame`(FRAME)、
 `mission_write_plan`(PLAN)、`mission_submit`(DO,无参数)、`mission_escalate`(ACT)。
 状态推进由 L0 驱动。
+
+### 状态视图与任务详情页 (`/mission status`)
+
+运行 `/mission status` 或在 `/missions` 列表中按 `Enter` 打开活动 mission 详情:
+
+```
+╭─ m-20260901-1402 · 任务 T2 ───────────────────────────────── 任务 2/4 ─╮
+│  standard  ● do   attempt 2/3   $0.96   3min                            │
+├─────────────────────────────────────────────────────────────────────────┤
+│  任务定义 [T2] ──────────────────────────────────────────────────────── │
+│  标题: 迁移登录端点                                                     │
+│  状态: ▸ 执行中  (running)                                              │
+│  类型: impl (代码实现)                                                  │
+│                                                                         │
+│  尝试次数: attempt 2/3                                                  │
+│  失败签名: 9f2c1a4b7e30  同一签名连续 2 次                              │
+│  上次失败: AuthIntegrationTest#refreshToken 断言失败,期望 200 实际 401   │
+│                                                                         │
+│  验收标准与验证入口 ─────────────────────────────────────────────────── │
+│  verify分支: auth-integration                                           │
+│    AC1 [verify: auth-integration, baseline: red]                        │
+│      登录链路集成测试全绿                                               │
+│                                                                         │
+│  证据记录 (2 次尝试) ────────────────────────────────────────────────── │
+│  ▶ Attempt 1 · 14:10:05                                                 │
+│    ✗ FAIL @hard  auth-integration · exit=1                              │
+│      (stdout / stderr 原始输出...)                                      │
+╰─────────────────────────────────────────────────────────────────────────╯
+ ↑↓ 滚动   Esc 返回任务列表   R 刷新   Q 关闭
+```
+
+- **三段焦点**: `Tab` 在「概览/验收」(焦点 0)、「任务列表」(焦点 1) 与「日志」(焦点 2) 之间循环切换。
+- **逐项选择与高亮**: 焦点在任务列表时,用 `↑`/`↓` 上下选择特定任务,选中的任务块带有高亮背景与 `▸` 标识。
+- **任务详情页 (`Enter`)**: 选中任务后按 `Enter` 展开该任务的深度详情页:
+  - **任务定义与状态**: 任务 ID、标题、所属里程碑、执行状态与任务类型(`impl` 或 `spike`)。
+  - **执行历史与熔断状态**: 尝试次数 (`attempt m/n`)、失败签名、连续同签名计数、环境漂移计数与上次失败原因。
+  - **验收标准与 verify 分支**: 映射的 AC ID、verify 分支、基线要求(`red`/`green`)及 AC 完整正文。
+  - **全量证据历史**: 每次 attempt 的完整执行记录(执行时间、各分支判决结果、exitCode、耗时与原始 stdout/stderr 输出,折行不截断)。
+  - **探针任务结论**: Spike 类型任务直接呈现核心问题及书面结论正文(`missions/spikes/<id>/<task>.md`)。
+- **滚动与返回**: 详情页内 `↑`/`↓` / `PgUp`/`PgDn` / `Home`/`End` 滚动查看超长输出;按 `Esc` 或 `Backspace` 返回任务列表并保留原先的光标位置。
 
 ## 仓库布局(I6 · 仓库即规范)
 

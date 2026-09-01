@@ -12,8 +12,10 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { initialState } from "../src/core/machine.ts";
 import type { MissionPlan } from "../src/store/mission.ts";
-import { acLines, overviewLines, renderWidgetCard, taskLines } from "../src/ui/dashboard.ts";
+import { acLines, overviewLines, renderWidgetCard, taskBlocks, taskLines } from "../src/ui/dashboard.ts";
 import { modelRows, modelsFooter, pickerRows, type ModelsPageData } from "../src/ui/models-page.ts";
+import { renderTaskDetail } from "../src/ui/task-detail.ts";
+import { renderStatus } from "../src/ui/status-view.ts";
 
 /** docs/themes.md 的前景色名(仅列本项目可能用到的部分) */
 const FG = new Set([
@@ -95,6 +97,96 @@ test("状态面板与 widget 的颜色名都合法(含 spike / frame 相位)", (
 		assert.doesNotThrow(() => renderWidgetCard(strictTheme, plan, s, Date.now(), 100), `widget @${phase}`);
 		assert.doesNotThrow(() => overviewLines(plan, s), `overview @${phase}`);
 		assert.doesNotThrow(() => taskLines(plan, s), `tasks @${phase}`);
+		assert.doesNotThrow(() => taskBlocks(plan, s, strictTheme, 100), `taskBlocks @${phase}`);
 	}
 	assert.doesNotThrow(() => acLines(plan, { latest: {} }, "missions"));
+});
+
+test("任务详情页与状态视图在 strictTheme 下颜色名均合法", () => {
+	const s = initialState({ missionId: "m1", tier: "standard", taskOrder: ["T1", "T2"] });
+	s.phase = "do";
+	s.currentTask = "T1";
+	s.tasks.T1 = { ...s.tasks.T1, status: "failed", attempts: 2, sameSignatureCount: 1, lastFailureReason: "断言失败" };
+	s.tasks.T2 = { ...s.tasks.T2, kind: "spike", status: "done", attempts: 1 };
+
+	const detailDataT1 = {
+		tier: "standard",
+		task: plan.milestones[0].tasks[0],
+		taskState: s.tasks.T1,
+		milestone: plan.milestones[0],
+		criteria: plan.acceptanceCriteria,
+		attempts: [
+			{
+				taskId: "T1",
+				attempt: 1,
+				at: Date.now() - 30000,
+				evidences: [
+					{
+						level: "hard" as const,
+						acId: "AC1",
+						result: "fail" as const,
+						raw: "Error on auth",
+						exitCode: 1,
+						durationMs: 120,
+					},
+				],
+			},
+		],
+	};
+	assert.doesNotThrow(() => renderTaskDetail(detailDataT1, strictTheme, 80));
+
+	const detailDataSpike = {
+		tier: "standard",
+		task: plan.milestones[0].tasks[1],
+		taskState: s.tasks.T2,
+		milestone: plan.milestones[0],
+		criteria: plan.acceptanceCriteria,
+		attempts: [],
+		spikeReport: "# Spike 结论\n可行性确认完毕。",
+	};
+	assert.doesNotThrow(() => renderTaskDetail(detailDataSpike, strictTheme, 80));
+
+	const statusData = {
+		plan,
+		state: s,
+		evidence: { latest: {} },
+		taskEvidence: { T1: detailDataT1.attempts },
+		spikeReports: { T2: detailDataSpike.spikeReport },
+		logLines: ["10:00 start", "10:01 fail"],
+		dirName: "missions",
+	};
+
+	// 测试 mission 模式（含任务选中）
+	assert.doesNotThrow(() =>
+		renderStatus({
+			theme: strictTheme,
+			width: 80,
+			rows: 30,
+			now: Date.now(),
+			data: statusData,
+			focus: 1,
+			scroll: [0, 0, 0],
+			canResume: true,
+			canAbort: true,
+			mode: "mission",
+			selectedTask: 0,
+		}),
+	);
+
+	// 测试 task-detail 模式
+	assert.doesNotThrow(() =>
+		renderStatus({
+			theme: strictTheme,
+			width: 80,
+			rows: 30,
+			now: Date.now(),
+			data: statusData,
+			focus: 1,
+			scroll: [0, 0, 0],
+			canResume: true,
+			mode: "task-detail",
+			selectedTask: 0,
+			taskDetailScroll: 0,
+		}),
+	);
 });
