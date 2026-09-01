@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { normalize, failureSignature, decide, applyFailure } from "../breaker.ts";
+import { normalize, failureSignature, decide, applyFailure, nearThreshold } from "../breaker.ts";
 import type { Evidence, TaskState } from "../types.ts";
 
 const fail = (raw: string, acId = "AC1"): Evidence => ({
@@ -150,4 +150,36 @@ test("断言类别不同则签名不同", () => {
   const a = "FooTest#bar assertThrows failed";
   const b = "FooTest#bar assertNotNull failed";
   assert.notEqual(failureSignature([fail(a)]), failureSignature([fail(b)]));
+});
+
+// ─────────────── 熔断临界:UI 的警告色以此为准 ───────────────
+
+test("nearThreshold:再失败一次就升级时为真,且不把 0 次当成临界", () => {
+  // standard 阈值 3:第 2 次同签名就是临界
+  assert.equal(nearThreshold(task({ sameSignatureCount: 0 }), "standard"), false);
+  assert.equal(nearThreshold(task({ sameSignatureCount: 1 }), "standard"), false);
+  assert.equal(nearThreshold(task({ sameSignatureCount: 2 }), "standard"), true);
+  assert.equal(nearThreshold(task({ sameSignatureCount: 3 }), "standard"), true);
+  // quick 阈值 2:第 1 次同签名就已经是临界
+  assert.equal(nearThreshold(task({ sameSignatureCount: 1 }), "quick"), true);
+  // 没有任务时不报警
+  assert.equal(nearThreshold(undefined, "standard"), false);
+});
+
+test("nearThreshold 与 decide 一致:临界的下一次失败必须真的升级", () => {
+  const sig = failureSignature([fail("boom NullPointerException")]);
+  for (const tier of ["quick", "standard", "complex"] as const) {
+    // 一直用同一个签名打,直到 decide 说要升级
+    let cur = task({ sameSignatureCount: 0, lastSignature: sig });
+    for (let i = 0; i < 12; i++) {
+      const wasNear = nearThreshold(cur, tier);
+      const d = decide({ tier, task: cur, signature: sig, level: 1 });
+      if (d.action !== "retry") {
+        assert.equal(wasNear, true, `${tier}:升级前一刻 nearThreshold 应为真`);
+        break;
+      }
+      assert.equal(wasNear, false, `${tier}:还能重试就不该是临界`);
+      cur = applyFailure({ ...cur, attempts: cur.attempts + 1 }, sig);
+    }
+  }
 });

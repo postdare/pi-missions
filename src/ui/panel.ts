@@ -1,21 +1,46 @@
 /**
  * pi-missions · ui/panel
  *
- * /missions 主面板(ctx.ui.custom,需 hasUI 守卫)。
- * 顶部三档新建入口,下方 mission 卡片列表 —— 全部从 missions/state/* 扫描重建(I1)。
+ * /missions 主面板(ctx.ui.custom 非 overlay —— 编排器风格圆角盒内联页,
+ * 替换编辑器区域,聊天记录留在上方,需 hasUI 守卫)。
  *
- * 卡片信息:目标 · 档位 · 相位 · 进度条 · 当前任务/attempt · 成本 · 时长 ·
- *           熔断预警 / 换脑挂起 / 失败原因 · 最近更新时间。
- * d 展开详情(升级历史 + 日志尾部)。
+ *   ╭─ MISSIONS ───────────────────────────────── 3 个 mission ─╮
+ *   │  任务  模型                                 输入以筛选…   │
+ *   │                                                            │
+ *   │ ▸ + 开始新任务  standard  任务列表 + 验证闸门  Ctrl+L 换档  │
+ *   │                                                            │
+ *   │   状态     更新    进度       档位      目标                │
+ *   │ ▸ ● 执行   3min   ███░░ 3/8  standard  CMS 管理端重构      │
+ *   ╰────────────────────────────────────────────────────────────╯
+ *
+ * 任务页:输入即筛选(筛选框在页签行右侧);首行「开始新任务」Ctrl+L 换档、Enter 开始;
+ * 下方 mission 表格(状态/更新/进度/档位/目标),Enter 恢复,Ctrl+D 展开详情。
+ * 模型页:角色 → 模型/thinking 两栏行,Enter 进入模型选择器(带过滤)。
+ * Tab/Shift+Tab 切页(←→ 同效),Esc 关闭(任务页有筛选文本时先清空筛选)。
+ *
+ * 渲染是纯函数 renderPanel(),与输入处理分离 —— 可单测,也可离线预览。
  */
 
 import { Key, matchesKey, visibleWidth } from "@earendil-works/pi-tui";
-import { thresholdFor } from "../core/breaker.ts";
+import { nearThreshold, thresholdFor } from "../core/breaker.ts";
 import { ROLE_OF } from "../core/machine.ts";
-import { readLog } from "../store/log.ts";
 import { scanMissions, type ScannedMission } from "../store/evidence.ts";
+import { readLog } from "../store/log.ts";
 import { statePaths, type RepoLayout } from "../store/paths.ts";
-import { bar, costTotal, fmtDuration, truncate } from "./dashboard.ts";
+import { costTotal, fmtDuration, nearBreakerWarn, PHASE_STYLE } from "./dashboard.ts";
+import {
+	boxBot,
+	boxRow,
+	boxTop,
+	clip,
+	contentBudget,
+	CURSOR,
+	hintBar,
+	miniBar,
+	pad,
+	tabs,
+	windowLines,
+} from "./chrome.ts";
 import { cycleThinking, ROLE_ORDER, type ModelsConfig } from "../roles/models.ts";
 import type { Role } from "../core/types.ts";
 import {
@@ -33,16 +58,6 @@ interface Theme {
 	bold(text: string): string;
 }
 
-const PHASE_STYLE: Record<string, { icon: string; color: string; label: string }> = {
-	frame: { icon: "◇", color: "accent", label: "定义" },
-	plan: { icon: "◌", color: "accent", label: "规划" },
-	do: { icon: "●", color: "accent", label: "执行" },
-	check: { icon: "◍", color: "accent", label: "判定" },
-	act: { icon: "●", color: "warning", label: "调整" },
-	done: { icon: "✓", color: "success", label: "完成" },
-	halted: { icon: "✕", color: "error", label: "熔断" },
-};
-
 const TIER_DESC: Array<{ id: string; desc: string }> = [
 	{ id: "quick", desc: "单任务,不落盘,快速循环" },
 	{ id: "standard", desc: "任务列表 + 验证闸门(默认)" },
@@ -53,106 +68,149 @@ const TIER_ORDER = TIER_DESC.map((t) => t.id);
 
 type TierId = "quick" | "standard" | "complex";
 
-/** 按终端列宽补空格(▶/▸ 是全角宽 2,空格半角宽 1,padEnd 按码位算会对不齐) */
-function padCol(s: string, width: number): string {
-	return s + " ".repeat(Math.max(0, width - visibleWidth(s)));
-}
-
+/** 紧凑相对时间:表格里只有 7 列,"3min 前" 换成 "3min" */
 function relTime(ts: number, now: number): string {
 	const mins = Math.max(0, Math.round((now - ts) / 60_000));
 	if (mins < 1) return "刚刚";
-	if (mins < 60) return `${mins}min 前`;
+	if (mins < 60) return `${mins}min`;
 	const hours = Math.floor(mins / 60);
-	if (hours < 24) return `${hours}h 前`;
-	return `${Math.floor(hours / 24)}d 前`;
+	if (hours < 24) return `${hours}h`;
+	return `${Math.floor(hours / 24)}d`;
 }
 
-/** 单个 mission 的卡片行 */
-function missionCard(m: ScannedMission, selected: boolean, detail: boolean, t: Theme, width: number, now: number, l: RepoLayout): string[] {
+/** 筛选:id/目标/相位/档位 的小写包含匹配 */
+export function filterMissions(missions: ScannedMission[], query: string): ScannedMission[] {
+	const q = query.trim().toLowerCase();
+	if (!q) return missions;
+	return missions.filter((m) =>
+		`${m.missionId} ${m.plan?.goal ?? ""} ${m.state.phase} ${m.state.tier}`.toLowerCase().includes(q),
+	);
+}
+
+// ─────────────────────────── 表格列 ───────────────────────────
+
+const COL_CURSOR = 2; // 光标 "▸" + 空格
+const COL_STATUS = 8; // "● 执行" 6 列 + 留白
+const COL_UPDATED = 7; // "3min" 4 列 + 留白
+const COL_PROGRESS = 12; // "█████ 10/12" 最宽 11 列 + 留白
+const COL_TIER = 10; // "standard"
+const BAR_W = 5;
+
+/** 窄屏按重要性丢列:先丢档位,再丢进度 */
+export function visibleCols(inner: number): { progress: boolean; tier: boolean } {
+	return { tier: inner >= 76, progress: inner >= 48 };
+}
+
+function goalWidth(inner: number): number {
+	const c = visibleCols(inner);
+	return Math.max(
+		8,
+		inner - COL_CURSOR - COL_STATUS - COL_UPDATED - (c.progress ? COL_PROGRESS : 0) - (c.tier ? COL_TIER : 0),
+	);
+}
+
+/** 表格列头(muted —— 比正文弱,但要比 dim 可读) */
+export function tableHeader(t: Theme, inner = 92): string {
+	const c = visibleCols(inner);
+	return (
+		" ".repeat(COL_CURSOR) +
+		pad(t.fg("muted", "状态"), COL_STATUS) +
+		pad(t.fg("muted", "更新"), COL_UPDATED) +
+		(c.progress ? pad(t.fg("muted", "进度"), COL_PROGRESS) : "") +
+		(c.tier ? pad(t.fg("muted", "档位"), COL_TIER) : "") +
+		t.fg("muted", "目标")
+	);
+}
+
+/**
+ * 单个 mission 的表格行。临界预警(熔断边缘/换脑挂起)时状态列改 ⚠ 警告色。
+ * selected 行加光标并整体加粗 —— 背景高亮由 boxRow 负责,这里只出内容。
+ */
+export function missionRow(m: ScannedMission, selected: boolean, t: Theme, inner: number, now: number): string {
 	const s = m.state;
+	const c = visibleCols(inner);
 	const st = PHASE_STYLE[s.phase] ?? PHASE_STYLE.halted;
 	const task = s.currentTask ? s.tasks[s.currentTask] : undefined;
-	const planTask = s.currentTask ? m.plan?.milestones.flatMap((x) => x.tasks).find((x) => x.id === s.currentTask) : undefined;
+	const critical = !!s.pendingHandoff || nearThreshold(task, s.tier);
+
+	const icon = critical ? t.fg("warning", "⚠") : t.fg(st.color, st.icon);
+	const label = critical ? t.fg("warning", st.label) : t.fg(st.color, st.label);
+	const cursor = selected ? t.fg("accent", CURSOR) + " " : " ".repeat(COL_CURSOR);
+	const status = pad(`${icon} ${label}`, COL_STATUS);
+	const updated = pad(t.fg("dim", relTime(s.updatedAt, now)), COL_UPDATED);
+
 	const doneCount = Object.values(s.tasks).filter((x) => x.status === "done").length;
 	const total = s.taskOrder.length;
-	const cost = costTotal(s);
+	const progress = c.progress
+		? pad(
+				total > 0 ? `${miniBar(t, doneCount, total, BAR_W)} ${t.fg("dim", `${doneCount}/${total}`)}` : t.fg("dim", "—"),
+				COL_PROGRESS,
+			)
+		: "";
+	const tier = c.tier ? pad(t.fg("dim", s.tier), COL_TIER) : "";
+	const goal = clip(m.plan?.goal ?? t.fg("dim", "(计划损坏或缺失)"), goalWidth(inner));
+
+	const row = `${cursor}${status}${updated}${progress}${tier}${goal}`;
+	return selected ? t.bold(row) : row;
+}
+
+/**
+ * 选中行的详情展开(Ctrl+D):id/档位/当前任务/成本/预警/升级历史/日志尾部。
+ * 每行带一条 borderMuted 竖引导线,视觉上挂在被展开的那一行下面。
+ */
+export function detailLines(m: ScannedMission, t: Theme, inner: number, now: number, logTail: string[]): string[] {
+	const s = m.state;
+	const task = s.currentTask ? s.tasks[s.currentTask] : undefined;
+	const planTask = s.currentTask
+		? m.plan?.milestones.flatMap((x) => x.tasks).find((x) => x.id === s.currentTask)
+		: undefined;
 	const threshold = thresholdFor(s.tier);
-	const cursorBase = padCol(selected ? "▸" : " ", 2); // ▸ 是全角(宽 2),与未选中的空格对齐
-	const cursor = selected ? t.fg("accent", cursorBase) : cursorBase;
+	const cost = costTotal(s);
+	const lines: string[] = [];
+	// 引导线落在光标条那一列,展开内容与「状态」列对齐 —— 视觉上挂在被展开的行下面
+	const guide = `${t.fg("borderMuted", "│")} `;
+	const width = inner - COL_CURSOR;
+	const push = (s2: string) => lines.push(guide + clip(s2, width));
 
-	// 标题行:图标 + id + 档位 + 相位 + 更新时间
-	const head =
-		`${cursor} ${t.fg(st.color, st.icon)} ${t.bold(t.fg(st.color, m.missionId))}` +
-		`  ${t.fg("dim", s.tier)}  ${t.fg(st.color, st.label)}` +
-		(ROLE_OF[s.phase] ? t.fg("dim", `·${ROLE_OF[s.phase]}`) : "") +
-		t.fg("dim", `  ${relTime(s.updatedAt, now)}`);
-
-	const lines = [head];
-
-	// 目标行
-	if (m.plan?.goal) lines.push(`    ${t.fg("muted", truncate(m.plan.goal, width - 10))}`);
-
-	// 进度行:进度条 + 当前任务 + attempt + 成本 + 时长
-	const progress = total > 0 ? `${bar(doneCount, total)} ${doneCount}/${total}` : "—";
-	const bits = [progress];
-	if (s.currentTask && s.phase !== "done") {
-		bits.push(`▶ ${s.currentTask}${planTask ? ` ${truncate(planTask.title, 20)}` : ""} · a${task?.attempts ?? 0}/${threshold}`);
-	}
+	const bits: string[] = [`${s.missionId}`, s.tier, `phase=${s.phase}`];
+	const roleHere = ROLE_OF[s.phase];
+	if (roleHere) bits.push(roleHere);
 	if (cost > 0) bits.push(`$${cost.toFixed(2)}`);
 	if (m.plan?.createdAt) {
-		bits.push(s.phase === "done" || s.phase === "halted" ? `共 ${fmtDuration(m.plan.createdAt, s.updatedAt)}` : fmtDuration(m.plan.createdAt, now));
-	}
-	lines.push(`    ${bits.join(t.fg("dim", " · "))}`);
-
-	// 预警行(按需):熔断临界 / 换脑挂起 / 失败原因 / 环境漂移
-	if (task && task.sameSignatureCount >= threshold - 1 && task.sameSignatureCount > 0) {
-		lines.push(`    ${t.fg("warning", `⚠ 同一失败签名 ×${task.sameSignatureCount},再失败一次将升级`)}`);
-	}
-	if (s.pendingHandoff) {
-		lines.push(`    ${t.fg("warning", `⏸ 等待换脑: ${truncate(s.pendingHandoff, width - 20)}`)}`);
-	}
-	if (task?.lastFailureReason && s.phase !== "done") {
-		lines.push(`    ${t.fg("dim", `✗ ${truncate(task.lastFailureReason, width - 12)}`)}`);
-	}
-	if (s.phase === "halted") {
-		const last = s.escalation.history[s.escalation.history.length - 1];
-		lines.push(
-			`    ${t.fg("error", `止于 L${s.escalation.level}${last ? ` · ${truncate(last.reason, width - 16)}` : ""}`)}`,
+		bits.push(
+			s.phase === "done" || s.phase === "halted"
+				? `共 ${fmtDuration(m.plan.createdAt, s.updatedAt)}`
+				: fmtDuration(m.plan.createdAt, now),
 		);
 	}
+	push(t.fg("dim", bits.join(" · ")));
 
-	// 详情(d):升级历史 + 日志尾部
-	if (detail) {
-		if (s.escalation.history.length > 0) {
-			lines.push(`    ${t.fg("dim", "升级历史:")}`);
-			for (const h of s.escalation.history.slice(-4)) {
-				lines.push(`      ${t.fg("dim", `L${h.from}→L${h.to} ${h.taskId} · ${truncate(h.reason, width - 22)}`)}`);
-			}
+	if (s.currentTask && s.phase !== "done") {
+		push(
+			`${t.fg("accent", "▸")} ${s.currentTask}${planTask ? ` ${clip(planTask.title, 24)}` : ""} ${t.fg("dim", `· attempt ${task?.attempts ?? 0}/${threshold}`)}`,
+		);
+	}
+	if (task && nearThreshold(task, s.tier)) push(t.fg("warning", nearBreakerWarn(task)));
+	if (s.pendingHandoff) push(t.fg("warning", `⏸ 等待换脑: ${clip(s.pendingHandoff, width - 12)}`));
+	if (task?.lastFailureReason && s.phase !== "done") push(t.fg("dim", `✗ ${clip(task.lastFailureReason, width - 4)}`));
+	if (s.phase === "halted") {
+		const last = s.escalation.history[s.escalation.history.length - 1];
+		push(t.fg("error", `止于 L${s.escalation.level}${last ? ` · ${clip(last.reason, width - 10)}` : ""}`));
+	}
+	if (s.escalation.history.length > 0) {
+		push(t.fg("muted", "升级历史"));
+		for (const h of s.escalation.history.slice(-3)) {
+			push(t.fg("dim", `  L${h.from}→L${h.to} ${h.taskId} · ${clip(h.reason, width - 16)}`));
 		}
-		const logTail = readLog(statePaths(l, m.missionId).logMd).trim().split("\n").filter(Boolean).slice(-8);
-		if (logTail.length > 0 && logTail[0] !== "(暂无日志)") {
-			lines.push(`    ${t.fg("dim", "日志:")}`);
-			for (const line of logTail) lines.push(`      ${t.fg("dim", clip(line, width - 10))}`);
-		}
+	}
+	if (logTail.length > 0 && logTail[0] !== "(暂无日志)") {
+		push(t.fg("muted", "日志"));
+		for (const line of logTail) push(t.fg("dim", `  ${line}`));
 	}
 	return lines;
 }
 
-function clip(line: string, width: number): string {
-	if (visibleWidth(line) <= width) return line;
-	let out = line;
-	while (out.length > 0 && visibleWidth(`${out}…`) > width) out = out.slice(0, -1);
-	return `${out}…`;
-}
-
-export interface PanelCallbacks {
-	/** ⏎ / r:恢复选中的 mission(面板先关闭) */
-	onResume: (missionId: string) => void;
-	/** n:用当前选中的档位开新任务(面板关闭,编辑器着色 + 预填命令) */
-	onSelectTier: (tier: TierId) => void;
-	/** 「模型」页的数据与写入(runtime 提供);缺省则该页显示为不可用 */
-	models?: ModelsBridge;
-}
+// ─────────────────────────── 纯渲染 ───────────────────────────
 
 const PAGES = [
 	{ id: "missions", label: "任务" },
@@ -161,8 +219,217 @@ const PAGES = [
 
 type PageId = (typeof PAGES)[number]["id"];
 
+/** 提示条按当前模式查表 —— 三层嵌套三元读起来比它表达的东西复杂 */
+const HINTS: Record<PageId | "picking", Array<[string, string]>> = {
+	picking: [["↑↓", "选择"], ["Enter", "确认"], ["Backspace", "删字"], ["Esc", "取消"]],
+	models: [["↑↓", "导航"], ["Enter", "选模型"], ["T", "thinking"], ["X", "清除"], ["Tab", "切页"], ["Esc", "关闭"]],
+	missions: [["↑↓", "导航"], ["Enter", "选择"], ["Ctrl+L", "档位"], ["Ctrl+D", "详情"], ["Tab", "切页"], ["Esc", "关闭"]],
+};
+
 /** 模型选择器的子模式状态 */
 type Picking = { role: Role; cursor: number; filter: string } | null;
+
+export interface PanelView {
+	theme: Theme;
+	/** 组件被分配的列宽 */
+	width: number;
+	/** 终端总行数(算内容高度预算) */
+	rows: number;
+	now: number;
+	page: PageId;
+	missions: ScannedMission[];
+	filter: string;
+	/** 0 = 「开始新任务」行,1..n = 筛选后的 mission */
+	selected: number;
+	detail: boolean;
+	tierIdx: number;
+	roleIdx: number;
+	listScroll: number;
+	picking: Picking;
+	/** 模型页数据;null = runtime 未接入或不在模型页 */
+	models: ModelsPageData | null;
+	/** 展开详情时,选中 mission 的日志尾部(由壳采好 —— 渲染层不碰磁盘) */
+	logTail: string[];
+}
+
+export interface PanelRender {
+	lines: string[];
+	/** 窗口化后修正的滚动偏移,调用方需写回 */
+	listScroll: number;
+}
+
+/** 筛选框(页签行右侧):有文本时 accent,空时 dim 占位 */
+function filterField(t: Theme, filter: string): string {
+	const cursor = t.fg("accent", "▏");
+	return filter ? `${t.fg("muted", "筛选 ")}${t.fg("accent", filter)}${cursor}` : t.fg("dim", "输入以筛选任务…");
+}
+
+/** 页签行:左侧页签,右侧筛选框 */
+function tabRow(t: Theme, inner: number, page: PageId, filter: string, showFilter: boolean): string {
+	const left = tabs(t, PAGES as unknown as Array<{ id: string; label: string }>, page);
+	if (!showFilter) return left;
+	const right = filterField(t, filter);
+	const gap = inner - visibleWidth(left) - visibleWidth(right);
+	if (gap < 2) return left;
+	return left + " ".repeat(gap) + right;
+}
+
+/** 一行内容 + 要不要铺选中背景 */
+interface Row {
+	text: string;
+	highlight?: boolean;
+}
+
+/** 模型页内容(含选择器子模式)。选中行与任务页用同一种选中语言:整行背景 */
+function modelsPageLines(v: PanelView, inner: number, budget: number): Row[] {
+	const t = v.theme;
+	if (!v.models) return [{ text: t.fg("dim", "模型配置不可用(runtime 未接入)") }];
+	const d = v.models;
+	const pick = v.picking;
+	const plain = (xs: string[]): Row[] => xs.map((text) => ({ text }));
+	if (pick) {
+		const list = filterModels(d.models, pick.filter);
+		const cur = d.config[pick.role];
+		const cursor = Math.min(pick.cursor, Math.max(0, list.length - 1));
+		// 选择器没有滚动状态,每次从 0 起算 + 光标锚点 —— 效果是深列表时光标贴底
+		const all = pickerRows(list, cursor, cur, t);
+		const w = windowLines(all, 0, Math.max(4, budget - 6), { start: cursor, end: cursor + 1 });
+		const off = w.start;
+		const rows: Row[] = w.lines.map((text, i) => ({ text, highlight: off + i === cursor }));
+		return [
+			...plain([
+				`${t.bold(`为 ${pick.role} 选择模型`)}  ${t.fg("dim", `${list.length} 个可选`)}`,
+				`${t.fg("muted", "过滤 ")}${pick.filter ? t.fg("accent", pick.filter) + t.fg("accent", "▏") : t.fg("dim", "(输入字符过滤)")}`,
+				"",
+				...(off > 0 ? [t.fg("dim", `   ↑ 之上还有 ${off} 个`)] : []),
+			]),
+			...rows,
+			...plain(w.end < all.length ? [t.fg("dim", `   ↓ 之下还有 ${all.length - w.end} 个,继续输入过滤`)] : []),
+		];
+	}
+	// modelRows 只在选中角色下面插一行说明,所以选中角色的行号恰好 = roleIdx
+	const roles = modelRows(d, v.roleIdx, t, inner).map((text, i) => ({
+		text,
+		highlight: i === v.roleIdx,
+	}));
+	return [...roles, ...plain(modelsFooter(d, t))];
+}
+
+/** 面板全部行(含盒外提示条)。纯函数:进来的是视图对象,出去的是行数组 */
+export function renderPanel(v: PanelView): PanelRender {
+	const t = v.theme;
+	const width = Math.max(40, v.width);
+	const inner = width - 4; // 盒内宽(│ + 空格 … 空格 + │)
+	const budget = contentBudget(v.rows);
+
+	const hints = HINTS[v.picking ? "picking" : v.page];
+
+	// ── 模型页 ──
+	if (v.page === "models") {
+		const out: string[] = [boxTop(t, width, "MISSIONS", v.models ? `${ROLE_ORDER.length} 个角色` : undefined)];
+		out.push(boxRow(t, width, tabRow(t, inner, v.page, v.filter, false)));
+		out.push(boxRow(t, width));
+		for (const r of modelsPageLines(v, inner, budget - 3)) {
+			out.push(boxRow(t, width, r.text, { highlight: r.highlight }));
+		}
+		out.push(boxBot(t, width));
+		out.push(hintBar(t, width, hints));
+		return { lines: out, listScroll: v.listScroll };
+	}
+
+	// ── 任务页 ──
+	const filtered = filterMissions(v.missions, v.filter);
+	const selected = Math.min(v.selected, filtered.length); // 0..filtered.length
+	const meta = v.filter
+		? `${filtered.length}/${v.missions.length} 个 mission`
+		: v.missions.length > 0
+			? `${v.missions.length} 个 mission`
+			: undefined;
+
+	const out: string[] = [boxTop(t, width, "MISSIONS", meta)];
+	const row = (content = "") => out.push(boxRow(t, width, content));
+	const hi = (content: string) => out.push(boxRow(t, width, content, { highlight: true }));
+
+	row(tabRow(t, inner, v.page, v.filter, true));
+	row();
+
+	// 「开始新任务」行:Ctrl+L 换档,档位与说明内联;窄屏先丢档位说明,再丢换档提示
+	const tier = TIER_ORDER[v.tierIdx];
+	const startSel = selected === 0;
+	const startHead =
+		(startSel ? t.fg("accent", CURSOR) : " ") +
+		` ${t.fg("accent", "+")} ${t.bold("开始新任务")}   ${t.fg("accent", tier)}`;
+	// 「Ctrl+L 换档」右对齐固定在行尾(换档是这一行唯一的操作,位置要稳),
+	// 档位说明填中间的剩余空间,不够就截断
+	const startTail = "Ctrl+L 换档";
+	const tailW = visibleWidth(startTail); // CJK 宽 2,不能用 .length
+	const headW = visibleWidth(startHead);
+	const descRoom = inner - headW - tailW - 4;
+	const startLead =
+		descRoom >= 6 ? `${startHead}  ${t.fg("dim", clip(TIER_DESC[v.tierIdx].desc, descRoom))}` : startHead;
+	const startBody =
+		inner - headW >= tailW + 2 ? pad(startLead, inner - tailW) + t.fg("dim", startTail) : startHead;
+	if (startSel) hi(startBody);
+	else row(startBody);
+	row();
+	row(tableHeader(t, inner));
+
+	// 筛选后的表格行(含详情展开),窗口化保证选中行可见
+	const all: Array<{ text: string; highlight: boolean }> = [];
+	const ranges: Array<{ start: number; end: number }> = [];
+	if (filtered.length === 0) {
+		all.push({
+			text: t.fg("dim", `  ${v.filter ? `无匹配「${clip(v.filter, 20)}」 —— Esc 清除筛选` : "暂无历史 mission —— Enter 从上面新建"}`),
+			highlight: false,
+		});
+	}
+	for (const [i, m] of filtered.entries()) {
+		const start = all.length;
+		const isSel = selected === i + 1;
+		all.push({ text: missionRow(m, isSel, t, inner, v.now), highlight: isSel });
+		if (v.detail && isSel) {
+			for (const d of detailLines(m, t, inner, v.now, v.logTail)) all.push({ text: d, highlight: false });
+		}
+		ranges.push({ start, end: all.length });
+	}
+
+	const headRows = out.length + 1; // +1 是 boxBot
+	const winH = Math.max(3, budget - headRows);
+	const anchor = selected === 0 ? { start: 0, end: 0 } : (ranges[selected - 1] ?? null);
+	const win = windowLines(
+		all.map((x) => x.text),
+		v.listScroll,
+		winH,
+		anchor,
+	);
+	for (const [i, line] of win.lines.entries()) {
+		out.push(boxRow(t, width, line, { highlight: all[win.start + i]?.highlight }));
+	}
+
+	out.push(boxBot(t, width));
+
+	// 位置指示:可见 mission 区间 / 筛选后总数
+	let pos: string | undefined;
+	if (filtered.length > 0 && all.length > winH) {
+		const first = ranges.findIndex((r) => r.end > win.start);
+		let last = first;
+		for (let i = first; i < ranges.length && ranges[i].start < win.end; i++) last = i;
+		pos = `${first + 1}-${last + 1} of ${filtered.length}`;
+	}
+	out.push(hintBar(t, width, hints, pos));
+	return { lines: out, listScroll: win.offset };
+}
+
+// ─────────────────────────── 交互壳 ───────────────────────────
+
+export interface PanelCallbacks {
+	/** 在「开始新任务」行按 Enter:用当前档位开新任务(面板关闭,编辑器着色 + 预填命令) */
+	onSelectTier: (tier: TierId) => void;
+	/** 在 mission 行按 Enter:面板关闭,打开该 mission 的 detail 页 */
+	onDetail: (missionId: string) => void;
+	/** 「模型」页的数据与写入(runtime 提供);缺省则该页显示为不可用 */
+	models?: ModelsBridge;
+}
 
 export interface ModelsBridge {
 	getData(): ModelsPageData;
@@ -186,244 +453,216 @@ export async function openMissionsPanel(ctx: any, l: RepoLayout, cb: PanelCallba
 		return;
 	}
 
-	await ctx.ui.custom(
-		(tui: any, theme: Theme, _kb: any, done: (r: void) => void) => {
-			let missions = scanMissions(l);
-			let selected = 0;
-			let detail = false;
-			let tierIdx = 1; // 默认 standard
-			let closed = false;
-			let page: PageId = "missions";
-			let roleIdx = 0;
-			/** 非 null = 正在为该角色挑模型(选择器子模式) */
-			let picking: Picking = null;
+	await ctx.ui.custom((tui: any, theme: Theme, _kb: any, done: (r: void) => void) => {
+		let missions = scanMissions(l);
+		/** 任务页筛选文本(输入即筛选) */
+		let filter = "";
+		/** 选中项:0 = 「开始新任务」行,1..n = 筛选后的 mission */
+		let selected = 0;
+		let detail = false;
+		let tierIdx = 1; // 默认 standard
+		let closed = false;
+		let page: PageId = "missions";
+		let roleIdx = 0;
+		/** 表格的滚动偏移(行),render 里按选中行可见性调整 */
+		let listScroll = 0;
+		/** 非 null = 正在为该角色挑模型(选择器子模式) */
+		let picking: Picking = null;
+		/** 展开详情时选中 mission 的日志尾部。渲染层不碰磁盘,由这里采 */
+		let logTail: string[] = [];
+		let logFor: string | null = null;
 
-			const refresh = () => {
-				try {
-					missions = scanMissions(l);
-					if (selected >= missions.length) selected = Math.max(0, missions.length - 1);
-				} catch {
-					/* keep last good */
-				}
-				if (!closed) tui.requestRender();
-			};
-			const timer = setInterval(refresh, 2_000);
+		/** 换了 mission 就重读;同一个 mission 的内容交给 2s 定时器刷 */
+		const syncLog = (id: string | null, force = false) => {
+			if (!id) {
+				logTail = [];
+				logFor = null;
+				return;
+			}
+			if (id === logFor && !force) return;
+			logFor = id;
+			try {
+				logTail = readLog(statePaths(l, id).logMd).trim().split("\n").filter(Boolean).slice(-5);
+			} catch {
+				logTail = [];
+			}
+		};
 
-			const close = () => {
-				if (closed) return;
-				closed = true;
-				clearInterval(timer);
-				done(undefined);
-			};
+		const refresh = () => {
+			try {
+				missions = scanMissions(l);
+			} catch {
+				/* keep last good */
+			}
+			syncLog(logFor, true);
+			if (!closed) tui.requestRender();
+		};
+		const timer = setInterval(refresh, 2_000);
 
-			/** 「模型」页的内容行(含选择器子模式) */
-			const modelsPageLines = (t: Theme, width: number): string[] => {
-				if (!cb.models) return [t.fg("dim", "模型配置不可用(runtime 未接入)")];
-				const d = cb.models.getData();
+		const close = () => {
+			if (closed) return;
+			closed = true;
+			clearInterval(timer);
+			done(undefined);
+		};
+
+		return {
+			render: (w: number) => {
+				const selectedMission = detail ? filterMissions(missions, filter)[selected - 1] : undefined;
+				syncLog(selectedMission?.missionId ?? null);
+				const r = renderPanel({
+					theme,
+					width: w,
+					rows: Number(tui.terminal?.rows) || 24,
+					now: Date.now(),
+					page,
+					missions,
+					filter,
+					selected,
+					detail,
+					tierIdx,
+					roleIdx,
+					listScroll,
+					picking,
+					// 只有模型页需要它:getData() 会读 models.json + 重扫模型目录,
+					// 放在任务页每帧跑一遍是纯浪费
+					models: page === "models" && cb.models ? cb.models.getData() : null,
+					logTail,
+				});
+				listScroll = r.listScroll;
+				return r.lines;
+			},
+			invalidate: () => {},
+			handleInput: (input: string) => {
+				// ── 模型选择器子模式 ──
 				const pick = picking;
 				if (pick) {
-					const list = filterModels(d.models, pick.filter);
-					const cur = d.config[pick.role];
-					const rows = pickerRows(list.slice(0, 12), Math.min(pick.cursor, Math.max(0, list.length - 1)), cur, t);
-					return [
-						`${t.bold(`为 ${pick.role} 选择模型`)}  ${t.fg("dim", `${list.length} 个可选`)}`,
-						`过滤:${pick.filter ? t.fg("accent", pick.filter) : t.fg("dim", "(输入字符过滤)")}`,
-						"",
-						...rows,
-						...(list.length > 12 ? [t.fg("dim", `  … 还有 ${list.length - 12} 个,继续输入过滤`)] : []),
-						"",
-						t.fg("dim", "  ⏎ 选中 · Esc 取消 · Backspace 删过滤字符"),
-					];
-				}
-				return [
-					...modelRows(d, roleIdx, t, visibleWidth),
-					...modelsFooter(d, t),
-				];
-			};
-
-			return {
-				render: (w: number) => {
-					const t = theme;
-					const now = Date.now();
-					const inner = Math.max(48, Math.min(w - 6, 104));
-					const border = (s: string) => t.fg("borderAccent", s);
-					const row = (content: string) => {
-						const c = clip(content, inner - 4);
-						const pad = Math.max(0, inner - 4 - visibleWidth(c));
-						return t.bg("customMessageBg", `${border("│")} ${c}${" ".repeat(pad)} ${border("│")}`);
-					};
-
-					const title = " Missions ";
-					const hint = picking
-						? " ↑↓ 选择 · ⏎ 确认 · 输入过滤 · Esc 取消 "
-						: page === "models"
-							? " ←→ 切页 · ↑↓ 选角色 · ⏎ 选模型 · t thinking · x 清除 · q 退出 "
-							: " ←→ 切页 · Tab 切换档位 · n 新建 · ↑↓ 选择 · ⏎ 恢复 · d 详情 · q 退出 ";
-					const lines: string[] = [
-						t.bg(
-							"customMessageBg",
-							border("╭─") +
-								t.bold(t.fg("accent", title)) +
-								border("─".repeat(Math.max(1, inner - 4 - visibleWidth(title) - visibleWidth(hint)))) +
-								t.fg("dim", hint) +
-								border("─╮"),
-						),
-					];
-
-					lines.push(
-						row(
-							PAGES.map((p) => (p.id === page ? t.fg("accent", t.bold(`[${p.label}]`)) : t.fg("dim", ` ${p.label} `))).join(" "),
-						),
-					);
-					lines.push(row(t.fg("dim", "─".repeat(Math.min(56, inner - 8)))));
-
-					if (page === "models") {
-						for (const line of modelsPageLines(t, inner - 4)) lines.push(row(line));
-						lines.push(
-							t.bg("customMessageBg", border("╰") + border("─".repeat(Math.max(1, inner - 2))) + border("╯")),
-						);
-						return lines;
-					}
-
-					// 新建入口(三档说明,Tab/Shift+Tab 切换档位,高亮显示)
-					lines.push(row(`${t.fg("accent", "+")} ${t.bold("新建任务")}  ${t.fg("dim", "Tab 切换档位 · n 开始")}`));
-					// 描述列定宽左对齐:前缀 ▶ 是全角(宽 2),空格是半角(宽 1),
-					// padEnd 按码位算不按列宽算 —— 必须用 visibleWidth 对齐,否则三行描述错位
-					for (const td of TIER_DESC) {
-						const active = td.id === TIER_ORDER[tierIdx];
-						const cmd =
-							td.id === "quick" ? "/mission quick <任务>" : `/mission new <目标>${td.id === "complex" ? " --tier=complex" : ""}`;
-						const marker = padCol(active ? "▶" : " ", 2); // ▶ 宽 2,空格补到 2
-						const nameCol = padCol(td.id, 12); // 名字列固定 12 列
-						const name = active ? t.fg("accent", t.bold(nameCol)) : t.fg("dim", nameCol);
-						lines.push(row(`    ${marker} ${name}${t.fg("dim", td.desc)}  ${t.fg("dim", cmd)}`));
-					}
-					lines.push(row(t.fg("dim", "─".repeat(Math.min(56, inner - 8)))));
-
-					if (missions.length === 0) {
-						lines.push(row(t.fg("dim", "暂无历史 mission")));
-					}
-					for (const [i, m] of missions.entries()) {
-						if (i > 0) lines.push(row(""));
-						for (const line of missionCard(m, i === selected, detail && i === selected, t, inner - 4, now, l)) {
-							lines.push(row(line));
-						}
-					}
-
-					lines.push(
-						t.bg("customMessageBg", border("╰") + border("─".repeat(Math.max(1, inner - 2))) + border("╯")),
-					);
-					return lines;
-				},
-				invalidate: () => {},
-				handleInput: (input: string) => {
-					// ── 模型选择器子模式 ──
-					const pick = picking;
-					if (pick) {
-						const list = cb.models ? filterModels(cb.models.getData().models, pick.filter) : [];
-						if (matchesKey(input, Key.escape)) {
-							picking = null;
-							return tui.requestRender();
-						}
-						if (matchesKey(input, Key.up)) {
-							picking = { ...pick, cursor: Math.max(0, pick.cursor - 1) };
-							return tui.requestRender();
-						}
-						if (matchesKey(input, Key.down)) {
-							picking = { ...pick, cursor: Math.min(Math.max(0, list.length - 1), pick.cursor + 1) };
-							return tui.requestRender();
-						}
-						if (matchesKey(input, Key.enter)) {
-							const m = list[pick.cursor];
-							if (m) cb.models?.setModel(pick.role, { provider: m.provider, id: m.id });
-							picking = null;
-							return tui.requestRender();
-						}
-						if (matchesKey(input, Key.backspace)) {
-							picking = { ...pick, filter: pick.filter.slice(0, -1), cursor: 0 };
-							return tui.requestRender();
-						}
-						// 可打印字符 → 过滤
-						if (input.length === 1 && input >= " " && input !== "\x7f") {
-							picking = { ...pick, filter: pick.filter + input, cursor: 0 };
-							return tui.requestRender();
-						}
-						return;
-					}
-
-					if (matchesKey(input, Key.escape) || matchesKey(input, "q")) return close();
-
-					// ── 页签切换(Tab 留给档位:那是既有肌肉记忆) ──
-					if (matchesKey(input, Key.right)) {
-						page = PAGES[(PAGES.findIndex((p) => p.id === page) + 1) % PAGES.length].id;
+					const list = cb.models ? filterModels(cb.models.getData().models, pick.filter) : [];
+					if (matchesKey(input, Key.escape)) {
+						picking = null;
 						return tui.requestRender();
 					}
-					if (matchesKey(input, Key.left)) {
-						page = PAGES[(PAGES.findIndex((p) => p.id === page) - 1 + PAGES.length) % PAGES.length].id;
-						return tui.requestRender();
-					}
-
-					// ── 模型页 ──
-					if (page === "models") {
-						const role = ROLE_ORDER[roleIdx];
-						if (matchesKey(input, Key.up)) {
-							roleIdx = Math.max(0, roleIdx - 1);
-							return tui.requestRender();
-						}
-						if (matchesKey(input, Key.down)) {
-							roleIdx = Math.min(ROLE_ORDER.length - 1, roleIdx + 1);
-							return tui.requestRender();
-						}
-						if (matchesKey(input, Key.enter)) {
-							picking = { role, cursor: 0, filter: "" };
-							return tui.requestRender();
-						}
-						if (matchesKey(input, "t")) {
-							const cur = cb.models?.getData().config[role]?.thinking;
-							cb.models?.setThinking(role, cycleThinking(cur, role));
-							return tui.requestRender();
-						}
-						if (matchesKey(input, "x")) {
-							cb.models?.setModel(role, null);
-							return tui.requestRender();
-						}
-						return;
-					}
-
 					if (matchesKey(input, Key.up)) {
-						selected = Math.max(0, selected - 1);
+						picking = { ...pick, cursor: Math.max(0, pick.cursor - 1) };
 						return tui.requestRender();
 					}
 					if (matchesKey(input, Key.down)) {
-						selected = Math.min(missions.length - 1, selected + 1);
+						picking = { ...pick, cursor: Math.min(Math.max(0, list.length - 1), pick.cursor + 1) };
 						return tui.requestRender();
 					}
-					if (matchesKey(input, "d")) {
+					if (matchesKey(input, Key.enter)) {
+						const m = list[pick.cursor];
+						if (m) cb.models?.setModel(pick.role, { provider: m.provider, id: m.id });
+						picking = null;
+						return tui.requestRender();
+					}
+					if (matchesKey(input, Key.backspace)) {
+						picking = { ...pick, filter: pick.filter.slice(0, -1), cursor: 0 };
+						return tui.requestRender();
+					}
+					// 可打印字符 → 过滤
+					if (input.length === 1 && input >= " " && input !== "\x7f") {
+						picking = { ...pick, filter: pick.filter + input, cursor: 0 };
+						return tui.requestRender();
+					}
+					return;
+				}
+
+				if (matchesKey(input, Key.escape)) {
+					// 任务页有筛选文本时,第一次 Esc 先清筛选
+					if (page === "missions" && filter) {
+						filter = "";
+						selected = 0;
+						return tui.requestRender();
+					}
+					return close();
+				}
+
+				// ── 页签切换:Tab / Shift+Tab,←→ 作为别名保留 ──
+				const flipPage = (step: number) => {
+					page = PAGES[(PAGES.findIndex((p) => p.id === page) + step + PAGES.length) % PAGES.length].id;
+					return tui.requestRender();
+				};
+				if (matchesKey(input, Key.tab) || matchesKey(input, Key.right)) return flipPage(1);
+				if (matchesKey(input, Key.shift("tab")) || matchesKey(input, Key.left)) return flipPage(-1);
+
+				// ── 模型页(无筛选,T/X 是快捷键) ──
+				if (page === "models") {
+					const role = ROLE_ORDER[roleIdx];
+					if (matchesKey(input, Key.up)) {
+						roleIdx = Math.max(0, roleIdx - 1);
+						return tui.requestRender();
+					}
+					if (matchesKey(input, Key.down)) {
+						roleIdx = Math.min(ROLE_ORDER.length - 1, roleIdx + 1);
+						return tui.requestRender();
+					}
+					if (matchesKey(input, Key.enter)) {
+						if (cb.models) picking = { role, cursor: 0, filter: "" };
+						return tui.requestRender();
+					}
+					if (matchesKey(input, "t")) {
+						const cur = cb.models?.getData().config[role]?.thinking;
+						cb.models?.setThinking(role, cycleThinking(cur, role));
+						return tui.requestRender();
+					}
+					if (matchesKey(input, "x")) {
+						cb.models?.setModel(role, null);
+						return tui.requestRender();
+					}
+					if (matchesKey(input, "q")) return close();
+					return;
+				}
+
+				// ── 任务页:输入即筛选,动作走 Enter/Ctrl+L/Ctrl+D ──
+				const filtered = filterMissions(missions, filter);
+				if (matchesKey(input, Key.up)) {
+					selected = Math.max(0, selected - 1);
+					return tui.requestRender();
+				}
+				if (matchesKey(input, Key.down)) {
+					selected = Math.min(filtered.length, selected + 1);
+					return tui.requestRender();
+				}
+				// 档位循环。Ctrl+L 在 pi 全局是"打开模型选择器",但面板是替换编辑器的
+				// 自定义组件(ui.setFocus 指向它),按键先到这里,不会触发全局那条。
+				if (matchesKey(input, Key.ctrl("l"))) {
+					tierIdx = (tierIdx + 1) % TIER_ORDER.length;
+					return tui.requestRender();
+				}
+				if (matchesKey(input, Key.ctrl("d"))) {
+					if (selected > 0) {
 						detail = !detail;
 						return tui.requestRender();
 					}
-					if (matchesKey(input, Key.tab)) {
-						tierIdx = (tierIdx + 1) % TIER_ORDER.length;
-						return tui.requestRender();
-					}
-					if (matchesKey(input, Key.shift("tab"))) {
-						tierIdx = (tierIdx - 1 + TIER_ORDER.length) % TIER_ORDER.length;
-						return tui.requestRender();
-					}
-					if (matchesKey(input, "n")) {
+					return;
+				}
+				if (matchesKey(input, Key.enter)) {
+					if (selected === 0) {
 						close();
 						cb.onSelectTier(TIER_ORDER[tierIdx] as TierId);
 						return;
 					}
-					if (matchesKey(input, Key.enter) || matchesKey(input, "r")) {
-						const m = missions[selected];
-						if (!m) return;
-						close();
-						cb.onResume(m.missionId);
-					}
-				},
-			};
-		},
-		{ overlay: true, overlayOptions: { anchor: "center", width: "76%", margin: 1 } },
-	);
+					const m = filtered[selected - 1];
+					if (!m) return;
+					close();
+					cb.onDetail(m.missionId);
+					return;
+				}
+				if (matchesKey(input, Key.backspace)) {
+					filter = filter.slice(0, -1);
+					selected = 0;
+					listScroll = 0;
+					return tui.requestRender();
+				}
+				// 可打印字符 → 筛选(IME 组合字符 length>1,暂时不支持,与模型选择器一致)
+				if (input.length === 1 && input >= " " && input !== "\x7f") {
+					filter += input;
+					selected = 0;
+					listScroll = 0;
+					return tui.requestRender();
+				}
+			},
+		};
+	});
 }

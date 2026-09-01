@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { visibleWidth } from "@earendil-works/pi-tui";
-import { renderWidgetCard, renderStatusDashboard } from "../src/ui/dashboard.ts";
+import { overviewLines, PHASE_STYLE, renderWidgetCard, renderStatusDashboard } from "../src/ui/dashboard.ts";
 import { initialState } from "../src/core/machine.ts";
 import type { MissionPlan } from "../src/store/mission.ts";
 
@@ -60,7 +60,7 @@ test("widget:身份/进度/成本/熔断预警(多任务才显示进度条)", ()
 	const lines = renderWidgetCard(mockTheme, plan, runningState(), Date.now(), 120);
 	assert.ok(lines[0].includes("auth-refactor"));
 	assert.ok(lines[0].includes("standard"));
-	assert.ok(lines[0].includes("phase=do"));
+	assert.ok(lines[0].includes("● 执行"), "相位显示成带图标的中文,不是 phase=do");
 	assert.ok(lines[1].includes("T2"));
 	assert.ok(lines[1].includes("attempt 2/3"));
 	assert.ok(lines[1].includes("1/2")); // 多任务:进度条在第二行
@@ -116,10 +116,41 @@ test("dashboard:任务清单 + AC 证据状态 + 成本分账 + 日志", () => {
 	);
 	assert.ok(out.includes("迁移登录鉴权到 JWT"));
 	assert.ok(out.includes("✓ T1"));
-	assert.ok(out.includes("▶ T2"));
+	assert.ok(out.includes("▸ T2"));
 	assert.ok(out.includes("上次失败: AuthIntegrationTest#refreshToken"));
 	assert.ok(out.includes("✗ AC1"), "AC1 有失败证据应标 ✗");
 	assert.ok(out.includes("AC2") && out.includes("尚无证据"), "无证据的 AC 必须明示");
-	assert.ok(out.includes("executor=$0.870"));
+	assert.ok(out.includes("executor $0.870"));
 	assert.ok(out.includes("verdict=FAIL"));
+});
+
+test("相位图标只用好渲染的那几个字形(◌ ◍ ◑ 会被渲染成大圆盘)", () => {
+	const bad = ["◌", "◍", "◑", "◐", "◒", "◓", "⬤"];
+	for (const [phase, st] of Object.entries(PHASE_STYLE)) {
+		assert.ok(!bad.includes(st.icon), `${phase} 用了会糊掉的字形 ${st.icon}`);
+		assert.equal(visibleWidth(st.icon), 1, `${phase} 的图标必须是 1 列宽`);
+	}
+});
+
+test("概览:目标折行不截断;不显示会话文件名这类机器字符串", () => {
+	const longGoal =
+		"新增 Antix (antigma.ai) AI 额度 widget:像 DeepSeek 一样显示账户余额,支持在 NewTab 里添加,并复用现有 QuotaWidget 的外观与刷新策略";
+	const p2: MissionPlan = { ...plan, goal: longGoal };
+	const s = runningState();
+	s.sessionMap = { T1: "/x/2026-09-01T03-47-31-939Z_01a05b14-4be3-7f5d.jsonl" };
+	const width = 48;
+	const lines = overviewLines(p2, s, { width, omitIdentity: true });
+	for (const l of lines) assert.ok(visibleWidth(l) <= width, `概览行超宽: ${l}`);
+	// 目标必须完整出现(拼掉悬挂缩进后)
+	const joined = lines.map((l) => l.trim()).join("");
+	assert.ok(joined.includes("刷新策略"), "目标的结尾被截掉了");
+	assert.ok(!lines.some((l) => l.includes(".jsonl")), "会话文件名不该占概览的行");
+	// omitIdentity:盒标题/头行已经给过的东西不再重复
+	assert.ok(!lines.some((l) => l.includes("mission ")), "身份行应由调用方决定是否显示");
+});
+
+test("概览:非 TUI 扁平卡片仍要带上身份与进度(没有盒标题兜底)", () => {
+	const lines = overviewLines(plan, runningState(), {});
+	assert.ok(lines.some((l) => l.includes("auth-refactor")), "扁平形态必须自带 mission id");
+	assert.ok(lines.some((l) => l.includes("任务")), "扁平形态必须自带进度");
 });

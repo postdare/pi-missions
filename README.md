@@ -92,12 +92,31 @@ pi remove git:github.com/postdare/pi-missions
 
 ## 用法
 
+`/missions` 是主入口 —— 两页,`Tab` 切换(`←/→` 同效)。选中行整行铺背景、行首 `▸` 是光标;
+终端窄的时候按重要性丢列(先档位,再进度),目标永远保留:
+
+```
+╭─ MISSIONS ────────────────────────────────────────────────── 5 个 mission ─╮
+│  任务   模型                                               输入以筛选任务… │
+│                                                                            │
+│   + 开始新任务   standard  任务列表 + 验证闸门(默认)           Ctrl+L 换档 │
+│                                                                            │
+│   状态    更新   进度        目标                                          │
+│ ▸ ⚠ 执行  3min   █──── 1/4   把登录鉴权从 session 迁移到 JWT               │
+│   ◆ 判定  42min  ███── 6/9   CMS 管理端 REST 接口重构                      │
+│   ✓ 完成  16h    █████ 1/1   修掉 verify.sh 在 CI 上的路径假设             │
+│   ✕ 熔断  22h    ██─── 2/5   把证据归档换成按 attempt 分目录               │
+│   ⚠ 定义  1d     ───── 0/3   给 spike 任务加结论模板                       │
+╰────────────────────────────────────────────────────────────────────────────╯
+ ↑↓ 导航   Enter 选择   Ctrl+L 档位   Ctrl+D 详情   Tab 切页   Esc 关闭
+```
+
 | 命令 | 作用 |
 |---|---|
-| `/missions` | 主面板,两页(`←/→` 切换):**任务**(新建 + 历史)· **模型**(角色 → 模型/thinking) |
+| `/missions` | 主面板,两页(`Tab` 切换):**任务**(新建 + 历史,`Ctrl+L` 换档位)· **模型**(角色 → 模型/thinking) |
 | `/mission new <目标> [--tier=standard\|complex]` | 新建并进入 PLAN 相位 |
 | `/mission quick <任务> --verify "<命令>"` | 单任务快捷档,不落盘。**`--verify` 是判定的唯一依据,必须给**;不给则自动升 standard 走 PLAN |
-| `/mission status` | 当前任务详情(页签浮层:概览/任务/验收/日志) |
+| `/mission status` | 当前任务详情(双栏内联页:左「概览/验收」· 右「任务 + 日志」,`Tab` 切焦点分别滚动;窄终端自动退化成单栏) |
 | `/mission tier <quick\|standard\|complex\|off>` | 设定/清除待用档位:编辑器边框随档位换色,输入框预填命令 |
 | `/mission next` | 换脑:创建干净会话继续(唯一解除 pendingHandoff 的出口) |
 | `/mission verify` | do 相位手动触发一次 CHECK |
@@ -276,20 +295,25 @@ HANDOFF_DONE。链路被打断时 pendingHandoff 硬阻断仍在,手动 `/missio
 模型不可用时回退当前会话模型并显式警告(thinking 仍按角色设置),mission 不阻断。
 mission 结束/中止时恢复你原来的模型与 thinking level。
 
-### 在面板里改(`/missions` → `←/→` 到「模型」页)
+### 在面板里改(`/missions` → `Tab` 到「模型」页)
 
 ```
-▸ planner    ● anthropic/claude-opus-5              high         $0.4120
-   FRAME 定义问题 + PLAN 设计 AC
-  executor   ● anthropic/claude-sonnet-5            medium       $1.2030  ←当前相位
-   DO 写代码(主力消耗)
-  verifier   ⚠ openai/gpt-x → 实际用 anthropic/…    off(默认)
-   子进程独立核对 AC —— 判定权外置(I3)
-  escalator  ○ anthropic/claude-opus-5(跟随会话)   high(默认)
-   ACT 一轮失败诊断
+╭─ MISSIONS ────────────────────────────────────────────────────── 4 个角色 ─╮
+│  任务   模型                                                               │
+│                                                                            │
+│   planner    ● anthropic/claude-opus-5            high         $0.4120     │
+│ ▸ executor   ● anthropic/claude-sonnet-5          medium       $1.2030     │
+│                DO 写代码(主力消耗)                                         │
+│   verifier   ⚠ openai/… → anthropic/claude-opus-5 off(默认)    $0.0940     │
+│   escalator  ○ anthropic/claude-opus-5(跟随会话)  high(默认)               │
+│                                                                            │
+│ ● 已配置   ⚠ 配了但不可用(实际跟随会话)   ○ 未配置   写入 missions/models… │
+╰────────────────────────────────────────────────────────────────────────────╯
+ ↑↓ 导航   Enter 选模型   T thinking   X 清除   Tab 切页   Esc 关闭
 ```
 
-`↑↓` 选角色 · `⏎` 选模型(可输入过滤)· `t` 切 thinking · `x` 清除该行。
+`↑↓` 选角色(选中行展开该角色的职责说明)· `Enter` 选模型(可输入过滤)·
+`T` 切 thinking · `X` 清除该行。
 
 三个要点:
 
@@ -298,6 +322,8 @@ mission 结束/中止时恢复你原来的模型与 thinking level。
   在用便宜模型,实际一直拿会话模型烧钱。
 - **模型列表来自 `ctx.scopedModels`**(pi 内置选择器同一套数据源),没有配 scoping 时
   退回完整目录。不手写模型名单。
+- **窄屏优先保「实际用的是哪个」。** 列宽不够时先丢尾标、再丢花费、再缩 thinking;
+  `配的是 A → 实际是 B` 放不下时截掉 A 而不是 B —— 截掉 B 就等于退回"照抄配置"。
 - **改动会写进 LOG.md。** 尤其 verifier:mission 跑到一半换它,等于中途换裁判 ——
   此后的 semi 证据与之前不同源,审计链必须能解释这件事。改动写盘后,若改的正是当前
   相位的角色,立刻生效;否则等下一次相位切换。

@@ -48,14 +48,35 @@ export function cycleThinking(current: string | undefined, role: Role, step = 1)
 
 export type RoleModelState = "configured" | "unavailable" | "inherit";
 
-export interface RoleModelView {
+/**
+ * 某个角色实际生效的模型。判别联合:只有 unavailable 才有"配的 / 实际的"两半,
+ * 别退化成两个可选字段 —— 那会让每个读取点都得写一遍永不触发的 `?? 兜底`。
+ */
+export type RoleModelView = {
 	role: Role;
-	state: RoleModelState;
-	/** 实际会用到的模型的人类可读名 */
+	/** 实际会用到的模型的人类可读名(纯文本形态直接用它) */
 	label: string;
 	thinking: string;
 	/** thinking 是角色默认值(没显式配过) */
 	thinkingIsDefault: boolean;
+} & (
+	| { state: "configured" | "inherit" }
+	| {
+			state: "unavailable";
+			/** 配置里写的那个;面板窄的时候优先牺牲它 */
+			configured: string;
+			/** 实际会用的那个;这是模型页存在的理由,绝不能被截掉 */
+			actual: string;
+	  }
+);
+
+/**
+ * 由可选模型列表构造可用性判定。拿不到列表时一律按"可用"处理 ——
+ * 不敢断言不可用好过满屏假警报。命令卡片与模型页必须用同一条规则。
+ */
+export function availabilityOf(models: Array<{ provider: string; id: string }>): (p: string, m: string) => boolean {
+	const set = new Set(models.map((m) => `${m.provider}/${m.id}`));
+	return (p, m) => set.size === 0 || set.has(`${p}/${m}`);
 }
 
 /**
@@ -81,7 +102,15 @@ export function resolveRoleView(
 	const id = `${rc.provider}/${rc.model}`;
 	return isAvailable(rc.provider, rc.model)
 		? { role, state: "configured", label: id, thinking, thinkingIsDefault }
-		: { role, state: "unavailable", label: `${id} → 实际用 ${sessionLabel}`, thinking, thinkingIsDefault };
+		: {
+				role,
+				state: "unavailable",
+				label: `${id} → 实际用 ${sessionLabel}`,
+				configured: id,
+				actual: sessionLabel,
+				thinking,
+				thinkingIsDefault,
+			};
 }
 
 /** 写回 missions/models.json。空配置也写文件 —— 面板改过就该有痕迹 */

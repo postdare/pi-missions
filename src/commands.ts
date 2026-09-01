@@ -11,6 +11,7 @@ import { parseMissionMd } from "./store/mission.ts";
 import { planPaths, statePaths } from "./store/paths.ts";
 import { readLog } from "./store/log.ts";
 import { latestEvidenceResults } from "./store/evidence.ts";
+import { loadStateFile } from "./store/state.ts";
 import { openStatusView, statusFallbackText, type StatusViewData } from "./ui/status-view.ts";
 import { applyTierSelection, clearTierIndicator } from "./ui/tier-indicator.ts";
 import { openMissionsPanel } from "./ui/panel.ts";
@@ -27,11 +28,23 @@ export function registerCommands(pi: any, getRuntime: GetRuntime): void {
 		handler: async (_args: string, ctx: Ctx) => {
 			const rt0 = getRuntime(ctx);
 			await openMissionsPanel(ctx, rt0.layout, {
-				onResume: (id) => pi.sendUserMessage(`/mission resume ${id}`, { deliverAs: "followUp" }),
 				onSelectTier: (tier) => {
 					const rt = getRuntime(ctx);
 					rt.pendingTier = tier;
 					applyTierSelection(ctx, tier);
+				},
+				onDetail: async (id) => {
+					const d = statusDataFor(rt0, id);
+					if (!d) {
+						ctx.ui.notify(`找不到 mission "${id}" 的计划或状态`, "error");
+						return;
+					}
+					const isActive = rt0.active?.state.missionId === id;
+					await openStatusView(ctx, () => statusDataFor(rt0, id), {
+						onResume: isActive
+							? (mid) => pi.sendUserMessage(`/mission resume ${mid}`, { deliverAs: "followUp" })
+							: undefined,
+					});
 				},
 				models: {
 					getData: () => {
@@ -66,7 +79,7 @@ export function registerCommands(pi: any, getRuntime: GetRuntime): void {
 	});
 
 	pi.registerCommand("mission", {
-		description: "Mission 操作:new/quick/status/next/verify/escalate/plan/log/resume/abort/models",
+		description: "Mission 操作:new/quick/status/next/verify/escalate/plan/resume/abort/models · 详情:/missions",
 		handler: async (args: string, ctx: Ctx) => {
 			const rt = getRuntime(ctx);
 			const { sub, rest, flags } = parseArgs(args);
@@ -78,7 +91,7 @@ export function registerCommands(pi: any, getRuntime: GetRuntime): void {
 			}
 
 			// pi 重建扩展实例后内存态丢失(newSession/reload/重启)——先从磁盘接上再干活(I1)
-			const ATTACH_FIRST = new Set(["status", "next", "verify", "escalate", "plan", "log", "abort", "models"]);
+			const ATTACH_FIRST = new Set(["next", "verify", "escalate", "plan", "abort", "models"]);
 			if (ATTACH_FIRST.has(sub)) await rt.ensureAttached(ctx);
 
 			switch (sub) {
@@ -130,33 +143,26 @@ export function registerCommands(pi: any, getRuntime: GetRuntime): void {
 				}
 
 				case "status": {
-					const a = rt.active;
-					if (!a) return notifyUsage(ctx, "无活动 mission。/missions 查看历史,/mission resume <id> 恢复");
-					const dirName = rt.config.missionsDir;
-					const getData = (): StatusViewData | null => {
-						const cur = rt.active;
-						if (!cur) return null;
-						const sp = statePaths(rt.layout, cur.state.missionId);
-						return {
-							plan: cur.plan,
-							state: cur.state,
-							evidence: { latest: latestEvidenceResults(sp.evidenceDir) },
-							logLines: cur.inMemory
-								? []
-								: readLog(sp.logMd).trim().split("\n").filter(Boolean),
-							dirName,
-						};
-					};
+					// 无 id = 当前活动 mission;带 id = 查看任意 mission(不接管会话)
+					const id = rest.trim() || rt.active?.state.missionId || null;
+					if (!id) return notifyUsage(ctx, "无活动 mission。/missions 查看历史,/mission resume <id> 恢复");
+					const d = statusDataFor(rt, id);
+					if (!d) return notifyUsage(ctx, `找不到 mission "${id}" 的计划或状态`);
 					if (ctx.hasUI) {
-						await openStatusView(ctx, getData);
+						// 只有看的是活动 mission 时才提供恢复入口(detail 页 Ctrl+R)
+						const isActive = rt.active?.state.missionId === id;
+						await openStatusView(
+							ctx,
+							() => statusDataFor(rt, id),
+							isActive
+								? { onResume: (mid) => pi.sendUserMessage(`/mission resume ${mid}`, { deliverAs: "followUp" }) }
+								: undefined,
+						);
 					} else {
-						const d = getData();
-						if (d) {
-							pi.appendEntry("missions-card", {
-								title: `${d.state.missionId} · ${d.state.tier} · ${d.state.phase}`,
-								body: statusFallbackText(d),
-							});
-						}
+						pi.appendEntry("missions-card", {
+							title: `${d.state.missionId} · ${d.state.tier} · ${d.state.phase}`,
+							body: statusFallbackText(d),
+						});
 					}
 					return;
 				}
@@ -206,17 +212,6 @@ export function registerCommands(pi: any, getRuntime: GetRuntime): void {
 					return;
 				}
 
-				case "log": {
-					const a = rt.active;
-					if (!a) return notifyUsage(ctx, "无活动 mission");
-					const sp = statePaths(rt.layout, a.state.missionId);
-					pi.appendEntry("missions-card", {
-						title: `LOG · ${a.state.missionId}${flags.task ? ` · ${flags.task}` : ""}`,
-						body: readLog(sp.logMd, flags.task).trim() || "(暂无日志)",
-					});
-					return;
-				}
-
 				case "resume": {
 					if (!rest) return notifyUsage(ctx, "用法:/mission resume <id>(/missions 查看历史)");
 					const r = await rt.resume(ctx, rest.trim());
@@ -257,7 +252,7 @@ export function registerCommands(pi: any, getRuntime: GetRuntime): void {
 				default:
 					return notifyUsage(
 						ctx,
-						"用法:/mission new|quick|status|next|verify|escalate|plan|log|resume|abort|models · 面板:/missions",
+						"用法:/mission new|quick|status|next|verify|escalate|plan|resume|abort|models · 面板与详情:/missions",
 					);
 			}
 		},
@@ -265,6 +260,37 @@ export function registerCommands(pi: any, getRuntime: GetRuntime): void {
 }
 
 /** 新 Mission 的开场白。按起始相位分流(standard/complex 起于 FRAME) */
+/**
+ * 读某个 mission 的展示数据:优先取内存(活动 mission 的实时态),
+ * 否则从磁盘读(只看不接管 —— 不改 CURRENT 指针、不切工具集)。
+ */
+function statusDataFor(rt: Runtime, missionId: string): StatusViewData | null {
+	const dirName = rt.config.missionsDir;
+	const cur = rt.active?.state.missionId === missionId ? rt.active : null;
+	const sp = statePaths(rt.layout, missionId);
+	if (cur) {
+		return {
+			plan: cur.plan,
+			state: cur.state,
+			evidence: { latest: latestEvidenceResults(sp.evidenceDir) },
+			logLines: cur.inMemory ? [] : readLog(sp.logMd).trim().split("\n").filter(Boolean),
+			dirName,
+		};
+	}
+	const pp = planPaths(rt.layout, missionId);
+	const md = fs.existsSync(pp.missionMd) ? fs.readFileSync(pp.missionMd, "utf8") : null;
+	const plan = md ? parseMissionMd(md) : null;
+	const state = loadStateFile(sp.stateJson);
+	if (!plan || !state) return null;
+	return {
+		plan,
+		state,
+		evidence: { latest: latestEvidenceResults(sp.evidenceDir) },
+		logLines: readLog(sp.logMd).trim().split("\n").filter(Boolean),
+		dirName,
+	};
+}
+
 function kickoff(dirName: string, id: string, tier: string, goal: string, phase: string): string {
 	const head = `[pi-missions] 新 Mission 已创建(${id},${tier} 档),进入 ${phase.toUpperCase()} 相位。`;
 	if (phase === "frame") {

@@ -2,31 +2,62 @@
  * pi-missions · ui/dashboard
  *
  * 状态信息的纯渲染层。产出两种形态:
- *   - 按 tab 分组的行数组(概览/任务/验收/日志)→ status-view.ts 的页签浮层
- *   - renderStatusDashboard:拼接所有分组的扁平文本 → 非 TUI 环境的 entry 卡片
+ *   - 分段的行数组(概览/验收/任务/日志)→ status-view.ts 按栏宽拼成双栏内联页
+ *   - renderStatusDashboard:拼接所有段落的扁平文本 → 非 TUI 环境的 entry 卡片
  * 与 runtime 解耦,纯函数,可单测。
  */
 
-import { truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
+import { visibleWidth } from "@earendil-works/pi-tui";
 import type { MissionState } from "../core/types.ts";
 import { ROLE_OF } from "../core/machine.ts";
-import { thresholdFor } from "../core/breaker.ts";
+import { nearThreshold, thresholdFor } from "../core/breaker.ts";
 import type { EvidenceRecord } from "../store/evidence.ts";
 import { findTask, type MissionPlan } from "../store/mission.ts";
+import { clip, miniBar, pad, wrap } from "./chrome.ts";
 
 export interface EvidenceSummary {
 	/** acId/verify 分支 → 最近一次判定 */
 	latest: Record<string, EvidenceRecord>;
 }
 
-const TASK_ICON: Record<string, string> = { done: "✓", running: "▶", pending: "○", blocked: "✗" };
-const EV_ICON: Record<string, string> = { pass: "✓", fail: "✗", inconclusive: "?" };
-
-export function bar(done: number, total: number, width = 10): string {
-	if (total <= 0) return "░".repeat(width);
-	const filled = Math.round((done / total) * width);
-	return "█".repeat(filled) + "░".repeat(Math.max(0, width - filled));
+/**
+ * 行构造器的可选主题。传了就上色(TUI 的 status-view),不传就出纯文本
+ * (renderStatusDashboard → 非 TUI 环境的 entry 卡片)—— 同一份内容两种形态。
+ */
+export interface LineTheme {
+	fg(color: string, s: string): string;
+	bold(s: string): string;
 }
+
+/** 无主题时的恒等着色器 —— 让下面的代码不必到处写 t ? ... : ... */
+const PLAIN: LineTheme = { fg: (_c, s) => s, bold: (s) => s };
+
+/** 对齐的「标签 值」行:标签占固定列,muted;比 "key: value" 散文好扫 */
+const LABEL_W = 10;
+function field(t: LineTheme, label: string, value: string): string {
+	return t.fg("muted", pad(label, LABEL_W)) + value;
+}
+
+/**
+ * 会折行的「标签 值」:续行悬挂缩进到值那一列。
+ * 目标 / 失败原因这类长句必须折行 —— 截断等于把最该看的东西丢掉。
+ */
+function fieldWrapped(
+	t: LineTheme,
+	label: string,
+	value: string,
+	width: number,
+	maxLines: number,
+	color?: string,
+): string[] {
+	const paint = (x: string) => (color ? t.fg(color, x) : x);
+	const parts = wrap(value, Math.max(12, width - LABEL_W), maxLines);
+	return parts.map((part, i) =>
+		i === 0 ? field(t, label, paint(part)) : " ".repeat(LABEL_W) + paint(part),
+	);
+}
+
+const EV_ICON: Record<string, string> = { pass: "✓", fail: "✗", inconclusive: "?" };
 
 export function costTotal(state: MissionState): number {
 	return Object.values(state.cost).reduce((a, b) => a + (b ?? 0), 0);
@@ -38,34 +69,34 @@ export function fmtDuration(fromMs: number, nowMs: number): string {
 	return `${Math.floor(mins / 60)}h${mins % 60}m`;
 }
 
-export function truncate(s: string, n: number): string {
-	return s.length > n ? `${s.slice(0, n - 1)}…` : s;
-}
-
 // ─────────────────────────── 常驻状态条(主题化卡片) ───────────────────────────
 
-export interface WidgetTheme {
-	fg(color: string, s: string): string;
-	bold(s: string): string;
-}
-
-const PHASE_COLOR: Record<string, string> = {
-	frame: "accent",
-	plan: "accent",
-	do: "accent",
-	check: "accent",
-	act: "warning",
-	done: "success",
-	halted: "error",
+/**
+ * 相位的图标/颜色/中文名 —— panel.ts、status-view.ts 与状态条共用同一套。
+ *
+ * 图标只从「空心圆 / 空心菱形 / 实心圆 / 实心菱形 / 勾 / 叉」里选:
+ * ◌ ◍ ◑ 这类字形在不少等宽字体里会被渲染成又大又糊的圆盘,别再往回加。
+ * 空心 → 实心表示"从想清楚到动手",act 与 do 同形靠颜色区分(警告色)。
+ */
+export const PHASE_STYLE: Record<string, { icon: string; color: string; label: string }> = {
+	frame: { icon: "○", color: "accent", label: "定义" },
+	plan: { icon: "◇", color: "accent", label: "规划" },
+	do: { icon: "●", color: "accent", label: "执行" },
+	check: { icon: "◆", color: "accent", label: "判定" },
+	act: { icon: "●", color: "warning", label: "调整" },
+	done: { icon: "✓", color: "success", label: "完成" },
+	halted: { icon: "✕", color: "error", label: "熔断" },
 };
 
-/** 彩色进度条:已完成为 accent,未完成为 dim */
-function coloredBar(theme: WidgetTheme, done: number, total: number, width = 8): string {
-	if (total <= 0) return theme.fg("dim", "░".repeat(width));
-	const filled = Math.round((done / total) * width);
-	return (
-		theme.fg("accent", "█".repeat(filled)) + theme.fg("dim", "░".repeat(Math.max(0, width - filled)))
-	);
+/** 熔断临界的预警文案。widget 卡片与 /missions 详情页共用,别再各抄一份 */
+export function nearBreakerWarn(task: { sameSignatureCount: number }): string {
+	return `⚠ 同一失败签名 ×${task.sameSignatureCount},再失败一次将升级`;
+}
+
+/** 相位徽标:● 执行(带色);plain 形态退化成 "● 执行" 纯文本 */
+export function phaseBadge(t: LineTheme, phase: string): string {
+	const st = PHASE_STYLE[phase] ?? PHASE_STYLE.halted;
+	return t.fg(st.color, `${st.icon} ${st.label}`);
 }
 
 /**
@@ -75,7 +106,7 @@ function coloredBar(theme: WidgetTheme, done: number, total: number, width = 8):
  *   行3+: 预警(熔断/环境漂移/换脑,警告色)
  */
 export function renderWidgetCard(
-	theme: WidgetTheme,
+	theme: LineTheme,
 	plan: MissionPlan,
 	state: MissionState,
 	now = Date.now(),
@@ -94,7 +125,7 @@ export function renderWidgetCard(
 	const left = [
 		theme.fg("accent", theme.bold(`◆ ${state.missionId}`)),
 		theme.fg("dim", state.tier),
-		theme.fg(PHASE_COLOR[state.phase] ?? "dim", `phase=${state.phase}`),
+		phaseBadge(theme, state.phase),
 		role ? theme.fg("dim", role) : null,
 	]
 		.filter(Boolean)
@@ -112,133 +143,231 @@ export function renderWidgetCard(
 		rightW > 0 && leftW + rightW < width
 			? left + " ".repeat(width - leftW - rightW) + right
 			: left;
-	const lines = [truncateToWidth(line1, width)];
+	const lines = [clip(line1, width)];
 
 	// 行 2:当前任务 + 进度 + attempt
 	const bits: string[] = [];
-	if (task) bits.push(`${theme.fg("accent", "▶")} ${task.id} ${truncate(task.title, 28)}`);
-	if (total > 1) bits.push(`${coloredBar(theme, done, total)} ${theme.fg("dim", `${done}/${total}`)}`);
+	if (task) bits.push(`${theme.fg("accent", "▸")} ${task.id} ${clip(task.title, 28)}`);
+	if (total > 1) bits.push(`${miniBar(theme, done, total, 8)} ${theme.fg("dim", `${done}/${total}`)}`);
 	if (t && ["do", "check", "act"].includes(state.phase)) {
-		const near = t.sameSignatureCount >= threshold - 1 && t.sameSignatureCount > 0;
+		const near = nearThreshold(t, state.tier);
 		bits.push(theme.fg(near ? "warning" : "dim", `attempt ${t.attempts}/${threshold}`));
 	}
-	if (bits.length > 0) lines.push(truncateToWidth(`  ${bits.join(" ")}`, width));
+	if (bits.length > 0) lines.push(clip(`  ${bits.join(sep)}`, width));
 
 	// 预警行(警告色)
-	if (t && t.sameSignatureCount >= threshold - 1 && t.sameSignatureCount > 0) {
-		lines.push(theme.fg("warning", `  ⚠ 同一失败签名 ×${t.sameSignatureCount},再失败一次将升级`));
+	if (t && nearThreshold(t, state.tier)) {
+		lines.push(theme.fg("warning", `  ${nearBreakerWarn(t)}`));
 	}
 	if (t && t.inconclusiveStreak > 0) {
 		lines.push(theme.fg("warning", `  ⚠ 连续 ${t.inconclusiveStreak} 次无法判定(环境可能漂移)`));
 	}
 	if (state.pendingHandoff) {
-		lines.push(theme.fg("warning", `  ⏸ 等待换脑:${truncate(state.pendingHandoff, 40)} —— 执行 /mission next`));
+		lines.push(theme.fg("warning", `  ⏸ 等待换脑:${clip(state.pendingHandoff, 40)} —— 执行 /mission next`));
 	}
 	return lines;
 }
 
 // ─────────────────────────── tab:概览 ───────────────────────────
 
-export function overviewLines(plan: MissionPlan, state: MissionState, now = Date.now()): string[] {
-	const done = Object.values(state.tasks).filter((x) => x.status === "done").length;
-	const total = state.taskOrder.length;
-	const lines = [
-		`目标: ${plan.goal}`,
-		`Mission: ${state.missionId} · ${state.tier} 档 · phase=${state.phase}` +
-			(ROLE_OF[state.phase] ? ` · 角色 ${ROLE_OF[state.phase]}` : ""),
-		`进度: ${bar(done, total)} ${done}/${total} 任务` +
-			(plan.createdAt ? ` · 已运行 ${fmtDuration(plan.createdAt, now)}` : ""),
-		`环境指纹: ${state.envFingerprint ?? "未冻结(PLAN 完成后记录)"}`,
-		"",
-	];
+export interface OverviewOptions {
+	now?: number;
+	theme?: LineTheme;
+	/** 可用列宽,决定折行位置 */
+	width?: number;
+	/**
+	 * 调用方顶部已经显示了 id / 档位 / 相位 / 进度(status-view 的盒标题 + 头行)。
+	 * 置 true 就不再重复这些 —— 概览栏的空间要留给目标和当前任务。
+	 */
+	omitIdentity?: boolean;
+}
 
+/**
+ * 概览栏。排序即优先级:先说要干什么、现在卡在哪,再说机制性的账。
+ * 刻意**不**显示会话文件名与逐字段的原始 STATE —— 那是排障时 `cat STATE.json` 的事,
+ * 放在这里只会把目标挤没。
+ */
+export function overviewLines(plan: MissionPlan, state: MissionState, opts: OverviewOptions = {}): string[] {
+	const t = opts.theme ?? PLAIN;
+	const now = opts.now ?? Date.now();
+	const width = opts.width ?? 96;
+	const dim = (s2: string) => t.fg("dim", s2);
+	const lines: string[] = [];
+
+	// ① 目标 —— 折行,绝不截断
+	lines.push(...fieldWrapped(t, "目标", plan.goal, width, 4));
+
+	// ② 身份与进度:只有在调用方没显示时才出(非 TUI 的扁平卡片)
+	if (!opts.omitIdentity) {
+		const done = Object.values(state.tasks).filter((x) => x.status === "done").length;
+		const total = state.taskOrder.length;
+		lines.push(
+			field(
+				t,
+				"mission",
+				[state.missionId, state.tier, `${PHASE_STYLE[state.phase]?.label ?? state.phase}(${state.phase})`, ROLE_OF[state.phase]]
+					.filter(Boolean)
+					.join(dim(" · ")),
+			),
+			field(
+				t,
+				"进度",
+				`${miniBar(t, done, total, 10)} ${done}/${total} 任务` +
+					(plan.createdAt ? dim(` · 已运行 ${fmtDuration(plan.createdAt, now)}`) : ""),
+			),
+		);
+	}
+
+	// ③ 现在卡在哪
+	if (state.currentTask) {
+		const ts = state.tasks[state.currentTask];
+		const pt = findTask(plan, state.currentTask);
+		const attempt = ` · attempt ${ts?.attempts ?? 0}/${thresholdFor(state.tier)}`;
+		// attempt 尽量挂在折行后的最后一行末尾;那一行放不下就另起一行 ——
+		// 直接拼上去会被列宽截掉,而 attempt 正是判断"卡住了没"的那个数
+		const cur = fieldWrapped(t, "当前", `${state.currentTask} ${pt?.title ?? ""}`, width, 2);
+		if (visibleWidth(cur[cur.length - 1]) + visibleWidth(attempt) <= width) {
+			cur[cur.length - 1] += dim(attempt);
+		} else {
+			cur.push(" ".repeat(LABEL_W) + dim(attempt.replace(" · ", "")));
+		}
+		lines.push(...cur);
+		if (ts?.lastFailureReason) {
+			lines.push(...fieldWrapped(t, "上次失败", ts.lastFailureReason, width, 3, "error"));
+		}
+	}
+	if (state.pendingHandoff) {
+		lines.push(t.fg("warning", `⏸ 等待换脑: ${state.pendingHandoff} —— /mission next`));
+	}
+
+	lines.push("");
+
+	// ④ 机制性的账:升级阶梯 / 花费 / 环境指纹
 	const esc = state.escalation;
 	lines.push(
-		`升级阶梯: L${esc.level}` +
-			(esc.history.length > 0
-				? ` · 历史: ${esc.history.map((h) => `L${h.from}→L${h.to}(${h.taskId})`).join(", ")}`
-				: " · 历史: 无"),
+		field(
+			t,
+			"阶梯",
+			`L${esc.level}` +
+				(esc.history.length > 0
+					? dim(` · ${esc.history.map((h) => `L${h.from}→L${h.to}(${h.taskId})`).join(" ")}`)
+					: dim(" · 无升级历史")),
+		),
 	);
 
+	// 合计放最前面:这几行是次要信息,窄栏会被截掉,截掉的必须是分账明细而不是总额
 	const costEntries = Object.entries(state.cost).filter(([, v]) => (v ?? 0) > 0);
 	lines.push(
-		costEntries.length > 0
-			? `成本: ${costEntries.map(([r, v]) => `${r}=$${(v ?? 0).toFixed(3)}`).join("  ")} · 合计 $${costTotal(state).toFixed(3)}`
-			: "成本: 尚无记录",
-		"",
+		field(
+			t,
+			"成本",
+			costEntries.length > 0
+				? `$${costTotal(state).toFixed(3)}${dim(` · ${costEntries.map(([r, v]) => `${r} $${(v ?? 0).toFixed(3)}`).join(" · ")}`)}`
+				: dim("尚无记录"),
+		),
 	);
+	lines.push(field(t, "指纹", state.envFingerprint ? dim(state.envFingerprint) : dim("未冻结(PLAN 完成后记录)")));
 
-	if (state.currentTask) {
-		const t = state.tasks[state.currentTask];
-		const pt = findTask(plan, state.currentTask);
-		lines.push(
-			`当前: ${state.currentTask} ${pt?.title ?? ""} · attempt ${t?.attempts ?? 0}/${thresholdFor(state.tier)}`,
-		);
-		if (t?.lastFailureReason) lines.push(`  上次失败: ${t.lastFailureReason}`);
-		lines.push("");
-	}
-	if (state.pendingHandoff) lines.push(`⏸ 等待换脑: ${state.pendingHandoff} —— /mission next`);
-
-	const sessions = Object.entries(state.sessionMap);
-	if (sessions.length > 0) {
-		lines.push(`会话: ${sessions.map(([task, f]) => `${task}→${f.split("/").pop()}`).join("  ")}`);
-	}
-	return lines;
+	// 上面这几行(阶梯/成本/指纹)不折行 —— 它们的信息是"前重后轻",截断即可
+	return lines.map((l) => clip(l, width));
 }
 
 // ─────────────────────────── tab:任务 ───────────────────────────
 
-export function taskLines(plan: MissionPlan, state: MissionState): string[] {
+/** 任务状态 → 图标 + 颜色 */
+const TASK_STYLE: Record<string, { icon: string; color: string }> = {
+	done: { icon: "✓", color: "success" },
+	running: { icon: "▸", color: "accent" },
+	pending: { icon: "○", color: "dim" },
+	blocked: { icon: "✗", color: "error" },
+};
+
+export function taskLines(
+	plan: MissionPlan,
+	state: MissionState,
+	t: LineTheme = PLAIN,
+	width = 96,
+): string[] {
 	const lines: string[] = [];
+	const dim = (s2: string) => t.fg("dim", s2);
+	// verify 分支名很长,窄栏里它会把标题挤没 —— 分支与 AC 的对应关系在「验收」段有
+	const showVerify = width >= 56;
 	for (const [mi, ms] of plan.milestones.entries()) {
 		if (mi > 0) lines.push("");
 		if (plan.tier === "complex" || plan.milestones.length > 1) {
-			const msDone = ms.tasks.every((t) => state.tasks[t.id]?.status === "done");
-			lines.push(`${msDone ? "✓" : "▸"} ${ms.id} ${ms.title}`);
+			const msDone = ms.tasks.every((x) => state.tasks[x.id]?.status === "done");
+			lines.push(
+				`${t.fg(msDone ? "success" : "accent", msDone ? "✓" : "▾")} ${t.bold(`${ms.id} ${ms.title}`)}`,
+			);
 		}
-		for (const t of ms.tasks) {
-			const ts = state.tasks[t.id];
-			const icon = TASK_ICON[ts?.status ?? "pending"] ?? "○";
-			const suffix =
-				t.kind === "spike"
-					? " · spike(产出结论,完成后重写计划)"
-					: t.verify.length > 0
-						? ` (verify: ${t.verify.join(", ")})`
-						: "";
-			lines.push(`  ${icon} ${t.id} ${t.title} · attempt ${ts?.attempts ?? 0}${suffix}`);
+		for (const task of ms.tasks) {
+			const ts = state.tasks[task.id];
+			const st = TASK_STYLE[ts?.status ?? "pending"] ?? TASK_STYLE.pending;
+			const running = ts?.status === "running";
+			const prefix = `  ${st.icon} ${task.id} `;
+			const indent = " ".repeat(visibleWidth(prefix));
+			const titleLines = wrap(task.title, Math.max(16, width - visibleWidth(prefix)), 2);
+			lines.push(
+				`  ${t.fg(st.color, st.icon)} ${t.fg(st.color, task.id)} ` +
+					(running ? t.bold(titleLines[0]) : titleLines[0]),
+			);
+			for (const extra of titleLines.slice(1)) lines.push(indent + (running ? t.bold(extra) : extra));
+
+			// 元信息挂在标题末尾:attempt 为 0 说明还没动过,不占版面
+			const meta: string[] = [];
+			// 只标 spike 两个字:它是什么意思写在 phases/plan.md 里,列表里放不下也不该放
+			if (task.kind === "spike") meta.push("spike");
+			if ((ts?.attempts ?? 0) > 0) meta.push(`attempt ${ts?.attempts}`);
+			if (showVerify && task.kind !== "spike" && task.verify.length > 0) {
+				meta.push(`verify ${task.verify.join(", ")}`);
+			}
+			if (meta.length > 0) lines[lines.length - 1] += dim(` · ${meta.join(" · ")}`);
+
 			if (ts?.lastFailureReason && ts.status !== "done") {
-				lines.push(`      上次失败: ${ts.lastFailureReason}`);
+				const reason = wrap(ts.lastFailureReason, Math.max(16, width - 6), 2);
+				lines.push(`      ${dim("上次失败:")} ${t.fg("error", reason[0])}`);
+				for (const l of reason.slice(1)) lines.push(`      ${t.fg("error", l)}`);
 			}
 			if (ts && ts.sameSignatureCount > 1) {
-				lines.push(`      签名 ${ts.lastSignature} ×${ts.sameSignatureCount}`);
+				lines.push(`      ${t.fg("warning", `签名 ${ts.lastSignature} ×${ts.sameSignatureCount}`)}`);
 			}
 		}
 	}
-	if (lines.length === 0) lines.push("(计划尚未冻结,无任务列表)");
+	if (lines.length === 0) lines.push(dim("(计划尚未冻结,无任务列表)"));
 	return lines;
 }
 
 // ─────────────────────────── tab:验收 ───────────────────────────
 
-export function acLines(plan: MissionPlan, evidence: EvidenceSummary, dirName: string): string[] {
-	const lines: string[] = [];
+const EV_COLOR: Record<string, string> = { pass: "success", fail: "error", inconclusive: "warning" };
+
+export function acLines(
+	plan: MissionPlan,
+	evidence: EvidenceSummary,
+	dirName: string,
+	t: LineTheme = PLAIN,
+	width = 96,
+): string[] {
+	const dim = (s: string) => t.fg("dim", s);
 	if (plan.acceptanceCriteria.length === 0) {
 		return plan.tier === "quick"
-			? ["(quick 档:无 AC,判定依据是 --verify 冻结的验证命令)"]
-			: ["(尚未冻结 AC:PLAN 相位调用 mission_write_plan 后显示)"];
+			? [dim("(quick 档:无 AC,判定依据是 --verify 冻结的验证命令)")]
+			: [dim("(尚未冻结 AC:PLAN 相位调用 mission_write_plan 后显示)")];
 	}
-	lines.push(`冻结验收标准 · 执行入口 ./${dirName}/scripts/verify.sh <分支>`, "");
+	const lines: string[] = [dim(`执行入口 ./${dirName}/scripts/verify.sh <分支>`), ""];
 	for (const [i, ac] of plan.acceptanceCriteria.entries()) {
 		if (i > 0) lines.push("");
 		const ev = evidence.latest[ac.verify];
+		const color = ev ? (EV_COLOR[ev.result] ?? "dim") : "dim";
 		const icon = ev ? (EV_ICON[ev.result] ?? "?") : "·";
 		const where = ev?.taskId ? `${ev.taskId}-a${ev.attempt}` : null;
-		const suffix = ev ? `[${ev.result}@${ev.level}${where ? ` · ${where}` : ""}]` : "[尚无证据]";
-		lines.push(`${icon} ${ac.id} (\`${ac.verify}\`) ${suffix}`);
-		lines.push(`    ${ac.text}`);
+		const tag = ev ? `${ev.result}@${ev.level}${where ? ` · ${where}` : ""}` : "尚无证据";
+		lines.push(`${t.fg(color, icon)} ${t.fg(color, ac.id)} ${dim(ac.verify)}  ${t.fg(color, tag)}`);
+		// AC 正文是判定标准本身,截断等于看不出这条要求什么 —— 折行
+		for (const l of wrap(ac.text, Math.max(16, width - 4), 4)) lines.push(`    ${l}`);
 		if (ev?.rawTail) {
 			for (const l of ev.rawTail.split("\n").filter(Boolean).slice(-4)) {
-				lines.push(`    │ ${l}`);
+				lines.push(`    ${t.fg("borderMuted", "│")} ${dim(l)}`);
 			}
 		}
 	}
@@ -256,7 +385,7 @@ export function renderStatusDashboard(
 	now = Date.now(),
 ): string {
 	const sections = [
-		overviewLines(plan, state, now),
+		overviewLines(plan, state, { now }),
 		["任务:", ...taskLines(plan, state).map((l) => (l ? `  ${l}` : l))],
 		["验收:", ...acLines(plan, evidence, dirName).map((l) => (l ? `  ${l}` : l))],
 	];

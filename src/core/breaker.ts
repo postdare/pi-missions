@@ -35,6 +35,15 @@ export function thresholdFor(tier: Tier): number {
   return THRESHOLD[tier];
 }
 
+/**
+ * 「再失败一次就要升级」—— 熔断临界。UI 靠它决定是否换成警告色,
+ * 但这是"升不升"的判定,归 L0 管:阈值语义(含 `-1`)只允许在这里写一次。
+ */
+export function nearThreshold(task: TaskState | undefined, tier: Tier): boolean {
+  if (!task || task.sameSignatureCount <= 0) return false;
+  return task.sameSignatureCount >= thresholdFor(tier) - 1;
+}
+
 // ─────────────────────────── 归一化 ───────────────────────────
 
 /** Java/JUnit 测试标识:AuthIntegrationTest#refreshToken 或 FooTest.bar */
