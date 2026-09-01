@@ -51,11 +51,13 @@ import { renderWidgetCard } from "./ui/dashboard.ts";
 import {
 	applyRole,
 	loadModelsConfig,
+	saveModelsConfig,
 	profileFromJson,
 	profileToJson,
 	restoreProfile,
 	saveProfile,
 	type ModelsConfig,
+	type RoleModelConfig,
 	type SavedProfile,
 } from "./roles/models.ts";
 import { renderSpikeVerifierBrief, renderVerifierBrief, runVerifier } from "./roles/verifier.ts";
@@ -880,6 +882,78 @@ export class Runtime {
 
 	modelsConfig(): ModelsConfig {
 		return loadModelsConfig(modelsJson(this.layout));
+	}
+
+	/** 会话当前模型的可读名(角色未配置时实际会用它) */
+	sessionModelLabel(ctx: any): string {
+		const m = ctx?.model as { provider?: string; id?: string } | undefined;
+		return m?.provider && m?.id ? `${m.provider}/${m.id}` : (m?.id ?? "当前会话模型");
+	}
+
+	/**
+	 * 可选模型列表。优先用 ctx.scopedModels(pi 文档指定的 picker 数据源,
+	 * 与内置选择器同一套),没有 scoping 时退回整个目录。
+	 */
+	availableModels(ctx: any): Array<{ provider: string; id: string; name?: string }> {
+		const norm = (m: any) => ({ provider: String(m?.provider ?? ""), id: String(m?.id ?? ""), name: m?.name });
+		try {
+			const scoped = (ctx?.scopedModels ?? []) as Array<{ model: any }>;
+			if (scoped.length > 0) return scoped.map((e) => norm(e.model)).filter((m) => m.provider && m.id);
+			const all = (ctx?.modelRegistry?.getAvailable?.() ?? []) as any[];
+			return all.map(norm).filter((m) => m.provider && m.id);
+		} catch {
+			return [];
+		}
+	}
+
+	/**
+	 * 改角色模型映射。写 missions/models.json(I6:配置进仓库)。
+	 *
+	 * 三件事必须一起做,少一件这个面板就不该存在:
+	 *   1. 若改的正是当前相位的角色,立刻 applyRole —— 否则要等到下次相位切换才生效
+	 *   2. 进行中的 mission 一律写 LOG.md —— 判定口径和成本口径变了,审计链要能解释
+	 *   3. verifier 额外告警 —— 它是 I3 的独立判定者,中途换等于换裁判
+	 */
+	async setRoleModel(
+		ctx: any,
+		role: Role,
+		selection: { provider: string; id: string } | null,
+		thinking?: string,
+	): Promise<void> {
+		const cfg = this.modelsConfig();
+		const prev = cfg[role];
+		const next: RoleModelConfig = { ...prev };
+		if (selection === null) {
+			delete next.provider;
+			delete next.model;
+		} else {
+			next.provider = selection.provider;
+			next.model = selection.id;
+		}
+		if (thinking !== undefined) next.thinking = thinking;
+
+		if (Object.keys(next).length === 0) delete cfg[role];
+		else cfg[role] = next;
+		saveModelsConfig(modelsJson(this.layout), cfg);
+
+		const before = prev?.provider && prev?.model ? `${prev.provider}/${prev.model}` : "跟随会话";
+		const after = next.provider && next.model ? `${next.provider}/${next.model}` : "跟随会话";
+		const line =
+			`MODEL ${role}: ${before} → ${after}` +
+			(thinking !== undefined && thinking !== prev?.thinking ? ` · thinking ${prev?.thinking ?? "默认"} → ${thinking}` : "");
+
+		const a = this.active;
+		if (a && !a.inMemory) appendLog(statePaths(this.layout, a.state.missionId).logMd, line);
+		if (a && role === "verifier" && a.state.phase !== "done" && a.state.phase !== "halted") {
+			this.warn(
+				ctx,
+				"mission 进行中更换了 verifier 模型:此后的 semi 证据与之前不同源,判定口径已变(已记入 LOG.md)",
+			);
+		}
+		// 改的正是当前相位的角色 → 立刻生效,不必等下次相位切换
+		if (a && ROLE_OF[a.state.phase] === role) {
+			await applyRole(this.pi, ctx, role, this.modelsConfig(), (m) => this.warn(ctx, m));
+		}
 	}
 
 	/** 消费待选档位(返回后清除) */

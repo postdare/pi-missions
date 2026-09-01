@@ -14,6 +14,9 @@ import { latestEvidenceResults } from "./store/evidence.ts";
 import { openStatusView, statusFallbackText, type StatusViewData } from "./ui/status-view.ts";
 import { applyTierSelection, clearTierIndicator } from "./ui/tier-indicator.ts";
 import { openMissionsPanel } from "./ui/panel.ts";
+import { STATE_ICON } from "./ui/models-page.ts";
+import { ROLE_ORDER, resolveRoleView } from "./roles/models.ts";
+import { ROLE_OF } from "./core/machine.ts";
 
 type Ctx = any;
 type GetRuntime = (ctx: Ctx) => Runtime;
@@ -22,12 +25,41 @@ export function registerCommands(pi: any, getRuntime: GetRuntime): void {
 	pi.registerCommand("missions", {
 		description: "Mission 主面板:顶部新建,下方历史列表",
 		handler: async (_args: string, ctx: Ctx) => {
-			await openMissionsPanel(ctx, getRuntime(ctx).layout, {
+			const rt0 = getRuntime(ctx);
+			await openMissionsPanel(ctx, rt0.layout, {
 				onResume: (id) => pi.sendUserMessage(`/mission resume ${id}`, { deliverAs: "followUp" }),
 				onSelectTier: (tier) => {
 					const rt = getRuntime(ctx);
 					rt.pendingTier = tier;
 					applyTierSelection(ctx, tier);
+				},
+				models: {
+					getData: () => {
+						const rt = getRuntime(ctx);
+						const a = rt.active;
+						return {
+							config: rt.modelsConfig(),
+							models: rt.availableModels(ctx),
+							sessionLabel: rt.sessionModelLabel(ctx),
+							cost: a?.state.cost ?? {},
+							activeRole: a ? ROLE_OF[a.state.phase] : null,
+							dirName: rt.config.missionsDir,
+						};
+					},
+					// 面板是同步回调,写盘/applyRole 是异步:失败只提示,不阻塞 UI
+					setModel: (role, selection) => {
+						void getRuntime(ctx)
+							.setRoleModel(ctx, role, selection)
+							.catch((e: unknown) => ctx.ui.notify(`模型设置失败:${String(e)}`, "error"));
+					},
+					setThinking: (role, thinking) => {
+						const rt = getRuntime(ctx);
+						const cur = rt.modelsConfig()[role];
+						const sel = cur?.provider && cur?.model ? { provider: cur.provider, id: cur.model } : null;
+						void rt
+							.setRoleModel(ctx, role, sel, thinking)
+							.catch((e: unknown) => ctx.ui.notify(`thinking 设置失败:${String(e)}`, "error"));
+					},
 				},
 			});
 		},
@@ -203,18 +235,21 @@ export function registerCommands(pi: any, getRuntime: GetRuntime): void {
 				}
 
 				case "models": {
+					// 显示**实际生效**的值:配了但不可用的模型会被静默回退到会话模型
 					const cfg = rt.modelsConfig();
 					const a = rt.active;
-					const cost = a
-						? Object.entries(a.state.cost)
-								.map(([role, v]) => `  ${role}: $${(v ?? 0).toFixed(4)}`)
-								.join("\n")
-						: "  (无活动 mission)";
+					const avail = new Set(rt.availableModels(ctx).map((m) => `${m.provider}/${m.id}`));
+					const isAvailable = (p: string, m: string) => avail.size === 0 || avail.has(`${p}/${m}`);
+					const session = rt.sessionModelLabel(ctx);
+					const rows = ROLE_ORDER.map((role) => {
+						const v = resolveRoleView(cfg, role, isAvailable, session);
+						const spent = a?.state.cost[role];
+						const mark = STATE_ICON[v.state] ?? "?";
+						return `  ${mark} ${role.padEnd(10)} ${v.label}  · thinking=${v.thinking}${v.thinkingIsDefault ? "(默认)" : ""}${spent ? `  $${spent.toFixed(4)}` : ""}`;
+					}).join("\n");
 					pi.appendEntry("missions-card", {
-						title: "角色模型映射(missions/models.json)",
-						body:
-							`  planner:   ${fmtRole(cfg.planner)}\n  executor:  ${fmtRole(cfg.executor)}\n` +
-							`  verifier:  ${fmtRole(cfg.verifier)}\n  escalator: ${fmtRole(cfg.escalator)}\n\n本次花费(按角色):\n${cost}`,
+						title: `角色模型映射(${rt.config.missionsDir}/models.json)`,
+						body: `${rows}\n\n${STATE_ICON.configured} 已配置  ${STATE_ICON.unavailable} 配了但不可用(实际跟随会话)  ${STATE_ICON.inherit} 未配置\n/missions 面板 → ←→ 切到「模型」页可直接修改。`,
 					});
 					return;
 				}
@@ -227,11 +262,6 @@ export function registerCommands(pi: any, getRuntime: GetRuntime): void {
 			}
 		},
 	});
-}
-
-function fmtRole(c?: { provider?: string; model?: string; thinking?: string }): string {
-	if (!c) return "(默认:跟随会话模型)";
-	return `${c.provider ? `${c.provider}/` : ""}${c.model ?? "?"}${c.thinking ? ` thinking=${c.thinking}` : ""}`;
 }
 
 /** 新 Mission 的开场白。按起始相位分流(standard/complex 起于 FRAME) */

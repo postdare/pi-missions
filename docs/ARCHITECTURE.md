@@ -210,6 +210,16 @@ transition(state: MissionState, event: MissionEvent): { state, effects, error? }
 相位到角色的映射是常量表 `ROLE_OF`(`src/core/machine.ts:42`),
 `done`/`halted` 映射到 `null`。
 
+**面板编辑**(`/missions` 的「模型」页,`src/ui/models-page.ts`)直接写
+`missions/models.json`。三条设计约束:
+
+- 显示 `resolveRoleView()` 解出的**实际生效值**,不是配置值 —— `applyRole()` 在模型
+  不可用时静默回退会话模型,只 warn 一次,照抄配置会误导成本判断
+- 模型列表取 `ctx.scopedModels`(pi 文档指定的 picker 数据源),空则回退
+  `modelRegistry.getAvailable()`
+- 改动写 LOG.md;改的若是当前相位的角色则立刻 `applyRole`,否则等下次相位切换。
+  verifier 变更额外告警:它是 I3 的独立判定者,中途更换意味着前后 semi 证据不同源
+
 ### 4.4 FRAME(问题定义)
 
 `Phase = "frame"`,standard/complex 的起始相位(`START_PHASE`,`src/core/machine.ts`)。

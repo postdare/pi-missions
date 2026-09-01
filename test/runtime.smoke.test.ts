@@ -645,3 +645,34 @@ test("spike 的结论文件放行不能变成绕过闸门的通道", async () =>
 	assert.ok(rt.gate("write", { path: `missions/plans/${rt.active!.state.missionId}/MISSION.md` }));
 	assert.ok(rt.gate("write", { path: "missions/scripts/verify.sh" }));
 });
+
+test("模型设置:写 models.json、记 LOG.md、verifier 中途换裁判要告警", async () => {
+	const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "pi-missions-smoke-"));
+	const { pi, ctx, rt } = await newMission(tmp); // 停在 do 相位(executor)
+
+	const modelsFile = path.join(tmp, "missions", "models.json");
+	assert.ok(!fs.existsSync(modelsFile), "没配过就不该有这个文件");
+
+	// 配 verifier(不是当前相位角色)
+	await rt.setRoleModel(ctx, "verifier", { provider: "openai", id: "gpt-x" }, "low");
+	const cfg = JSON.parse(fs.readFileSync(modelsFile, "utf8"));
+	assert.deepEqual(cfg.verifier, { provider: "openai", model: "gpt-x", thinking: "low" });
+
+	const log = () => fs.readFileSync(path.join(tmp, "missions", "state", rt.active!.state.missionId, "LOG.md"), "utf8");
+	assert.ok(log().includes("MODEL verifier: 跟随会话 → openai/gpt-x"), "判定口径变了,必须进审计链");
+	assert.ok(
+		ctx.notifications.some((m) => m.includes("verifier")),
+		"mission 进行中换 verifier 等于换裁判,要告警",
+	);
+
+	// 清除配置 → 回到跟随会话,同样记账
+	await rt.setRoleModel(ctx, "verifier", null);
+	assert.equal(JSON.parse(fs.readFileSync(modelsFile, "utf8")).verifier.provider, undefined);
+	assert.ok(log().includes("MODEL verifier: openai/gpt-x → 跟随会话"));
+
+	// 改当前相位的角色 → 立刻 applyRole(thinking 当场生效)
+	const before = pi.calls.thinking.length;
+	await rt.setRoleModel(ctx, "executor", null, "xhigh");
+	assert.ok(pi.calls.thinking.length > before, "当前相位的角色要立刻生效,不等下次相位切换");
+	assert.equal(pi.calls.thinking.at(-1), "xhigh");
+});

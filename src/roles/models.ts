@@ -8,6 +8,7 @@
  */
 
 import * as fs from "node:fs";
+import * as path from "node:path";
 import type { Role } from "../core/types.ts";
 
 export interface RoleModelConfig {
@@ -24,6 +25,70 @@ export const DEFAULT_THINKING: Record<Role, string> = {
 	verifier: "off",
 	escalator: "high",
 };
+
+/** pi 的 thinking 档位(models.md)。具体模型可能只支持其中一部分 */
+export const THINKING_LEVELS = ["off", "minimal", "low", "medium", "high", "xhigh", "max"] as const;
+
+export const ROLE_ORDER: Role[] = ["planner", "executor", "verifier", "escalator"];
+
+export const ROLE_DESC: Record<Role, string> = {
+	planner: "FRAME 定义问题 + PLAN 设计 AC",
+	executor: "DO 写代码(主力消耗)",
+	verifier: "子进程独立核对 AC —— 判定权外置(I3)",
+	escalator: "ACT 一轮失败诊断",
+};
+
+/** 循环切换 thinking 档位;传 null 表示当前用的是角色默认值 */
+export function cycleThinking(current: string | undefined, role: Role, step = 1): string {
+	const cur = current ?? DEFAULT_THINKING[role];
+	const i = THINKING_LEVELS.indexOf(cur as (typeof THINKING_LEVELS)[number]);
+	const next = (i < 0 ? 0 : i + step + THINKING_LEVELS.length) % THINKING_LEVELS.length;
+	return THINKING_LEVELS[next];
+}
+
+export type RoleModelState = "configured" | "unavailable" | "inherit";
+
+export interface RoleModelView {
+	role: Role;
+	state: RoleModelState;
+	/** 实际会用到的模型的人类可读名 */
+	label: string;
+	thinking: string;
+	/** thinking 是角色默认值(没显式配过) */
+	thinkingIsDefault: boolean;
+}
+
+/**
+ * 解析某个角色**实际生效**的模型,而不是配置里写了什么。
+ *
+ * 这个区分是必须的:applyRole() 在模型不可用时会静默回退到会话当前模型
+ * (只 warn 一次)。面板若只显示配置值,你会以为 verifier 在用便宜模型,
+ * 实际一直拿会话模型在烧钱。
+ */
+export function resolveRoleView(
+	cfg: ModelsConfig,
+	role: Role,
+	isAvailable: (provider: string, model: string) => boolean,
+	sessionLabel: string,
+): RoleModelView {
+	const rc = cfg[role];
+	const thinking = rc?.thinking ?? DEFAULT_THINKING[role];
+	const thinkingIsDefault = !rc?.thinking;
+
+	if (!rc?.provider || !rc?.model) {
+		return { role, state: "inherit", label: `${sessionLabel}(跟随会话)`, thinking, thinkingIsDefault };
+	}
+	const id = `${rc.provider}/${rc.model}`;
+	return isAvailable(rc.provider, rc.model)
+		? { role, state: "configured", label: id, thinking, thinkingIsDefault }
+		: { role, state: "unavailable", label: `${id} → 实际用 ${sessionLabel}`, thinking, thinkingIsDefault };
+}
+
+/** 写回 missions/models.json。空配置也写文件 —— 面板改过就该有痕迹 */
+export function saveModelsConfig(file: string, cfg: ModelsConfig): void {
+	fs.mkdirSync(path.dirname(file), { recursive: true });
+	fs.writeFileSync(file, `${JSON.stringify(cfg, null, 2)}\n`, "utf8");
+}
 
 export function loadModelsConfig(file: string): ModelsConfig {
 	try {

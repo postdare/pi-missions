@@ -94,7 +94,7 @@ pi remove git:github.com/postdare/pi-missions
 
 | 命令 | 作用 |
 |---|---|
-| `/missions` | 主面板:顶部新建,下方历史(从 `missions/state/*/STATE.json` 扫描重建) |
+| `/missions` | 主面板,两页(`←/→` 切换):**任务**(新建 + 历史)· **模型**(角色 → 模型/thinking) |
 | `/mission new <目标> [--tier=standard\|complex]` | 新建并进入 PLAN 相位 |
 | `/mission quick <任务> --verify "<命令>"` | 单任务快捷档,不落盘。**`--verify` 是判定的唯一依据,必须给**;不给则自动升 standard 走 PLAN |
 | `/mission status` | 当前任务详情(页签浮层:概览/任务/验收/日志) |
@@ -106,7 +106,7 @@ pi remove git:github.com/postdare/pi-missions
 | `/mission log [--task=T3]` | 查看 LOG.md |
 | `/mission resume <id>` | 恢复历史任务到当前会话 |
 | `/mission abort` | 终止当前任务(halted) |
-| `/mission models` | 角色模型映射 + 按角色分账的花费 |
+| `/mission models` | 打印角色模型的**实际生效值** + 按角色分账的花费(修改走 `/missions` 的模型页) |
 
 LLM 可调用的工具五个,按相位分发:`mission_ask` / `mission_frame`(FRAME)、
 `mission_write_plan`(PLAN)、`mission_submit`(DO,无参数)、`mission_escalate`(ACT)。
@@ -275,6 +275,32 @@ HANDOFF_DONE。链路被打断时 pendingHandoff 硬阻断仍在,手动 `/missio
 
 模型不可用时回退当前会话模型并显式警告(thinking 仍按角色设置),mission 不阻断。
 mission 结束/中止时恢复你原来的模型与 thinking level。
+
+### 在面板里改(`/missions` → `←/→` 到「模型」页)
+
+```
+▸ planner    ● anthropic/claude-opus-5              high         $0.4120
+   FRAME 定义问题 + PLAN 设计 AC
+  executor   ● anthropic/claude-sonnet-5            medium       $1.2030  ←当前相位
+   DO 写代码(主力消耗)
+  verifier   ⚠ openai/gpt-x → 实际用 anthropic/…    off(默认)
+   子进程独立核对 AC —— 判定权外置(I3)
+  escalator  ○ anthropic/claude-opus-5(跟随会话)   high(默认)
+   ACT 一轮失败诊断
+```
+
+`↑↓` 选角色 · `⏎` 选模型(可输入过滤)· `t` 切 thinking · `x` 清除该行。
+
+三个要点:
+
+- **显示的是实际生效的值,不是配置值。** `⚠` 表示配了但该模型不可用 —— 此时 pi-missions
+  会静默回退到会话模型,只在切换角色时警告一次。面板照抄配置的话,你会以为 verifier
+  在用便宜模型,实际一直拿会话模型烧钱。
+- **模型列表来自 `ctx.scopedModels`**(pi 内置选择器同一套数据源),没有配 scoping 时
+  退回完整目录。不手写模型名单。
+- **改动会写进 LOG.md。** 尤其 verifier:mission 跑到一半换它,等于中途换裁判 ——
+  此后的 semi 证据与之前不同源,审计链必须能解释这件事。改动写盘后,若改的正是当前
+  相位的角色,立刻生效;否则等下一次相位切换。
 
 ## 代码结构
 
