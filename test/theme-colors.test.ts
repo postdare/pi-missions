@@ -17,6 +17,7 @@ import { modelRows, modelsFooter, pickerRows, type ModelsPageData } from "../src
 import { renderTaskDetail } from "../src/ui/task-detail.ts";
 import { renderStatus } from "../src/ui/status-view.ts";
 import { renderPlanReview, SECTION_IDS, type ReviewSection } from "../src/ui/plan-review.ts";
+import { renderAskReview } from "../src/ui/ask-review.ts";
 
 /** docs/themes.md 的前景色名(仅列本项目可能用到的部分) */
 const FG = new Set([
@@ -267,5 +268,31 @@ test("计划评审页的五段在 strictTheme 下颜色名均合法", () => {
 				}),
 			`renderPlanReview 空数据 @${section}`,
 		);
+	}
+});
+
+test("DEFINE 问答页在 strictTheme 下颜色名均合法(含编辑态)", () => {
+	const questions = [
+		{ id: "Q1", text: "『快』指首屏还是接口?", options: ["首屏加载", "接口 p95"], recommend: "接口 p95", impact: "决定 DW1 口径" },
+		{ id: "Q2", text: "允许改 schema 吗?", recommend: "不允许", impact: "决定方案分支" },
+	];
+	for (const qi of [0, 1]) {
+		for (const editing of [false, true]) {
+			assert.doesNotThrow(
+				() =>
+					renderAskReview({
+						theme: strictTheme,
+						width: 88,
+						rows: 24,
+						questions,
+						qi,
+						sel: [1, 0],
+						draft: ["", "草稿"],
+						editing,
+						scroll: 0,
+					}),
+				`renderAskReview qi=${qi} editing=${editing}`,
+			);
+		}
 	}
 });

@@ -293,7 +293,13 @@ spike(答案在代码里,问人无效);方案未定 → 自己造选项、带推
   ④ **结账判据** —— 第二轮起要求 `settled.length` 严格大于上一轮的快照。
   轮数记在 `state.defineAsks`、快照记在 `state.defineSettled`(事件 `DEFINE_ASKED`)。
 
-  ①改变了提问的经济学:带推荐答案的问题人回一句"用你的"就完了,一轮的成本从
+  通过闸门后弹出**交互问答页**(`openAskReview`,`src/ui/ask-review.ts`):阻塞 `ctx.ui.custom`,
+  ↑↓ 选选项(推荐项默认选中)、E 自定义答案、Tab 切题、Esc = 人中断。
+  答案经 `normalizeAskAnswers()` 规整后走 `DEFINE_ANSWERED` 落进 `state.defineAnswers`,
+  同时以信封形式直接回到工具结果 —— 模型照抄进 `mission_define.resolved`,不再靠转抄。
+  **Esc 中断与回答都消耗轮次**:否则模型可以反复问反复中断原地打转。
+  没有 UI 的宿主(RPC/ACP)直接拒绝,并指引模型改在聊天里提问。
+  ①改变了提问的经济学:推荐项在问答页里选中高亮,人确认或改选即可,一轮的成本从
   "写一段需求"降到"回车",于是轮数付得起。④负责收敛,与 `breaker.ts` 同构 ——
   那里数"同一失败签名连续出现",这里数"提问没有推进决策"。
 
@@ -656,11 +662,11 @@ README 标题里的"双层循环":
 /mission new "让登录快一点"
   │  startNew → START_PHASE.standard = define → SET_TOOLS(define) + planner
   ▼
-DEFINE:LLM 读代码 → mission_ask(每轮≤3,每问带推荐答案)→ 本轮结束,等人回答
+DEFINE:LLM 读代码 → mission_ask(每轮≤3,每问带推荐答案)→ 交互问答页阻塞收答案
   │                └→ evaluateAsk 拒掉:没推荐答案 / 超额 / 超轮次 / 上一轮没结账
-  │  人回答(普通消息)→ 可以再问一轮(settled 必须变长)
+  │  答案落 state.defineAnswers + 工具结果信封 → 可以再问一轮(settled 必须变长;Esc 中断也算一轮)
   ▼
-mission_define(goal + doneWhen + …)→ 范围确认 → DEFINE_DONE → PLAN
+mission_define(goal + doneWhen + resolved 照信封抄)→ 范围确认 → DEFINE_DONE → PLAN
   ▼
 PLAN:mission_write_plan → validatePlan + evaluateCoverage → 计划评审页
   │                        └→ R 打回:意见回传 planner,累计 3 次转 L3 回 DEFINE

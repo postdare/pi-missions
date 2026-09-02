@@ -16,9 +16,10 @@ import { judge } from "./core/verdict.ts";
 import { evaluateCriterion } from "./core/criterion.ts";
 import { evaluatePromotion } from "./core/tier.ts";
 import { evaluateBaseline, shouldProbeBaseline, type BaselineProbe } from "./core/baseline.ts";
-import { evaluateAsk, needsScopeConfirm, roundCapFor, type AskQuestion } from "./core/define.ts";
+import { evaluateAsk, needsScopeConfirm, normalizeAskAnswers, roundCapFor, type AskQuestion } from "./core/define.ts";
 import { evaluateCoverage } from "./core/coverage.ts";
 import { openPlanReview } from "./ui/plan-review.ts";
+import { openAskReview } from "./ui/ask-review.ts";
 import { reportIsSubstantive, validateSpikePlan } from "./core/spike.ts";
 import type { DoneWhen, Definition, MissionPlan } from "./store/mission.ts";
 import {
@@ -1272,16 +1273,31 @@ export class Runtime {
 	/**
 	 * DEFINE 提问。闸门判定在 core(evaluateAsk):每个问题必须带推荐答案,
 	 * 一轮最多 3 个,轮次上限由档位定,第二轮起要求上一轮真的落定了决策。
-	 * 问题以卡片呈现给人,本轮到此为止 —— 回答由人以普通消息给出。
+	 *
+	 * 交互式问答页(openAskReview)阻塞到人答完:答案直接成为工具结果的一部分
+	 * (不再靠模型转抄),同时经 DEFINE_ANSWERED 落进 state —— 换脑后照 state 抄
+	 * mission_define.resolved,提问额度不再白烧。Esc = 人中断:轮次照样烧掉,
+	 * 否则模型可以反复问反复中断原地打转。没有 UI 的宿主(RPC/ACP)直接拒绝 ——
+	 * 模型收到信封后应改为在聊天里提问。
 	 */
 	async ask(
 		ctx: any,
 		questions: AskQuestion[],
 		settled: string[],
-	): Promise<{ ok: true; questions: AskQuestion[]; round: number } | { error: string }> {
+	): Promise<
+		| { ok: true; questions: AskQuestion[]; round: number; envelope: string }
+		| { error: string }
+	> {
 		const a = this.active;
 		if (!a) return { error: "无活动 mission" };
 		if (a.state.phase !== "define") return { error: `当前相位是 ${a.state.phase},只有 define 相位可以提问` };
+		if (!ctx.hasUI) {
+			return {
+				error:
+					"当前环境没有交互界面,问答页无法打开 —— 用户看不到这些问题。" +
+					"改为在回复里用普通文字提问,把回答记进 mission_define 的 resolved。",
+			};
+		}
 
 		const verdict = evaluateAsk({
 			tier: a.state.tier,
@@ -1297,19 +1313,6 @@ export class Runtime {
 
 		const round = this.active!.state.defineAsks;
 		const cap = roundCapFor(a.state.tier);
-		// 卡片把推荐答案排在问题正下方 —— 人回一句"1 用你的"就能过,这是多轮付得起的前提
-		const body = verdict.questions
-			.map((q, i) => {
-				const lines = [`${i + 1}. ${q.text}`];
-				if (q.options?.length) lines.push(`   选项:${q.options.join(" / ")}`);
-				lines.push(`   推荐:${q.recommend}`);
-				return lines.join("\n");
-			})
-			.join("\n\n");
-		this.pi.appendEntry("missions-card", {
-			title: `${a.state.missionId} · 需要你回答(第 ${round}/${cap} 轮,${verdict.questions.length} 个)`,
-			body,
-		});
 		if (!a.inMemory) {
 			appendLog(
 				statePaths(this.layout, a.state.missionId).logMd,
@@ -1317,7 +1320,30 @@ export class Runtime {
 					verdict.questions.map((q) => `${q.text.replace(/\s+/g, " ")}(推荐:${q.recommend})`).join(" / "),
 			);
 		}
-		return { ok: true, questions: verdict.questions, round };
+
+		const result = await openAskReview(ctx, verdict.questions);
+		if (result.status === "cancelled") {
+			const envelope =
+				`人中断了问答(第 ${round} 轮)。轮次额度已消耗,不要原样重问 —— ` +
+				"用现有信息推进 mission_define;确实缺关键决策就说明缺什么,由人重新描述需求。";
+			return { ok: true, questions: verdict.questions, round, envelope };
+		}
+
+		const records = normalizeAskAnswers(verdict.questions, result.answers);
+		const ar = await this.applyEvent(
+			{
+				type: "DEFINE_ANSWERED",
+				at: Date.now(),
+				answers: records.map(({ q, a: ans }) => ({ q, a: ans })),
+			},
+			ctx,
+		);
+		if (ar.error) return { error: ar.error };
+
+		// 信封:问答记录按题目顺序展开,模型照抄即可,无需转抄
+		const body = records.map((rec) => `"${rec.q}"="${rec.a}"${rec.fallback ? "(人未作答,采用推荐)" : ""}`).join(" ");
+		const envelope = `人对第 ${round} 轮提问的回答:${body} —— 调用 mission_define 时把这份问答原样带进 resolved。`;
+		return { ok: true, questions: verdict.questions, round, envelope };
 	}
 
 	/**
@@ -1906,6 +1932,13 @@ export function renderStateCard(
 			);
 			if (asked > 0 && state.defineSettled.length > 0) {
 				lines.push(`已落定:${state.defineSettled.join(" · ")} —— 再问一轮必须让这个清单变长。`);
+			}
+			if (state.defineAnswers.length > 0) {
+				// 已收到的回答就摆在这里:换脑后的新会话照这个抄 resolved,不必靠上下文
+				for (const rec of state.defineAnswers.slice(-6)) {
+					lines.push(`问:${rec.q.replace(/\s+/g, " ")}`);
+					lines.push(`答:${rec.a.replace(/\s+/g, " ")}`);
+				}
 			}
 		}
 	}

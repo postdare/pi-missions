@@ -409,7 +409,8 @@ function kickoff(dirName: string, id: string, tier: string, goal: string, phase:
 		return (
 			`${head}阅读 ${dirName}/README.md 与 ${dirName}/phases/define.md。` +
 			"先读代码,能从仓库里读到的别去问人;仍有影响完成条件的模糊就调用 mission_ask 提问" +
-			"(一轮最多 3 个,每个必须带推荐答案;standard 2 轮、complex 3 轮)并停下等回答," +
+			"(一轮最多 3 个,每个必须带推荐答案;standard 2 轮、complex 3 轮)—— 交互问答页里人逐题作答," +
+			"回答直接出现在工具结果里;" +
 			"清楚了就调用 mission_define 交出目标、完成条件(doneWhen)与边界。" +
 			`原始需求:${goal}`
 		);

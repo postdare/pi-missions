@@ -146,6 +146,18 @@ export function transition(state: MissionState, event: MissionEvent): Transition
 			);
 		}
 
+		case "DEFINE_ANSWERED": {
+			if (state.phase !== "define") return reject(state, "DEFINE_ANSWERED 只能在 define 相位");
+			if (state.defineAsks === 0) return reject(state, "还没有问过任何一轮,答案无处对账");
+			if (event.answers.length === 0) return reject(state, "答案为空:问答页要么收到答案,要么中断,不存在空答案");
+			// 记录按轮累积:mission_define.resolved 的上游,换脑后照这里抄
+			return ok(
+				{ ...state, defineAnswers: [...state.defineAnswers, ...event.answers] },
+				[log(`DEFINE 第 ${state.defineAsks} 轮收到 ${event.answers.length} 条回答`)],
+				event.at,
+			);
+		}
+
 		case "DEFINE_DONE": {
 			if (state.phase !== "define") return reject(state, "DEFINE_DONE 只能在 define 相位");
 			if (state.pendingHandoff) return reject(state, "换脑挂起中,请先 /mission next");
@@ -429,6 +441,7 @@ export function transition(state: MissionState, event: MissionEvent): Transition
 					planReview,
 					defineAsks: 0,
 					defineSettled: [],
+					defineAnswers: [],
 					escalation: {
 						level: 3,
 						history: [
@@ -469,6 +482,7 @@ export function transition(state: MissionState, event: MissionEvent): Transition
 					tasks,
 					defineAsks: 0,
 					defineSettled: [],
+					defineAnswers: [],
 					pendingHandoff: "escalate L3",
 				},
 				[
@@ -855,6 +869,7 @@ export function initialState(params: {
 		sessionMap: {},
 		defineAsks: 0,
 		defineSettled: [],
+		defineAnswers: [],
 		planReview: { rejections: 0, notes: [] },
 		spikesRun: 0,
 		cost: {},

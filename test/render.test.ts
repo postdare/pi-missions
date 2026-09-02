@@ -21,6 +21,7 @@ import type { MissionPlan } from "../src/store/mission.ts";
 import { renderPanel } from "../src/ui/panel.ts";
 import { renderStatus } from "../src/ui/status-view.ts";
 import { renderPlanReview, SECTION_IDS, type ReviewSection } from "../src/ui/plan-review.ts";
+import { renderAskReview } from "../src/ui/ask-review.ts";
 import type { ModelsPageData } from "../src/ui/models-page.ts";
 
 const theme = {
@@ -420,8 +421,7 @@ test("renderPlanReview:五段 × 各宽度 × 各滚动位置都恰好铺满", (
 	}
 });
 
-test("renderPlanReview:空方案 / 空 AC / 空脚本 / quick 档无 definition 也不撑破", () => {
-	const bare: MissionPlan = {
+test("renderPlanReview:空方案 / 空 AC / 空脚本 / quick 档无 definition 也不撑破", () => {	const bare: MissionPlan = {
 		...MISSIONS[0].plan!,
 		definition: undefined,
 		approach: undefined,
@@ -522,5 +522,73 @@ test("renderStatus: 支持 canAbort 与 canResume 组合且宽度安全", () => 
 				assertWidths(lines, Math.max(56, width), `status w=${width} resume=${canResume} abort=${canAbort}`);
 			}
 		}
+	}
+});
+
+// ─────────────── DEFINE 问答页 ───────────────
+
+const ASK_QUESTIONS = [
+	{
+		id: "Q1",
+		text: "『快』指首屏还是接口?",
+		options: ["首屏加载", "接口 p95"],
+		recommend: "接口 p95",
+		impact: "决定 DW1 的度量口径",
+	},
+	{
+		id: "Q2",
+		text: "目标多少毫秒?这条问题措辞故意拉长一些,验证题干折行之后盒宽仍然恰好铺满、选中行高亮不断开。",
+		recommend: "p95 < 300ms",
+		impact: "决定 DW1 的阈值",
+	},
+];
+
+function askBase(over: Partial<Parameters<typeof renderAskReview>[0]> = {}) {
+	return {
+		theme,
+		width: 96,
+		rows: 30,
+		questions: ASK_QUESTIONS,
+		qi: 0,
+		sel: [1, 0],
+		draft: ["", ""],
+		editing: false,
+		scroll: 0,
+		...over,
+	} as Parameters<typeof renderAskReview>[0];
+}
+
+test("renderAskReview:各题 × 各宽 × 选中/编辑态都恰好铺满", () => {
+	for (const width of WIDTHS) {
+		for (const qi of [0, 1]) {
+			for (const editing of [false, true]) {
+				for (const scroll of [0, 3, 999]) {
+					const r = renderAskReview(askBase({ width, qi, editing, scroll }));
+					assertWidths(r.lines, Math.max(40, width), `ask w=${width} qi=${qi} edit=${editing} scroll=${scroll}`);
+				}
+			}
+		}
+	}
+});
+
+test("renderAskReview:无选项的开放式问题也铺满(推荐项本身成为唯一可选行)", () => {
+	const r = renderAskReview(askBase({ questions: [ASK_QUESTIONS[1]], qi: 0, sel: [0] }));
+	assertWidths(r.lines, 96, "ask 开放题");
+});
+
+test("问答页不出现贴边框竖线", () => {
+	for (const qi of [0, 1]) {
+		for (const line of renderAskReview(askBase({ qi })).lines) {
+			const stripped = line.replace(/\x1b\[[0-9;]*m/g, "");
+			if (!/^[│╭╰├]/.test(stripped)) continue;
+			assert.ok(!/^.{0,2}[▎▍▌┃]/.test(stripped), `问答页仍有贴边竖线: ${JSON.stringify(stripped)}`);
+		}
+	}
+});
+
+test("问答页短题列表也铺满(盒高不随题跳动)", () => {
+	for (const width of WIDTHS) {
+		const r = renderAskReview(askBase({ width, questions: [ASK_QUESTIONS[0]], qi: 0, sel: [0] }));
+		assertWidths(r.lines, Math.max(40, width), `ask 短题 w=${width}`);
 	}
 });

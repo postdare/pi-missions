@@ -19,7 +19,8 @@
  * 而猜错的代价要到 L2/L3 才显现。
  *
  * 放宽轮次的前提是**把一轮的成本压下去**:每个问题强制带一个推荐答案,
- * 人回一句"1 用你的、2 选 b"就完了。没有推荐答案的问题是懒问题,直接拒绝。
+ * 推荐项在问答页里选中高亮,人确认或改选即可,Esc 则整轮中断。
+ * 没有推荐答案的问题是懒问题,直接拒绝。
  *
  * 放宽之后靠一条新判据收敛:**每一轮都要结账** —— 第 N+1 轮要求已落定的决策数
  * 严格增长,上一轮问完什么都没定下来就不给下一轮。这与 breaker.ts 数"同一失败
@@ -62,6 +63,34 @@ export interface AskInput {
 }
 
 export type AskVerdict = { ok: true; questions: AskQuestion[] } | { ok: false; reason: string };
+
+/** 人对单个问题的回答:选了某个选项 / 敲了自定义文本 / 什么都没选(回落推荐) */
+export type AskAnswer =
+	| { kind: "option"; value: string }
+	| { kind: "custom"; value: string }
+	| { kind: "none" };
+
+/** 单个问题的 UI 答案规整成 (q, a) 对。纯函数:未答回落推荐答案,自由文本原样保留 */
+export function normalizeAskAnswers(questions: AskQuestion[], answers: (AskAnswer | undefined)[]): {
+	q: string;
+	a: string;
+	/** true = 人没作答,落到了推荐答案上 —— mission_define 的 resolved 靠这个字段区分"人确认"与"人没看" */
+	fallback: boolean;
+}[] {
+	return questions.map((q, i) => {
+		const ans = answers[i];
+		if (!ans || ans.kind === "none") return { q: q.text, a: q.recommend, fallback: true };
+		if (ans.kind === "option") {
+			const label = ans.value.trim();
+			// 推荐/同意类选项按"采用推荐"记,不把界面话术抄进 resolved
+			if (label === q.recommend) return { q: q.text, a: q.recommend, fallback: false };
+			return { q: q.text, a: label, fallback: false };
+		}
+		const text = ans.value.trim();
+		if (!text) return { q: q.text, a: q.recommend, fallback: true };
+		return { q: q.text, a: text, fallback: false };
+	});
+}
 
 /** 去掉空白项;text/recommend/impact 一并 trim */
 function normalize(questions: AskQuestion[]): AskQuestion[] {
@@ -111,7 +140,7 @@ export function evaluateAsk(input: AskInput): AskVerdict {
 			ok: false,
 			reason:
 				`这些问题没有给推荐答案:${missing.join(" / ")}。` +
-				"每个问题必须带一个你倾向的答案 —— 人回一句'用你的'就能过,这是多轮问答付得起的前提;" +
+				"每个问题必须带一个你倾向的答案 —— 推荐答案会被选中高亮,人只需确认或改选;" +
 				"你连倾向都没有,说明这个问题你自己还没想过。",
 		};
 	}

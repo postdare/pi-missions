@@ -40,7 +40,7 @@ src/core/       纯函数,唯一裁判(machine/breaker/verdict/baseline/tier/def
 src/store/      v2 Repository、generation 投影、log/evidence/git/scaffold
 src/roles/      models.json 角色模型 + 进程内 Verifier AgentSession
 src/hooks/      tool_call 闸门 + 编辑级增量反馈
-src/ui/         chrome(圆角盒框架)/ panel(/missions)/ plan-review(冻结前评审)/ status-view / dashboard / models-page
+src/ui/         chrome(圆角盒框架)/ panel(/missions)/ plan-review(冻结前评审)/ ask-review(DEFINE 问答)/ status-view / dashboard / models-page
 templates/      scaffold 铺进目标仓库的工作流文件(standard/complex 的相位提示词、脚本)
 skills/         随包分发的 pi skill(入场导览:该不该开 mission、选哪档)
 ```

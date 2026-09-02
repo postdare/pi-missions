@@ -91,9 +91,11 @@ export function registerMissionTools(pi: any, getRuntime: GetRuntime): void {
 		description:
 			"[DEFINE 相位] 把\"不知道就写不出验收标准\"的问题交给人。" +
 			"一轮最多 3 个问题;轮次上限由档位定(standard 2 轮、complex 3 轮)——— 系统强制,不是建议。" +
-			"每个问题**必须带推荐答案**:人回一句\"用你的\"就能过,这是多轮问答付得起的前提。" +
+			"每个问题**必须带推荐答案**:推荐项在问答页里选中高亮,人确认或改选即可,这是多轮问答付得起的前提。" +
 			"第二轮起还要求 settled 比上一轮增长 —— 上一轮问完什么都没定下来,就不给下一轮。" +
-			"提问后本轮结束,等人回答;不需要提问就直接调用 mission_define。",
+			"调用后弹出交互问答页阻塞等待;人的回答直接出现在本工具的结果里(信封)," +
+			"调用 mission_define 时把信封里的问答**原样**带进 resolved。中断与回答都会消耗轮次。" +
+			"不需要提问就直接调用 mission_define。",
 		parameters: Type.Object({
 			questions: Type.Array(QuestionSchema, {
 				minItems: 1,
@@ -114,11 +116,11 @@ export function registerMissionTools(pi: any, getRuntime: GetRuntime): void {
 					{
 						type: "text",
 						text:
-							`问题已交给人(第 ${r.round} 轮,${r.questions.length} 个)。` +
-							"本轮到此为止:不要继续分析,不要自问自答,等回答之后再决定是追问下一轮还是调用 mission_define。",
+							r.envelope +
+							" 本轮到此为止:不要继续分析,不要自问自答,先决定是追问下一轮还是调用 mission_define。",
 					},
 				],
-				details: { ok: true },
+				details: { ok: true, round: r.round },
 			};
 		},
 	});

@@ -47,7 +47,7 @@ function mockPi() {
 	};
 }
 
-function mockCtx(cwd: string, human?: { select?: string; input?: string }) {
+function mockCtx(cwd: string, human?: { select?: string; input?: string; custom?: (questions: any[]) => any }) {
 	const notifications: string[] = [];
 	const prompts: string[] = [];
 	return {
@@ -69,10 +69,28 @@ function mockCtx(cwd: string, human?: { select?: string; input?: string }) {
 				prompts.push(title);
 				return human?.input;
 			},
+			/** 问答页 mock:工厂第 4 参 done 收裁决;human.custom 是题目断言 + 答案来源 */
+			custom: async (factory: any) => {
+				let captured: any[] = [];
+				const page = factory({}, plainTheme(), {}, (r: any) => {
+					page.result = r;
+				});
+				captured = human?.custom ? human.custom(page) : [];
+				return captured ?? { status: "cancelled" };
+			},
 		},
 		getContextUsage: () => ({ tokens: 0, contextWindow: 100_000, percent: 0 }),
 		sessionManager: { getSessionFile: () => "/tmp/fake-session.jsonl", getEntries: () => [] },
 		modelRegistry: { find: () => undefined },
+	};
+}
+
+/** 与 chrome 一致的恒等着色器,给 mock 的 ui.custom 工厂用 */
+function plainTheme() {
+	return {
+		fg: (_c: string, s: string) => s,
+		bg: (_c: string, s: string) => s,
+		bold: (s: string) => s,
 	};
 }
 
@@ -914,8 +932,16 @@ function q(id: string, text: string, over: Record<string, unknown> = {}) {
 
 test("DEFINE:提问闸门由 L0 强制 —— 每问带推荐答案、每轮 ≤3、standard 2 轮、要结账", async () => {
 	const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "pi-missions-smoke-"));
+	// 问答页 mock:记录题目,人把两题都按推荐作答
+	let seenQuestions: any[] = [];
+	const ctx = mockCtx(tmp, {
+		custom: () => {
+			return { status: "answered", answers: seenQuestions.map(() => ({ kind: "none" })) };
+		},
+	});
+	// 借 custom 工厂拿到题目:openAskReview 的 questions 在闭包里,从这里探
+	// (mock 的 custom 不经过工厂渲染,题目断言靠下面信封的内容兜底)
 	const pi = mockPi();
-	const ctx = mockCtx(tmp);
 	const rt = new Runtime(pi, tmp);
 	await rt.startNew(ctx, "让登录快一点", "standard");
 	assert.equal(rt.active!.state.phase, "define");
@@ -931,18 +957,21 @@ test("DEFINE:提问闸门由 L0 强制 —— 每问带推荐答案、每轮 ≤
 	assert.match((lazy as any).error, /没有给推荐答案/);
 	assert.equal(rt.active!.state.defineAsks, 0);
 
-	// 首轮 3 个:放行,问题连同推荐答案以卡片交给人
+	// 首轮 3 个:放行,人通过交互页作答,答案直接回到信封里
 	const first = await rt.ask(
 		ctx,
-		[q("Q1", "『快』指首屏还是接口?"), q("Q2", "目标多少 ms?"), q("Q3", "允许改数据库 schema 吗?")],
+		[q("Q1", "『快』指首屏还是接口?"), q("Q2", "目标多少 ms?", { recommend: "p95 < 300ms" }), q("Q3", "允许改数据库 schema 吗?")],
 		[],
 	);
-	assert.ok("ok" in first);
+	assert.ok("ok" in first, JSON.stringify(first));
 	assert.equal(rt.active!.state.defineAsks, 1);
-	const card1 = pi.calls.entries.find((e) => e.type === "missions-card");
-	assert.ok(String(card1.data.body).includes("目标多少 ms?"));
-	assert.ok(String(card1.data.body).includes("推荐:"), "推荐答案要跟问题一起呈现");
-	assert.ok(String(card1.data.title).includes("第 1/2 轮"));
+	assert.ok(String((first as any).envelope).includes("『快』指首屏还是接口?"), "信封里有问答记录");
+	assert.ok(String((first as any).envelope).includes("(人未作答,采用推荐)"), "未作答回落推荐要标记");
+	// 答案落进 state —— 换脑后照这里抄 resolved
+	assert.equal(rt.active!.state.defineAnswers.length, 3);
+	assert.deepEqual(rt.active!.state.defineAnswers[1], { q: "目标多少 ms?", a: "p95 < 300ms" });
+	assert.ok(seenQuestions !== undefined);
+	void seenQuestions;
 
 	// 第二轮但没结账:拒 —— 上一轮问完什么都没定下来
 	const stalled = await rt.ask(ctx, [q("Q4", "再问一个")], []);
@@ -955,13 +984,14 @@ test("DEFINE:提问闸门由 L0 强制 —— 每问带推荐答案、每轮 ≤
 	assert.ok("ok" in second, JSON.stringify(second));
 	assert.equal(rt.active!.state.defineAsks, 2);
 	assert.deepEqual(rt.active!.state.defineSettled, ["Q1", "Q2"]);
+	assert.equal(rt.active!.state.defineAnswers.length, 4, "回答按轮累积");
 
 	// 第三轮:standard 只有 2 轮
 	const third = await rt.ask(ctx, [q("Q5", "还有吗?")], ["Q1", "Q2", "Q4"]);
 	assert.ok("error" in third);
 	assert.match((third as any).error, /轮次已经用完/);
 
-	// 问过就必须交回答 —— 换脑之后上下文里的回答就没了
+	// 问过就必须交回答 —— state 里有记录,resolved 仍要模型显式带来(答案与完成条件的对应由它衔接)
 	const noResolved = await rt.define(ctx, {
 		goal: "登录接口 p95 从 800ms 降到 300ms 以内",
 		doneWhen: [{ id: "DW1", text: "登录接口 p95 < 300ms" }],
@@ -1004,6 +1034,41 @@ test("DEFINE:提问闸门由 L0 强制 —— 每问带推荐答案、每轮 ≤
 	// PLAN 相位不能再提问,也不能重复定义
 	assert.ok("error" in (await rt.ask(ctx, [q("Q9", "x")], [])));
 	assert.ok("error" in (await rt.define(ctx, { goal: "y", doneWhen: DW, constraints: [], nonGoals: [] })));
+});
+
+test("DEFINE:人中断问答(Esc)烧轮次但不留答案;无 UI 宿主被拒并指引改走聊天", async () => {
+	const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "pi-missions-smoke-"));
+	// 中断:custom mock 返回 cancelled
+	const ctxEsc = mockCtx(tmp, { custom: () => undefined });
+	const rtEsc = new Runtime(mockPi(), tmp);
+	await rtEsc.startNew(ctxEsc, "让登录快一点", "standard");
+	const esc = await rtEsc.ask(ctxEsc, [q("Q1", "『快』指首屏还是接口?")], []);
+	assert.ok("ok" in esc, JSON.stringify(esc));
+	assert.equal(rtEsc.active!.state.defineAsks, 1, "中断也算一轮 —— 否则模型可以反复问反复中断原地打转");
+	assert.equal(rtEsc.active!.state.defineAnswers.length, 0, "中断不留答案");
+	assert.match(String((esc as any).envelope), /人中断/);
+	assert.match(String((esc as any).envelope), /不要原样重问/);
+
+	// 自定义文本回答:原样进信封与 state
+	const ctxCustom = mockCtx(tmp, {
+		custom: () => ({ status: "answered", answers: [{ kind: "custom", value: "首屏 LCP < 2.5s" }] }),
+	});
+	const rtCustom = new Runtime(mockPi(), tmp);
+	await rtCustom.startNew(ctxCustom, "让登录快一点", "standard");
+	const custom = await rtCustom.ask(ctxCustom, [q("Q1", "『快』指首屏还是接口?")], []);
+	assert.ok("ok" in custom);
+	assert.deepEqual(rtCustom.active!.state.defineAnswers, [{ q: "『快』指首屏还是接口?", a: "首屏 LCP < 2.5s" }]);
+	assert.match(String((custom as any).envelope), /首屏 LCP < 2.5s/);
+	assert.doesNotMatch(String((custom as any).envelope), /人未作答/);
+
+	// 无 UI(RPC/ACP):直接拒,不再铺静态卡片
+	const ctxNoUi = mockCtx(tmp);
+	const rtNoUi = new Runtime(mockPi(), tmp);
+	await rtNoUi.startNew(ctxNoUi, "让登录快一点", "standard");
+	const noUi = await rtNoUi.ask(ctxNoUi, [q("Q1", "『快』指首屏还是接口?")], []);
+	assert.ok("error" in noUi);
+	assert.match((noUi as any).error, /没有交互界面/);
+	assert.equal(rtNoUi.active!.state.defineAsks, 0, "打不开页面的提问不算一轮");
 });
 
 test("DEFINE 范围确认:complex 恒确认,拒绝则停在 DEFINE 且不返还轮次", async () => {

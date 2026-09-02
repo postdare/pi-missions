@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { evaluateAsk, needsScopeConfirm, roundCapFor, DEFINE_QUESTION_CAP, type AskQuestion } from "../define.ts";
+import { evaluateAsk, needsScopeConfirm, roundCapFor, normalizeAskAnswers, DEFINE_QUESTION_CAP, type AskQuestion } from "../define.ts";
 
 function q(id: string, over: Partial<AskQuestion> = {}): AskQuestion {
 	return { id, text: `${id} 慢是指首屏还是接口?`, recommend: "按接口 p95", impact: "决定 DW1 的度量口径", ...over };
@@ -34,6 +34,7 @@ test("没有推荐答案的问题被拒 —— 那是懒问题", () => {
 	const r = ask({ questions: [q("Q1"), q("Q2", { recommend: "  " })] });
 	assert.equal(r.ok, false);
 	assert.match(r.ok === false ? r.reason : "", /没有给推荐答案:Q2/);
+	assert.doesNotMatch(r.ok === false ? r.reason : "", /用你的/, "交互文案已换成选中高亮,不再指'回一句用你的'");
 });
 
 test("没写清影响的问题被拒 —— 改变不了任何东西的问题不该问", () => {
@@ -81,4 +82,61 @@ test("范围确认:complex 恒确认,standard 只在问过之后确认,quick 不
 	assert.equal(needsScopeConfirm("standard", 0), false);
 	assert.equal(needsScopeConfirm("standard", 1), true);
 	assert.equal(needsScopeConfirm("quick", 3), false);
+});
+
+// ─────────────── normalizeAskAnswers(UI 答案 → resolved 记录) ───────────────
+
+const QS: AskQuestion[] = [
+	q("Q1", { text: "慢是指首屏还是接口?", options: ["首屏加载", "接口 p95"], recommend: "接口 p95" }),
+	q("Q2", { text: "数据放哪张表?", recommend: "mem_tenant_member_info" }),
+];
+
+test("选了推荐项:按采用推荐记,fallback=false(人确认过);未答的题也产出,回落推荐", () => {
+	const r = normalizeAskAnswers(QS, [{ kind: "option", value: "接口 p95" }]);
+	assert.deepEqual(r, [
+		{ q: "慢是指首屏还是接口?", a: "接口 p95", fallback: false },
+		{ q: "数据放哪张表?", a: "mem_tenant_member_info", fallback: true },
+	]);
+});
+
+test("选了别的选项:原样记录", () => {
+	const r = normalizeAskAnswers(QS, [{ kind: "option", value: "首屏加载" }]);
+	assert.deepEqual(r, [
+		{ q: "慢是指首屏还是接口?", a: "首屏加载", fallback: false },
+		{ q: "数据放哪张表?", a: "mem_tenant_member_info", fallback: true },
+	]);
+});
+
+test("自由文本:trim 后原样记录", () => {
+	const r = normalizeAskAnswers(QS, [{ kind: "custom", value: "  首屏和接口都要看  " }]);
+	assert.deepEqual(r, [
+		{ q: "慢是指首屏还是接口?", a: "首屏和接口都要看", fallback: false },
+		{ q: "数据放哪张表?", a: "mem_tenant_member_info", fallback: true },
+	]);
+});
+
+test("自由文本敲了空白:回落推荐,fallback=true", () => {
+	const r = normalizeAskAnswers(QS, [{ kind: "custom", value: "   " }]);
+	assert.deepEqual(r, [
+		{ q: "慢是指首屏还是接口?", a: "接口 p95", fallback: true },
+		{ q: "数据放哪张表?", a: "mem_tenant_member_info", fallback: true },
+	]);
+});
+
+test("没答(undefined / none):回落推荐并打 fallback 标记", () => {
+	const r = normalizeAskAnswers(QS, [undefined, { kind: "none" }]);
+	assert.equal(r.length, 2);
+	assert.deepEqual(r[0], { q: "慢是指首屏还是接口?", a: "接口 p95", fallback: true });
+	assert.deepEqual(r[1], { q: "数据放哪张表?", a: "mem_tenant_member_info", fallback: true });
+});
+
+test("多题混合:答案按题目位置对齐", () => {
+	const r = normalizeAskAnswers(QS, [
+		{ kind: "custom", value: "两边都看" },
+		{ kind: "option", value: "mem_tenant_member_info" },
+	]);
+	assert.deepEqual(r, [
+		{ q: "慢是指首屏还是接口?", a: "两边都看", fallback: false },
+		{ q: "数据放哪张表?", a: "mem_tenant_member_info", fallback: false },
+	]);
 });

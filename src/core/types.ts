@@ -181,6 +181,12 @@ export interface MissionState {
 	 */
 	defineSettled: string[];
 	/**
+	 * 各轮问答记录(人答的 + 回落到推荐的),按轮次累积。
+	 * 必须落盘:换脑之后模型照抄这里的记录填 mission_define.resolved,
+	 * 没有它提问额度就白烧了(同一判据,define() 里那句"问过就必须交 resolved"是它的下游)。
+	 */
+	defineAnswers: { q: string; a: string }[];
+	/**
 	 * 计划评审的打回记账。判据见 core/review.ts:连续打回到上限就转 L3。
 	 * notes 必须落盘 —— 打回意见只活在上下文里的话,换脑之后 planner 又只剩 1 bit。
 	 */
@@ -208,6 +214,8 @@ export interface MissionState {
 export type MissionEvent =
 	/** DEFINE 用掉一轮提问(闸门判定在 core/define.ts,机器只记账 + 存结账快照) */
 	| { type: "DEFINE_ASKED"; at: number; settled: string[] }
+	/** 人对第 N 轮提问作答(问答页收到的答案,已按 core/define.ts 的 normalizeAskAnswers 规整) */
+	| { type: "DEFINE_ANSWERED"; at: number; answers: { q: string; a: string }[] }
 	/** 问题定义完成,进入 PLAN。goal 由调用方写进 plan,机器只管相位 */
 	| { type: "DEFINE_DONE"; at: number }
 	| {

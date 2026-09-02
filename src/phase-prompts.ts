@@ -104,7 +104,7 @@ export const QUICK_PHASE_RULES: Record<string, string> = {
 /** standard/complex 的兜底(仓库里的 missions/phases/*.md 被删时用) */
 export const FALLBACK_PHASE_RULES: Record<string, string> = {
 	define:
-		"你在 DEFINE 相位:只做问题定义。读代码;仍有影响完成条件的模糊就调用 mission_ask(一轮最多 3 个问题,每个必须带推荐答案;standard 2 轮、complex 3 轮),然后停下等人回答;清楚了就调用 mission_define 交出目标、完成条件(doneWhen)与边界。不写代码,不设计方案。",
+		"你在 DEFINE 相位:只做问题定义。读代码;仍有影响完成条件的模糊就调用 mission_ask(一轮最多 3 个问题,每个必须带推荐答案;standard 2 轮、complex 3 轮)—— 会弹出交互问答页,回答直接出现在工具结果里;清楚了就调用 mission_define 交出目标、完成条件(doneWhen)与边界,问答记录原样带进 resolved。不写代码,不设计方案。",
 	plan: '你在 PLAN 相位:只读分析 + 调用 mission_write_plan 提交计划(方案 approach 在 complex 档必填;每条 AC 必须声明 covers,把 DEFINE 的完成条件逐条覆盖)。不写实现代码。人会在计划评审页逐段读它,可以打回并写意见。每条 AC 冻结时会被跑一遍核对基线(默认必须是红的,回归项显式声明 baseline: "green")。',
 	do: "你在 DO 相位:只完成 State Card 里的当前任务,完成后调用 mission_submit,不要自行判定通过。",
 	check: "你在 CHECK 相位:判定由系统执行,你不需要做任何事。",

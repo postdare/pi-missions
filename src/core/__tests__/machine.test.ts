@@ -96,6 +96,25 @@ test("换脑挂起时 DEFINE_DONE 被拒", () => {
 	assert.ok(transition(s, { type: "DEFINE_DONE", at: AT }).error);
 });
 
+test("DEFINE_ANSWERED:回答按轮累积落进 state,换脑后照这里抄 resolved", () => {
+	const asked = transition(mk(), { type: "DEFINE_ASKED", at: AT, settled: [] }).state;
+	const a1 = transition(asked, {
+		type: "DEFINE_ANSWERED",
+		at: AT,
+		answers: [{ q: "慢是指首屏还是接口?", a: "接口 p95" }],
+	});
+	assert.equal(a1.error, undefined);
+	assert.deepEqual(a1.state.defineAnswers, [{ q: "慢是指首屏还是接口?", a: "接口 p95" }]);
+	assert.equal(a1.state.phase, "define", "收答案不迁移相位");
+});
+
+test("DEFINE_ANSWERED:没问过不能答,空答案被拒", () => {
+	assert.ok(transition(mk(), { type: "DEFINE_ANSWERED", at: AT, answers: [{ q: "x", a: "y" }] }).error);
+	const asked = transition(mk(), { type: "DEFINE_ASKED", at: AT, settled: [] }).state;
+	assert.ok(transition(asked, { type: "DEFINE_ANSWERED", at: AT, answers: [] }).error);
+	assert.ok(transition(toPlan(), { type: "DEFINE_ANSWERED", at: AT, answers: [{ q: "x", a: "y" }] }).error);
+});
+
 // ─────────────── SUBMIT / PASS 推进 ───────────────
 
 test("SUBMIT 进入 check 相位", () => {
