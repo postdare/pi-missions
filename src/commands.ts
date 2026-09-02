@@ -12,7 +12,7 @@ import { statePaths, spikeReport } from "./store/paths.ts";
 import { readLog } from "./store/log.ts";
 import { latestEvidenceResults, readTaskEvidenceHistory, type TaskEvidenceAttempt } from "./store/evidence.ts";
 import { openStatusView, statusFallbackText, type StatusViewData } from "./ui/status-view.ts";
-import { applyTierSelection, clearTierIndicator } from "./ui/tier-indicator.ts";
+import { applyTierSelection, clearTierIndicator, modelSummary } from "./ui/tier-indicator.ts";
 import { openMissionsPanel } from "./ui/panel.ts";
 import {
 	acReviewLines,
@@ -23,7 +23,7 @@ import {
 } from "./ui/plan-review.ts";
 import { STATE_ICON } from "./ui/models-page.ts";
 import { formatTokens } from "./ui/dashboard.ts";
-import { ROLE_ORDER, resolveRoleView } from "./roles/models.ts";
+import { ROLE_ORDER, resolveRoleView, type RoleModelView } from "./roles/models.ts";
 import { ROLE_OF } from "./core/machine.ts";
 import type { MissionState } from "./core/types.ts";
 
@@ -40,9 +40,14 @@ export function registerCommands(pi: any, getRuntime: GetRuntime): void {
 				onSelectTier: (tier) => {
 					const rt = getRuntime(ctx);
 					rt.pendingTier = tier;
-					applyTierSelection(ctx, tier, () => {
-						getRuntime(ctx).pendingTier = null;
-					});
+					applyTierSelection(
+						ctx,
+						tier,
+						() => {
+							getRuntime(ctx).pendingTier = null;
+						},
+						roleModelSummary(rt, ctx),
+					);
 				},
 				onDetail: async (id) => {
 					const d = statusDataFor(rt0, id);
@@ -116,9 +121,14 @@ export function registerCommands(pi: any, getRuntime: GetRuntime): void {
 						return notifyUsage(ctx, "用法:/mission tier quick|standard|complex(取消:按 Esc)");
 					}
 					rt.pendingTier = t;
-					applyTierSelection(ctx, t, () => {
-						getRuntime(ctx).pendingTier = null;
-					});
+					applyTierSelection(
+						ctx,
+						t,
+						() => {
+							getRuntime(ctx).pendingTier = null;
+						},
+						roleModelSummary(rt, ctx),
+					);
 					return;
 				}
 
@@ -236,13 +246,10 @@ export function registerCommands(pi: any, getRuntime: GetRuntime): void {
 
 				case "models": {
 					// 显示**实际生效**的值:配了但不可用的模型会被静默回退到会话模型
-					const cfg = rt.modelsConfig();
 					const a = rt.active;
-					const avail = new Set(rt.availableModels(ctx).map((m) => `${m.provider}/${m.id}`));
-					const isAvailable = (p: string, m: string) => avail.size === 0 || avail.has(`${p}/${m}`);
-					const session = rt.sessionModelLabel(ctx);
-					const rows = ROLE_ORDER.map((role) => {
-						const v = resolveRoleView(cfg, role, isAvailable, session);
+					const views = roleModelViews(rt, ctx);
+					const rows = views.map((v) => {
+						const role = v.role;
 						const spent = a?.state.cost[role];
 						const tk = a?.state.tokens?.[role];
 						const tkSum = tk ? tk.input + tk.output + tk.cacheRead + tk.cacheWrite : 0;
@@ -264,6 +271,27 @@ export function registerCommands(pi: any, getRuntime: GetRuntime): void {
 			}
 		},
 	});
+}
+
+/**
+ * 四个角色**实际生效**的模型视图。档位指示条与 /mission models 必须走同一条
+ * 规则 —— 两处各算一遍可用性,迟早会出现"卡片说不可用、指示条说可用"。
+ */
+function roleModelViews(rt: Runtime, ctx: Ctx): RoleModelView[] {
+	const cfg = rt.modelsConfig();
+	const avail = new Set(rt.availableModels(ctx).map((m) => `${m.provider}/${m.id}`));
+	const isAvailable = (p: string, m: string) => avail.size === 0 || avail.has(`${p}/${m}`);
+	const session = rt.sessionModelLabel(ctx);
+	return ROLE_ORDER.map((role) => resolveRoleView(cfg, role, isAvailable, session));
+}
+
+/** 档位指示条上那一段模型摘要;拿不到会话模型时返回空串(指示条自动省略) */
+function roleModelSummary(rt: Runtime, ctx: Ctx): string {
+	try {
+		return modelSummary(roleModelViews(rt, ctx), rt.sessionModelLabel(ctx));
+	} catch {
+		return ""; // 模型信息是附加项,取不到不该拖垮档位选择
+	}
 }
 
 /** 新 Mission 的开场白。按起始相位分流(standard/complex 起于 DEFINE) */

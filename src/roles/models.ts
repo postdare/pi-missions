@@ -113,6 +113,22 @@ export function resolveRoleView(
 			};
 }
 
+/**
+ * 该角色实际会被 setModel 的那个模型,不带任何解释性后缀。
+ * label 是给人读的(带"跟随会话"/"→ 实际用 X"),做同异比较必须用这个 ——
+ * 拿 label 比会把"同一个模型的两种来源"误判成两个模型。
+ */
+export function actualModelOf(v: RoleModelView, sessionLabel: string): string {
+	switch (v.state) {
+		case "configured":
+			return v.label;
+		case "unavailable":
+			return v.actual;
+		case "inherit":
+			return sessionLabel;
+	}
+}
+
 /** 写回 missions/models.json。空配置也写文件 —— 面板改过就该有痕迹 */
 export function saveModelsConfig(file: string, cfg: ModelsConfig): void {
 	fs.mkdirSync(path.dirname(file), { recursive: true });
