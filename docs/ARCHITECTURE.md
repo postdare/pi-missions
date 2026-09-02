@@ -568,8 +568,19 @@ PREV FAILURE: <上一轮失败原因>
 ⏸ 换脑挂起中:<原因>。请执行 /mission next。
 ```
 
-同一钩子把 `missions/phases/<phase>.md` 追加进 system prompt ——
-**I8:走到哪一步读哪一层**。相位提示词在仓库里,用户可改,改了就是规范(I6)。
+同一钩子把相位提示词追加进 system prompt —— **I8:走到哪一步读哪一层**。
+选哪一份由 `phasePromptFor()`(`src/phase-prompts.ts`)决定,它按的是**判定装置**
+而不是档位名:
+
+- standard/complex 读 `missions/phases/<phase>.md`。提示词在仓库里,用户可改,
+  改了就是规范(I6);文件被删则走 `FALLBACK_PHASE_RULES`。
+- quick 走内联的 `QUICK_PHASE_RULES`,**完全不碰那个目录**。quick 不铺脚手架,
+  那里若有东西必然是别的 mission 留下的 —— 事故就出在这里:quick 在跑过 standard
+  的仓库里读到 `plan.md`,被指去调用 `mission_write_plan`(闸门里没有这个工具),
+  又在 `do.md` 里被指去跑不存在的 `verify.sh`。
+- 分流点不是 `tier === "quick"`:`evaluatePromotion` 在 ACT 之后发 `PROMOTE_TIER`,
+  只改档位、不改相位也不改判据,此刻 tier 已是 standard 而 verify.sh 依然不存在。
+  所以 PLAN 相位看档位(两者产出物不同),其余相位看**有没有冻结的 AC**。
 
 ### 4.14 tick(内层循环驱动)
 
@@ -721,7 +732,7 @@ git 提供 AC 冻结的审计链。
 | I5 | 每次升级必须换干净上下文 | `pendingHandoff` 硬阻断 + 磁盘握手 |
 | I6 | 不在仓库里的等于不存在 | `missions/` 全套 + `ensureScaffold()` |
 | I7 | 确定性判定归代码,语义判断归模型 | hard 证据零模型成本;升档判据机械可测 |
-| I8 | 上下文按相位分层加载 | `before_agent_start` 读 `phases/<phase>.md`(含 `define.md`) |
+| I8 | 上下文按相位分层加载 | `before_agent_start` + `phasePromptFor()`:standard 读 `phases/<phase>.md`,quick 走内联 `QUICK_PHASE_RULES` |
 | I9 | 环境不一致判 INCONCLUSIVE | 指纹比对 + `verdict.ts` 第 1 条 |
 
 ---

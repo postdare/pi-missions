@@ -8,21 +8,11 @@
  * 判定逻辑全部在 src/core/(纯函数,有单测);这里只做翻译。
  */
 
-import * as fs from "node:fs";
-import * as path from "node:path";
 import { Runtime, renderStateCard } from "./runtime.ts";
 import { registerMissionTools } from "./tools.ts";
 import { registerCommands } from "./commands.ts";
 import { TextCard, renderLogCard, renderVerdictCard, type VerdictCardData } from "./ui/renderer.ts";
-
-/** 相位提示词的兜底(仓库里的 missions/phases/*.md 被删时用) */
-const FALLBACK_PHASE_RULES: Record<string, string> = {
-	define: "你在 DEFINE 相位:只做问题定义。读代码;仍有影响完成条件的模糊就调用 mission_ask(一轮最多 3 个问题,每个必须带推荐答案;standard 2 轮、complex 3 轮),然后停下等人回答;清楚了就调用 mission_define 交出目标、完成条件(doneWhen)与边界。不写代码,不设计方案。",
-	plan: "你在 PLAN 相位:只读分析 + 调用 mission_write_plan 提交计划(方案 approach 在 complex 档必填;每条 AC 必须声明 covers,把 DEFINE 的完成条件逐条覆盖)。不写实现代码。人会在计划评审页逐段读它,可以打回并写意见。每条 AC 冻结时会被跑一遍核对基线(默认必须是红的,回归项显式声明 baseline: \"green\")。",
-	do: "你在 DO 相位:只完成 State Card 里的当前任务,完成后调用 mission_submit,不要自行判定通过。",
-	check: "你在 CHECK 相位:判定由系统执行,你不需要做任何事。",
-	act: "你在 ACT 相位:分析上一轮失败,给出修法或调用 mission_escalate。只有一轮,不能写代码。",
-};
+import { phasePromptFor } from "./phase-prompts.ts";
 
 export default function (pi: any) {
 	let rt: Runtime | null = null;
@@ -51,7 +41,14 @@ export default function (pi: any) {
 		const r = runtime(ctx.cwd);
 		const a = r.active;
 		if (!a || a.state.phase === "done" || a.state.phase === "halted") return;
-		const phasePrompt = readPhasePrompt(r, a.state.phase);
+		// 按**判定装置**选,不按相位一刀切:quick 读到 standard 的 plan.md/do.md,
+		// 会被指去调用闸门里没有的工具、跑不存在的 verify.sh(见 phase-prompts.ts)
+		const phasePrompt = phasePromptFor({
+			phasesDir: r.layout.phases,
+			phase: a.state.phase,
+			tier: a.state.tier,
+			frozenAcCount: a.plan.acceptanceCriteria.length,
+		});
 		return {
 			message: {
 				customType: "missions-state",
@@ -87,14 +84,4 @@ export default function (pi: any) {
 
 	registerMissionTools(pi, getRuntime);
 	registerCommands(pi, getRuntime);
-}
-
-function readPhasePrompt(rt: Runtime, phase: string): string {
-	try {
-		const file = path.join(rt.layout.phases, `${phase}.md`);
-		if (fs.existsSync(file)) return fs.readFileSync(file, "utf8");
-	} catch {
-		/* fall through */
-	}
-	return FALLBACK_PHASE_RULES[phase] ?? "";
 }
