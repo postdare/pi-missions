@@ -17,8 +17,8 @@ import { TextCard, renderLogCard, renderVerdictCard, type VerdictCardData } from
 
 /** 相位提示词的兜底(仓库里的 missions/phases/*.md 被删时用) */
 const FALLBACK_PHASE_RULES: Record<string, string> = {
-	frame: "你在 FRAME 相位:只做问题定义。读代码;仍有影响验收标准的模糊就调用 mission_ask 问一轮(整个 mission 只许一轮、最多 3 个问题),然后停下等人回答;清楚了就调用 mission_frame。不写代码,不设计方案。",
-	plan: "你在 PLAN 相位:只读分析 + 调用 mission_write_plan 提交计划。不写实现代码。每条 AC 冻结时会被跑一遍核对基线(默认必须是红的,回归项显式声明 baseline: \"green\")。",
+	define: "你在 DEFINE 相位:只做问题定义。读代码;仍有影响完成条件的模糊就调用 mission_ask(一轮最多 3 个问题,每个必须带推荐答案;standard 2 轮、complex 3 轮),然后停下等人回答;清楚了就调用 mission_define 交出目标、完成条件(doneWhen)与边界。不写代码,不设计方案。",
+	plan: "你在 PLAN 相位:只读分析 + 调用 mission_write_plan 提交计划(方案 approach 在 complex 档必填;每条 AC 必须声明 covers,把 DEFINE 的完成条件逐条覆盖)。不写实现代码。人会在计划评审页逐段读它,可以打回并写意见。每条 AC 冻结时会被跑一遍核对基线(默认必须是红的,回归项显式声明 baseline: \"green\")。",
 	do: "你在 DO 相位:只完成 State Card 里的当前任务,完成后调用 mission_submit,不要自行判定通过。",
 	check: "你在 CHECK 相位:判定由系统执行,你不需要做任何事。",
 	act: "你在 ACT 相位:分析上一轮失败,给出修法或调用 mission_escalate。只有一轮,不能写代码。",
@@ -42,11 +42,8 @@ export default function (pi: any) {
 		return new TextCard((t) => renderLogCard(t, d.title ?? "mission", d.body ?? ""), theme);
 	});
 
-	pi.on("session_start", async (_e: any, ctx: any) => {
-		// 子进程 Verifier 守卫:verifier-tools.ts 以 --no-extensions 启动,正常不会走到这;
-		// 若用户手动把本扩展和 verifier 混用,跳过一切 mission 行为
-		if (process.env.PI_MISSIONS_VERIFIER === "1") return;
-		await runtime(ctx.cwd).onSessionStart(ctx);
+	pi.on("session_start", async (event: any, ctx: any) => {
+		await runtime(ctx.cwd).onSessionStart(event, ctx);
 	});
 
 	// 注入 State Card + 相位提示词(I8:走到哪一步读哪一层)
@@ -58,7 +55,7 @@ export default function (pi: any) {
 		return {
 			message: {
 				customType: "missions-state",
-				content: renderStateCard(a.plan, a.state, r.config.missionsDir),
+				content: renderStateCard(a.plan, a.state, r.config.missionsDir, a.generation),
 				display: true,
 			},
 			systemPrompt: `${event.systemPrompt}\n\n${phasePrompt}`,
@@ -73,7 +70,7 @@ export default function (pi: any) {
 
 	// 证据采集辅助 + 升档指标 + 编辑级反馈
 	pi.on("tool_result", async (event: any, ctx: any) => {
-		runtime(ctx.cwd).onToolResult(event, ctx);
+		await runtime(ctx.cwd).onToolResult(event, ctx);
 	});
 
 	// 内层 tick —— 唯一安全的判定点
@@ -84,7 +81,7 @@ export default function (pi: any) {
 	// 成本分账(顺带刷新状态条上的成本/时长;空闲时无需心跳——成本只在 LLM 活动时变化)
 	pi.on("message_end", async (event: any, ctx: any) => {
 		const r = runtime(ctx.cwd);
-		r.onMessageEnd(event.message);
+		await r.onMessageEnd(event.message, ctx);
 		if (r.active) r.refreshWidget(ctx);
 	});
 

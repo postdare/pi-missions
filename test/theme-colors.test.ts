@@ -16,6 +16,7 @@ import { acLines, overviewLines, renderWidgetCard, taskBlocks, taskLines } from 
 import { modelRows, modelsFooter, pickerRows, type ModelsPageData } from "../src/ui/models-page.ts";
 import { renderTaskDetail } from "../src/ui/task-detail.ts";
 import { renderStatus } from "../src/ui/status-view.ts";
+import { renderPlanReview, SECTION_IDS, type ReviewSection } from "../src/ui/plan-review.ts";
 
 /** docs/themes.md 的前景色名(仅列本项目可能用到的部分) */
 const FG = new Set([
@@ -50,7 +51,7 @@ const plan: MissionPlan = {
 	missionId: "m1",
 	tier: "standard",
 	goal: "g",
-	acceptanceCriteria: [{ id: "AC1", text: "t", verify: "b1" }],
+	acceptanceCriteria: [{ id: "AC1", text: "t", verify: "b1", covers: ["DW1"] }],
 	milestones: [
 		{
 			id: "M1",
@@ -88,8 +89,8 @@ test("模型页的三种状态都不会用到不存在的颜色名", () => {
 	assert.doesNotThrow(() => pickerRows([], 0, undefined, strictTheme));
 });
 
-test("状态面板与 widget 的颜色名都合法(含 spike / frame 相位)", () => {
-	for (const phase of ["frame", "plan", "do", "check", "act", "done", "halted"] as const) {
+test("状态面板与 widget 的颜色名都合法(含 spike / define 相位)", () => {
+	for (const phase of ["define", "plan", "do", "check", "act", "done", "halted"] as const) {
 		const s = initialState({ missionId: "m1", tier: "standard", taskOrder: ["T1", "T2"] });
 		s.phase = phase;
 		s.currentTask = phase === "done" ? null : "T2";
@@ -128,6 +129,9 @@ test("任务详情页与状态视图在 strictTheme 下颜色名均合法", () =
 						raw: "Error on auth",
 						exitCode: 1,
 						durationMs: 120,
+						command: "npm test",
+						stdout: "output",
+						stderr: "error",
 					},
 				],
 			},
@@ -152,6 +156,16 @@ test("任务详情页与状态视图在 strictTheme 下颜色名均合法", () =
 		evidence: { latest: {} },
 		taskEvidence: { T1: detailDataT1.attempts },
 		spikeReports: { T2: detailDataSpike.spikeReport },
+		checkState: {
+			taskId: "T1",
+			attempt: 2,
+			startedAt: Date.now() - 2000,
+			updatedAt: Date.now(),
+			stage: "running_scripts" as const,
+			currentBranch: "AC1",
+			completedBranches: [{ acId: "lint", status: "pass" as const, durationMs: 100 }],
+			verifier: { status: "pending" as const },
+		},
 		logLines: ["10:00 start", "10:01 fail"],
 		dirName: "missions",
 	};
@@ -189,4 +203,69 @@ test("任务详情页与状态视图在 strictTheme 下颜色名均合法", () =
 			taskDetailScroll: 0,
 		}),
 	);
+});
+
+test("计划评审页的五段在 strictTheme 下颜色名均合法", () => {
+	const s = initialState({ missionId: "m1", tier: "complex", taskOrder: ["T1", "T2"] });
+	s.phase = "plan";
+	s.planReview = { rejections: 2, notes: ["AC2 不会红", "任务粒度太粗"] };
+
+	const full: MissionPlan = {
+		...plan,
+		tier: "complex",
+		definition: {
+			constraints: ["不动 schema"],
+			nonGoals: ["刷新令牌轮换"],
+			doneWhen: [{ id: "DW1", text: "旧中间件不再被引用" }],
+			verifySeam: "已有集成测试",
+			resolved: [{ q: "问", a: "答" }],
+			at: Date.now(),
+		},
+		approach: {
+			summary: "引入 JwtProvider",
+			decisions: [
+				{ id: "D1", text: "不动 User 表", why: "爆炸半径", rejected: "建 token 表", sticky: true },
+				{ id: "D2", text: "沿用中间件顺序", why: "限流" },
+			],
+		},
+		acceptanceCriteria: [
+			{ id: "AC1", text: "t", verify: "b1", covers: ["DW1"] },
+			{ id: "AC2", text: "回归", verify: "b2", baseline: "green", covers: ["DW1"] },
+		],
+		verifyScript: '#!/usr/bin/env bash\ncase "$1" in\n  b1) exit 1 ;;\nesac\n',
+	};
+
+	for (const section of SECTION_IDS as ReviewSection[]) {
+		for (const readOnly of [false, true]) {
+			assert.doesNotThrow(
+				() =>
+					renderPlanReview({
+						theme: strictTheme,
+						width: 88,
+						rows: 24,
+						data: { plan: full, state: s },
+						section,
+						scroll: 0,
+						readOnly,
+					}),
+				`renderPlanReview @${section} readOnly=${readOnly}`,
+			);
+		}
+	}
+
+	// 空数据路径(quick 档没有 definition、standard 可以没有 approach)也走一遍 —— 它们有各自的着色分支
+	for (const section of SECTION_IDS as ReviewSection[]) {
+		assert.doesNotThrow(
+			() =>
+				renderPlanReview({
+					theme: strictTheme,
+					width: 44,
+					rows: 24,
+					data: { plan, state: s },
+					section,
+					scroll: 0,
+				}),
+			`renderPlanReview 空数据 @${section}`,
+		);
+	}
 });

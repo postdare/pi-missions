@@ -6,6 +6,7 @@
  */
 
 import { visibleWidth } from "@earendil-works/pi-tui";
+import { fmtCheckDuration } from "./dashboard.ts";
 
 interface Theme {
 	fg(color: string, text: string): string;
@@ -43,7 +44,14 @@ export interface VerdictCardData {
 	taskId: string;
 	attempt: number;
 	verdict: { outcome: string; reason: string; signature?: string };
-	evidences: Array<{ level: string; acId: string; result: string; exitCode?: number; rawTail?: string }>;
+	evidences: Array<{
+		level: string;
+		acId: string;
+		result: string;
+		exitCode?: number;
+		durationMs?: number;
+		rawTail?: string;
+	}>;
 }
 
 export function renderVerdictCard(t: Theme, d: VerdictCardData): string[] {
@@ -57,8 +65,9 @@ export function renderVerdictCard(t: Theme, d: VerdictCardData): string[] {
 		),
 	];
 	for (const e of d.evidences) {
+		const duration = e.durationMs == null ? "" : `, ${fmtCheckDuration(e.durationMs)}`;
 		lines.push(
-			`   ${t.fg(COLOR[e.result] ?? "dim", ICON[e.result] ?? "?")} ${e.acId} ${t.fg("dim", `(${e.level}${e.exitCode != null ? `, exit=${e.exitCode}` : ""})`)}`,
+			`   ${t.fg(COLOR[e.result] ?? "dim", ICON[e.result] ?? "?")} ${e.acId} ${t.fg("dim", `(${e.level}${e.exitCode != null ? `, exit=${e.exitCode}` : ""}${duration})`)}`,
 		);
 		if (e.rawTail) {
 			for (const l of e.rawTail.split("\n").filter(Boolean).slice(-5)) {

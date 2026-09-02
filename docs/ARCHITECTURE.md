@@ -1,6 +1,8 @@
 # pi-missions 架构与术语
 
-> 本文描述**当前代码的实际行为**,不是设计意图或路线图。所有断言都带 `文件:行号`,
+> 本文描述**当前代码的实际行为**,不是设计意图或路线图。所有断言都指到**文件 + 符号名**
+> (`validatePlan()`、`ROLE_OF`、文件头注释),不写行号 —— 行号每次编辑都会漂,
+> 一份到处是错行号的文档比没有定位更糟;符号名 grep 得到,而且改名时会被一起发现。
 > 与代码不符以代码为准。README.md 是使用说明,本文是内部结构说明。
 
 ## 目录
@@ -32,7 +34,7 @@ pi-missions 是跑在 [pi](https://github.com/earendil-works/pi-coding-agent) �
 │                                                            │
 │  事件: session_start / before_agent_start / tool_call      │
 │        tool_result / agent_settled / message_end           │
-│         │                        (挂载见 src/index.ts:44-87)│
+│         │                        (挂载见 src/index.ts 的 pi.on)│
 │  ┌──────▼─── 扩展进程(本包)──────────────────────────┐   │
 │  │                                                     │   │
 │  │  src/index.ts        装配层:挂事件、注册工具与命令  │   │
@@ -42,7 +44,9 @@ pi-missions 是跑在 [pi](https://github.com/earendil-works/pi-coding-agent) �
 │  │       │                                             │   │
 │  │  ┌────▼─── src/core/ ── 纯函数,唯一裁判 ────────┐  │   │
 │  │  │  machine.ts   相位状态机 (state,event)→effects│  │   │
-│  │  │  frame.ts     FRAME 的提问预算                 │  │   │
+│  │  │  define.ts    DEFINE 的提问闸门 + 范围确认判据   │  │   │
+│  │  │  coverage.ts  完成条件 ↔ AC 的覆盖校验           │  │   │
+│  │  │  review.ts    计划打回的记账与硬拦                │  │   │
 │  │  │  spike.ts     探针任务的额度与结论判据          │  │   │
 │  │  │  breaker.ts   失败签名 + 熔断 + 升级判定       │  │   │
 │  │  │  verdict.ts   证据 → pass/fail/inconclusive    │  │   │
@@ -52,7 +56,7 @@ pi-missions 是跑在 [pi](https://github.com/earendil-works/pi-coding-agent) �
 │  │                                                     │   │
 │  │  src/store/   仓库读写(计划/状态/日志/证据/路径)   │   │
 │  │  src/hooks/   闸门 + 编辑级增量反馈                  │   │
-│  │  src/roles/   角色模型映射 + 子进程 Verifier         │   │
+│  │  src/roles/   角色模型映射 + 进程内 Verifier AgentSession │   │
 │  │  src/ui/      主面板 / 状态条 / 卡片                 │   │
 │  └─────────────────────────────────────────────────────┘   │
 └────────────────────────────────────────────────────────────┘
@@ -63,7 +67,7 @@ pi-missions 是跑在 [pi](https://github.com/earendil-works/pi-coding-agent) �
 
 ### core 的纯净性是硬约束
 
-`src/core/types.ts:3-7` 写明:core 下所有模块不 import pi、不读文件、不调网络、
+`src/core/types.ts` 文件头写明:core 下所有模块不 import pi、不读文件、不调网络、
 除事件携带的 `at` 之外不依赖环境。
 
 这是"L0 是唯一裁判"的物理保证 —— 裁判必须可单测。`npm test` 里 core 的 49 个单测
@@ -71,12 +75,12 @@ pi-missions 是跑在 [pi](https://github.com/earendil-works/pi-coding-agent) �
 
 ### runtime 的角色被刻意收窄
 
-`src/runtime.ts:4-6` 写明 runtime **不做任何判定**,只做四件事:
+`src/runtime.ts` 文件头写明 runtime **不做任何判定**,只做四件事:
 
 1. 采集证据
 2. 调 `judge()`
 3. 把事件喂给 `machine`
-4. 把返回的 `Effect[]` 翻译成 pi API 调用(`src/runtime.ts:274`)
+4. 把返回的 `Effect[]` 翻译成 pi API 调用(`translateEffects()`)
 
 所有"对不对 / 升不升 / 停不停"的决定都在 core 里。
 
@@ -85,10 +89,13 @@ pi-missions 是跑在 [pi](https://github.com/earendil-works/pi-coding-agent) �
 UI 层同样保持纯函数设计,所有视图接收不可变数据对象并输出终端行数组:
 - `src/ui/chrome.ts`: 基础框架积木(圆角盒 `boxTop`/`boxRow`/`boxBot`、`wrap` 悬挂折行、`ruleLabel`、`hintBar`、`tabs`、`miniBar`)。
 - `src/ui/panel.ts`: `/missions` 主面板(任务列表、模型页)。
+- `src/ui/plan-review.ts`: 冻结前的计划评审页(五段:目标与边界 / 方案 / 验收标准 / 任务 /
+  verify.sh 全文;`Enter` 批准、`R` 打回并写意见)。`/mission plan` 用 `readOnly` 打开同一页。
 - `src/ui/status-view.ts`: `/mission status` 状态视图与按键交互(支持 `mode: "mission" | "task-detail"` 切换,任务列表焦点下 `↑↓` 选中任务,`Enter` 展开详情,`Esc`/`Backspace` 返回)。
-- `src/ui/task-detail.ts`: 任务详情视图纯渲染(任务定义、执行状态、验收标准、全部 attempt 的 stdout/stderr 原始证据、spike 结论正文)。
-- `src/ui/dashboard.ts`: 状态卡片与内容分块(`taskBlocks`、`taskLines`、`overviewLines`、`acLines`、`renderWidgetCard`)。
+- `src/ui/task-detail.ts`: 任务详情视图纯渲染(任务定义、实时 CHECK 进度、验收标准、全部 attempt 的 stdout/stderr 原始证据、spike 结论正文)。
+- `src/ui/dashboard.ts`: 状态卡片与内容分块(`taskBlocks`、`taskLines`、`overviewLines`、`checkProgressLines`、`acLines`、`renderWidgetCard`)。
 - `src/store/evidence.ts:readTaskEvidenceHistory()`: 只读聚合磁盘 `missions/state/<id>/evidence/` 历史 JSON,容错解析损坏文件。
+- `src/store/check.ts`: L0 独占写入 `CHECK.json`,记录当前子阶段、分支、Verifier 状态与耗时;状态视图每 2 秒读取。
 
 ---
 
@@ -96,11 +103,11 @@ UI 层同样保持纯函数设计,所有视图接收不可变数据对象并输�
 
 ### 相位(Phase)
 
-`src/core/types.ts:11`,六个值:
+`Phase`(`src/core/types.ts`),六个值:
 
-| 相位 | PDCA | 谁在动 | 工具集(`src/hooks/gate.ts:20`) |
+| 相位 | PDCA | 谁在动 | 工具集(`toolsForPhase()`) |
 |---|---|---|---|
-| `frame` | — | LLM(planner) | 只读 + `mission_ask` + `mission_frame` |
+| `define` | — | LLM(planner) | 只读 + `mission_ask` + `mission_define` |
 | `plan` | P | LLM(planner) | 只读 + `mission_write_plan` |
 | `do` | D | LLM(executor) | 全部内置工具 + `mission_submit` |
 | `check` | C | **L0,没有 LLM 回合** | 只读 |
@@ -113,16 +120,16 @@ UI 层同样保持纯函数设计,所有视图接收不可变数据对象并输�
 升级阶梯就是这张图上的反向边 —— 升级 = 往回走一格,不是一套外挂机制:
 
 ```
-FRAME ──▶ PLAN ──▶ DO ⇄ CHECK ──▶ ACT
+DEFINE ─▶ PLAN ──▶ DO ⇄ CHECK ──▶ ACT
   ▲         ▲        ▲                │
   └─ L3 ────┴─ L2 ───┴──── L1 ────────┘
 改问题定义   改方案        改实现
 ```
 
 ```
-   ┌───────┐ FRAME_DONE ┌──────┐ PLAN_FROZEN ┌──────┐ SUBMIT ┌───────┐
-   │ FRAME │───────────▶│ PLAN │────────────▶│  DO  │───────▶│ CHECK │
-   └───────┘            └──────┘             └──────┘        └───┬───┘
+   ┌────────┐ DEFINE_DONE┌──────┐ PLAN_FROZEN ┌──────┐ SUBMIT ┌───────┐
+   │ DEFINE │───────────▶│ PLAN │────────────▶│  DO  │───────▶│ CHECK │
+   └────────┘            └──────┘             └──────┘        └───┬───┘
        ▲                    ▲                   ▲               │ VERDICT
        │                    │       ADJUST_DONE │   ┌───────────┴───────────┐
        │                    │      ┌────────────┘   │ pass → 下一任务/done  │
@@ -134,7 +141,7 @@ FRAME ──▶ PLAN ──▶ DO ⇄ CHECK ──▶ ACT
        └───────────────────────────┘  escalate L3(人工确认后)
 ```
 
-`FRAME_ASKED` 不迁移相位,只记提问账。
+`DEFINE_ASKED` 不迁移相位,只记提问账。
 
 ### 纯 reducer
 
@@ -142,15 +149,15 @@ FRAME ──▶ PLAN ──▶ DO ⇄ CHECK ──▶ ACT
 transition(state: MissionState, event: MissionEvent): { state, effects, error? }
 ```
 
-`src/core/machine.ts:62`。非法迁移**不抛异常**,返回 `error` 字段且状态不变,
+`transition()`(`src/core/machine.ts`)。非法迁移**不抛异常**,返回 `error` 字段且状态不变,
 调用方记录并忽略该事件。
 
-**13 个事件**(`src/core/types.ts`):
-`FRAME_ASKED` `FRAME_DONE` `PLAN_FROZEN` `SUBMIT` `VERDICT` `ADJUST_DONE` `ESCALATE`
-`ESCALATION_CONFIRMED` `ESCALATION_REJECTED` `HANDOFF_REQUEST` `HANDOFF_DONE`
-`PROMOTE_TIER` `ABORT`
+**15 个事件**(`src/core/types.ts`):
+`DEFINE_ASKED` `DEFINE_DONE` `PLAN_FROZEN` `PLAN_REJECTED` `SUBMIT` `VERDICT` `ADJUST_DONE`
+`ESCALATE` `ESCALATION_CONFIRMED` `ESCALATION_REJECTED` `HANDOFF_REQUEST` `HANDOFF_DONE`
+`PROMOTE_TIER` `RECORD_ROLE_COST` `ABORT`
 
-**11 个效果**(`src/core/types.ts:144-160`):
+**11 个效果**(`Effect`,`src/core/types.ts`):
 `SET_TOOLS` `SET_ROLE` `HANDOFF` `LOG` `CONFIRM` `ADVANCE_TASK` `FREEZE_AC`
 `PERSIST_PLAN` `ARCHIVE_PLAN` `RESTORE` `NOTIFY`
 
@@ -166,39 +173,39 @@ transition(state: MissionState, event: MissionEvent): { state, effects, error? }
 
 - **L0** —— 层级概念,指扩展进程里的纯代码裁判(相对 L1 = LLM 执行者的分层)。
   "L0 亲自跑 verify.sh"就是这个意思。
-- **L1/L2/L3** —— `EscalationLevel`(`src/core/types.ts:16`),**升级阶梯**:
+- **L1/L2/L3** —— `EscalationLevel`(`src/core/types.ts`),**升级阶梯**:
 
 | 级别 | 含义 | 改什么 | 落点 |
 |---|---|---|---|
 | L1 | 改实现 | 代码 | ACT → DO(默认级别,`escalation.level` 初值 1) |
 | L2 | 改方案 | 任务分解,**AC 不变** | 回 PLAN,强制换脑 |
-| L3 | 改问题定义 | **可改 AC**,需人工确认 | 回 **FRAME**,归档旧计划 + 换脑 + 重置提问预算 |
+| L3 | 改问题定义 | **可改 AC**,需人工确认 | 回 **DEFINE**,归档旧计划 + 换脑 + 重置提问预算 |
 
-`escalation.level` 是 **mission 级**的单调递增值,`src/core/machine.ts:255` 拒绝降级。
+`escalation.level` 是 **mission 级**的单调递增值,`ESCALATE` 的 handler(`src/core/machine.ts`)拒绝降级。
 
 ### 4.2 档位(Tier)
 
-`quick | standard | complex`(`src/core/types.ts:13`)。**升档自动,降档手动。**
+`quick | standard | complex`(`Tier`,`src/core/types.ts`)。**升档自动,降档手动。**
 
 | | quick | standard | complex |
 |---|---|---|---|
 | 入口 | `/mission quick --verify "<命令>"` | `/mission new` | `/mission new --tier=complex` |
-| 起始相位 | `plan`(建好即冻结进 DO) | `frame` | `frame` |
+| 起始相位 | `plan`(建好即冻结进 DO) | `define` | `define` |
 | 落盘 | 否(`inMemory: true`) | 是 | 是,里程碑分文件 |
-| 判定依据 | 一条裸命令 `quickVerifyCommand`,**进 DO 前冻结** | verify.sh 分支 + 子进程 Verifier | 同左 + 里程碑回归 |
+| 判定依据 | 一条裸命令 `quickVerifyCommand`,**进 DO 前冻结** | verify.sh 分支 + 进程内独立 Verifier | 同左 + 里程碑回归 |
 | 熔断阈值 | 2 | 3 | 3 |
 | 尝试硬上限 | 4 | 9 | 12 |
 | 任务切换换脑 | 否 | 否 | **是** |
 
-阈值见 `src/core/breaker.ts:21`(THRESHOLD)与 `:28`(ATTEMPT_HARD_CAP)。
+阈值见 `src/core/breaker.ts` 的 `THRESHOLD` 与 `ATTEMPT_HARD_CAP`。
 
-升档判据在 `src/core/tier.ts:39` `evaluatePromotion()`,全部机械可测:
+升档判据在 `evaluatePromotion()`(`src/core/tier.ts`),全部机械可测:
 触及公开 API / 改动 > 5 文件 / quick 档第 2 次尝试 / standard 档 2 次 L2。
 **刻意不让 LLM 自评"这任务复杂吗"**(I7)。
 
 ### 入口守卫(准入判定)
 
-`evaluateAdmission()`(`src/core/tier.ts:80`)决定一个 mission 能否直接进 DO:
+`evaluateAdmission()`(`src/core/tier.ts`)决定一个 mission 能否直接进 DO:
 
 - quick 档**必须**在进 DO 前拿到一条验证命令(`/mission quick --verify "<命令>"`)
 - 拿不到 → 不进 DO,自动升 standard,由 PLAN 相位写出可执行的 AC
@@ -209,15 +216,18 @@ transition(state: MissionState, event: MissionEvent): { state, effects, error? }
 
 ### 4.3 角色(Role)
 
-`planner | executor | verifier | escalator`(`src/core/types.ts:18`)。两个用途:
+`planner | executor | verifier | escalator`(`Role`,`src/core/types.ts`)。两个用途:
 
 1. **模型映射** —— `missions/models.json` 给每个角色配 provider/model/thinking
    (`src/roles/models.ts`),进相位时 `applyRole()` 切换。默认 thinking:
    planner=high、escalator=high、verifier=off。
-2. **成本分账** —— `state.cost` 是 `Partial<Record<Role, number>>`,
-   `/mission models` 查看每个角色的花费。
+2. **成本分账** —— `state.cost` 是 `Partial<Record<Role, number>>`(美元),
+   `state.tokens` 是 `Partial<Record<Role, RoleTokenUsage>>`(input/output/cacheRead/
+   cacheWrite 逐字段累计)。两本账并列的原因:自建网关常不报价(`cost.total = 0`),
+   美元账是空的但 token 账永远是真的 —— verifier 的 `RECORD_ROLE_COST` 无条件记,
+   面板/widget 在美元为零时改显 token。`/mission models` 查看每个角色的花费。
 
-相位到角色的映射是常量表 `ROLE_OF`(`src/core/machine.ts:42`),
+相位到角色的映射是常量表 `ROLE_OF`(`src/core/machine.ts`),
 `done`/`halted` 映射到 `null`。
 
 **面板编辑**(`/missions` 的「模型」页,`src/ui/models-page.ts`)直接写
@@ -230,66 +240,108 @@ transition(state: MissionState, event: MissionEvent): { state, effects, error? }
 - 改动写 LOG.md;改的若是当前相位的角色则立刻 `applyRole`,否则等下次相位切换。
   verifier 变更额外告警:它是 I3 的独立判定者,中途更换意味着前后 semi 证据不同源
 
-### 4.4 FRAME(问题定义)
+### 4.4 DEFINE(问题定义)
 
-`Phase = "frame"`,standard/complex 的起始相位(`START_PHASE`,`src/core/machine.ts`)。
+`Phase = "define"`,standard/complex 的起始相位(`START_PHASE`,`src/core/machine.ts`)。
 
 **存在的理由**:AC 必须在 PLAN 冻结且必须可执行(I2)。需求模糊时写不出这样的 AC,
 系统的入口条件就不成立;此时 agent 的行为是可预测的 —— **它会编一条 AC 出来凑格式**,
-然后整套判定建立在一条假标准上。FRAME 把 L3(改问题定义)提到最前面。
+然后整套判定建立在一条假标准上。DEFINE 把 L3(改问题定义)提到最前面。
+
+**三类模糊**(决定该走哪个出口,写在 `templates/phases/define.md` 里):
+描述不清 → `mission_ask`(答案在人脑子里);事实不明 → 自己读代码,读不出来就进 PLAN 排
+spike(答案在代码里,问人无效);方案未定 → 自己造选项、带推荐答案去问。
 
 **两个工具**:
 
-- `mission_ask(questions[])` —— 把"不知道就写不出 AC"的问题交给人。
-  预算由 L0 强制(`evaluateAsk()`,`src/core/frame.ts`):**整个 mission 只许问一轮、
-  最多 3 个**,第二次调用直接拒绝,超额直接拒绝。轮数记在 `state.frameAsks`
-  (事件 `FRAME_ASKED`,老 STATE.json 缺此字段按 0 算)。
-- `mission_frame({goal, constraints, nonGoals})` —— 交出锐化后的目标与边界,
-  写进 `plan.framing`,发 `FRAME_DONE` 进 PLAN。约束与非目标会出现在 State Card
-  和 MISSION.md 的 `## Frame` 段,`mission` fence 里也带,resume 时能还原。
+- `mission_ask({questions[], settled[]})` —— 把"不知道就写不出完成条件"的问题交给人。
+  闸门由 L0 强制(`evaluateAsk()`,`src/core/define.ts`),四条:
+  ① 每个问题必须带 `recommend`(推荐答案)与 `impact`,缺一即拒;
+  ② 一轮 ≤ `DEFINE_QUESTION_CAP`(3);
+  ③ 轮次上限按档位(`roundCapFor`:standard 2、complex 3、quick 0);
+  ④ **结账判据** —— 第二轮起要求 `settled.length` 严格大于上一轮的快照。
+  轮数记在 `state.defineAsks`、快照记在 `state.defineSettled`(事件 `DEFINE_ASKED`)。
 
-**退出条件要诚实**:FRAME 的产出是一句话,不是可执行的东西,**没有**机械判据能证明
-"这个目标已经足够清楚"。真正的过滤器仍在下游 —— `validatePlan()` 与冻结基线(4.5.1)。
-FRAME 的价值是让"想不清楚"在烧掉一轮 PLAN 之前暴露,并给人一次介入机会;
-这里唯一机械可测的是提问预算,而它约束的是**追问次数**,不是答案质量。
+  ①改变了提问的经济学:带推荐答案的问题人回一句"用你的"就完了,一轮的成本从
+  "写一段需求"降到"回车",于是轮数付得起。④负责收敛,与 `breaker.ts` 同构 ——
+  那里数"同一失败签名连续出现",这里数"提问没有推进决策"。
+
+- `mission_define({goal, doneWhen, constraints, nonGoals, verifySeam?, resolved?})` ——
+  写进 `plan.definition`,发 `DEFINE_DONE` 进 PLAN。三条运行时守卫在 `Runtime.define()`:
+  `doneWhen` 不能为空;调用过 `mission_ask` 就必须交 `resolved`(问答落盘 ——
+  人的回答只活在上下文里,换脑即丢,而额度已经烧掉);
+  `needsScopeConfirm(tier, defineAsks)` 为真时先弹**范围确认**
+  (complex 恒确认,standard 仅当问过至少一轮),被拒则停在 DEFINE 且轮次不返还。
+
+  范围确认走 `ctx.ui.confirm` 而不是 `CONFIRM` effect —— 它与 PLAN 的冻结确认同形状
+  (确认在事件之前、拒绝则相位不动);`CONFIRM` effect 那条路是给机器**主动发起**的
+  L3 用的,套过来要给状态机加一个"等确认"的中间态,不值得。
+
+**退出条件**:目标本身仍然判不了"够不够清楚"(见 8.3)。但**判不了"清楚",
+不代表判不了"覆盖"** —— `doneWhen` 与 `AcceptanceCriterion.covers` 之间有一条机械判据:
+`evaluateCoverage()`(`src/core/coverage.ts`)要求每条 DW 至少被一条 AC 覆盖(没漏)、
+每条 AC 至少覆盖一条 DW(没夹带),在 `writePlan()` 里与 `validatePlan` 并列执行。
+覆盖校验只在 `plan.definition` 存在时跑 —— quick 档不经过 DEFINE 相位。
+反过来说,**definition 一旦存在,`doneWhen` 就必须非空**(空数组本身是错误),
+每条 AC 也必须带 `covers`:开发期不留可以为空的口子,否则这条判据等于没有。
+
+这条边让升级阶梯的三级第一次各有物理落点:L1 → 代码;L2 → `plan.approach`;
+L3 → `definition.doneWhen` / `nonGoals`。
 
 **角色复用 planner**:同一种"读代码 + 想清楚问题"的工作,不为一个只跑一两轮的相位
-在 models.json 和成本分账里多开一个维度。代价是 FRAME 的花费并进 planner 账下。
+在 models.json 和成本分账里多开一个维度。代价是 DEFINE 的花费并进 planner 账下。
 
-### 4.4 AC(验收标准)与 verify 分支
+### 4.5 AC(验收标准)与 verify 分支
 
 ```ts
-{ id: "AC1", text: "人类可读的验收描述", verify: "auth-integration", baseline: "red" }
+{ id: "AC1", text: "人类可读的验收描述", verify: "auth-integration", baseline: "red", covers: ["DW1"] }
 ```
 
-**`verify` 不是命令,是 `missions/scripts/verify.sh` 的一个分支名**
-(`src/store/mission.ts:15`:"不写裸命令")。判定时 L0 执行的是
-`bash missions/scripts/verify.sh auth-integration`,取退出码(`src/runtime.ts:420`)。
+**`verify` 不是命令,是当前 mission generation 中 `verify.sh` 的一个分支名**
+(`AcceptanceCriterion.verify`:"不写裸命令")。判定时 L0 从 SNAPSHOT 取 generation,
+校验脚本 hash,再执行 `bash missions/state/<id>/generations/<n>/verify.sh auth-integration`,
+取退出码(`runBranch()`,`src/runtime.ts`)。
 
 这是整个设计的枢纽:**AC 必须有可执行入口,否则写不进计划。**
-`validatePlan()`(`src/store/mission.ts:67`)在冻结前校验:
+`validatePlan()`(`src/store/mission.ts`)在冻结前校验:
 
 - 至少一条 AC、至少一个任务、goal 非空
 - 每条 AC 必须有非空 `verify`
 - 每个任务必须至少有一个 verify 分支("无法判定的事不该进入 DO")
 - 所有 verify 分支必须能在 verifyScript 文本里找到
-  —— `scriptHasBranch()`(`src/store/mission.ts:103`)正则粗检 `name)` / `"name"` / `name()`
+  —— `scriptHasBranch()`(`src/store/mission.ts`)正则粗检 `name)` / `"name"` / `name()`
+- complex 档必须有 `approach`(summary 与 decisions 非空,每条决策有 `why`)
 
-### 4.5 冻结(Freeze)
+`covers`(这条 AC 覆盖哪几条完成条件)不在这里校验 —— 它判的是**两份产物之间的关系**,
+归 `evaluateCoverage()`(4.4),在 `writePlan()` 里与 `validatePlan()` 并列执行。
 
-`mission_write_plan` 是**原子提交**:MISSION.md 内容 + verify.sh 内容一次写入。
+### 4.6 冻结(Freeze)
+
+`mission_write_plan` 是对外原子发布:plan/state/handoff 与冻结件由同一个 v2 snapshot
+revision 绑定。磁盘写入顺序固定:
+
+1. 在 `generations/.tmp-<n>-<uuid>/` 写 MISSION.md 与 verify.sh
+2. 计算并记录两者 SHA-256
+3. 原子 rename 为不可变 `generations/<n>/`
+4. 以 CAS 校验 expected revision,最后原子替换 SNAPSHOT.json
+
+进程在第 4 步前退出,旧 SNAPSHOT 仍指向旧 generation;第 4 步后退出,新 snapshot
+已经完整可读。CURRENT 只是定位提示,其 revision 落后时以 SNAPSHOT 为准。
 冻结路径有四道关,顺序固定:
 
-1. **结构校验** —— `validatePlan()`:AC/任务/verify 分支的完整性
-2. **人工确认** —— `ctx.ui.confirm`,最重要的一次人工介入
-3. **基线跑** —— 落 verify.sh,逐条跑 AC 分支,`evaluateBaseline()` 核对红绿(见 4.5.1)
-4. **冻结** —— 落 MISSION.md、发 `PLAN_FROZEN`,`FREEZE_AC` 效果记录环境指纹并提示提交 git
+1. **结构校验** —— `validatePlan()`(AC/任务/verify 分支的完整性,以及 complex 的
+   `approach` 必填)+ `evaluateCoverage()`(完成条件覆盖)+ `validateSpikePlan()`(探针额度)
+2. **人工评审** —— `openPlanReview()`(`src/ui/plan-review.ts`),最重要的一次人工介入。
+   五段可滚动:目标与边界 / 方案 / 验收标准 / 任务 / **verify.sh 全文**。
+   见 4.6.2
+3. **基线跑** —— 落 verify.sh,逐条跑 AC 分支,`evaluateBaseline()` 核对红绿(见 4.6.1)
+4. **冻结** —— 发布 generation + SNAPSHOT、发 `PLAN_FROZEN`,记录环境指纹并提示提交 git
 
 前三关任意一关不过,计划都不冻结,相位停在 PLAN,错误信息回给 planner 自己修。
 基线跑放在人工确认**之后**是刻意的:PLAN 相位不执行任何东西(工具集里没有 bash),
 这一跑属于进入 DO 的过渡动作,而且跑的是人刚刚批准的那份脚本。
 
-#### 4.5.1 基线判定
+#### 4.6.1 基线判定
 
 `evaluateBaseline()`(`src/core/baseline.ts`,纯函数):
 
@@ -314,27 +366,56 @@ FRAME 的价值是让"想不清楚"在烧掉一轮 PLAN 之前暴露,并给人�
 冻结后 AC 只读,由三道锁保护:
 
 1. **工具集** —— DO 相位没有 `mission_write_plan`
-2. **闸门** —— `src/hooks/gate.ts:57-68` 拦 `missions/plans/`、`missions/state/`、
-   非 plan 相位的 `verify.sh` 的 edit/write
-3. **bash 粗检** —— `src/hooks/gate.ts:71-79` 拦 `>` `sed -i` `tee` `rm` 等写操作
+2. **闸门** —— `gateCheck()` 的冻结件分支(`src/hooks/gate.ts`)拦整个
+   `missions/state/` 的 edit/write,包括 SNAPSHOT 与所有 generation
+3. **bash 粗检** —— `gateCheck()` 的 bash 分支拦 `>` `sed -i` `tee` `rm` 等写操作
    指向受保护路径
 
-### 4.6 证据(Evidence)三级
+#### 4.6.2 计划评审与打回
 
-`src/core/types.ts:29-33`:
+原来这一关是一个 `ctx.ui.confirm`:整份计划被压成一段字符串(目标 + AC 行 + "任务数:8"),
+任务本体、里程碑、方案、verify.sh 全文都看不到 —— 等于让人批准一份没读过的合同。
+而拒绝返回的是一句死字符串,**"反馈"没有任何载体**,planner 只收到 1 bit。
+
+现在:
+
+- `openPlanReview()` 摊开五段(`Tab`/`←→` 切段,`↑↓` 各自滚动),`Enter` 批准、`R` 打回。
+  渲染是纯函数 `renderPlanReview()`,进 `test/render.test.ts` 的宽度矩阵与
+  `test/theme-colors.test.ts` 的严格主题。
+- 打回意见在**关页之后**由 `Runtime.rejectPlan()` 用 `ctx.ui.editor` 收 ——
+  在 `ui.custom` 里嵌一层 `ui.editor` 会把 TUI 叠坏。意见回传 planner,并落
+  `state.planReview.notes`、LOG.md 与 State Card 的 `PREV REJECTION`(换脑后仍读得到)。
+- 记账与硬拦在 `evaluatePlanReview()`(`src/core/review.ts`,`PLAN_REJECT_CAP = 3`):
+  到上限时 `PLAN_REJECTED` 走**与 `ESCALATION_CONFIRMED` 相同的落点** ——
+  `phase = define`、`escalation.level = 3`、重置 `defineAsks`/`defineSettled`、
+  `ARCHIVE_PLAN` + `HANDOFF`。理由:同一份问题定义下改了三版方案人都不满意,
+  问题多半不在方案;继续在 PLAN 里磨等于在错的问题上做高质量的工作。
+
+冻结之后 `/mission plan` 用同一份 snapshot 渲染只读页面。现在 goal/definition
+从 mission 创建起就进入 SNAPSHOT,冻结时再发布新的 generation:
+snapshot 中的 plan/state 是换脑与重启后 `attach()` 的恢复锚点(I1),否则 define/plan 阶段的
+mission 一旦会话重建就永久失联。
+
+### 4.7 证据(Evidence)三级
+
+`EvidenceLevel`(`src/core/types.ts`)的文档注释:
 
 | 级别 | 来源 | 成本 | 能否触发 PASS |
 |---|---|---|---|
 | **hard** | L0 直接跑 verify.sh 拿退出码 | 零模型成本 | 能 |
-| **semi** | 独立 Verifier 子进程逐条核对 AC | 一次冷启动 pi 进程 | 能 |
+| **semi** | 进程内独立 Verifier AgentSession 逐条核对 AC | 一次只读 AgentSession | 能 |
 | **soft** | 执行者自述 | — | **永远不能**,只能触发 ACT |
 
-**semi 的独立性靠进程隔离**:`src/roles/verifier.ts` 起一个 `pi -p --no-extensions`
-子进程,只给 read + bash,喂 git diff + 冻结的 AC + hard 结果,逐条核对后调
-`mission_verdict` 返回结论。它**不能写文件** —— `templates/phases/check.md` 写明理由:
-"验证者一旦能改代码,就会顺手修一下然后判自己通过"。
+**semi 的独立性靠会话隔离**:`src/roles/verifier.ts` 用 pi SDK 的
+`createAgentSession` + `SessionManager.inMemory` 起一个 in-memory 会话,
+只给只读工具(read/grep/find/ls + 结构化 `mission_verdict`,没有 edit/write/bash),
+喂 git diff + 冻结的 AC + hard 结果,逐条核对后调 `mission_verdict` 返回结论。
+它**不能写文件** —— `templates/phases/check.md` 写明理由:
+"验证者一旦能改代码,就会顺手修一下然后判自己通过"。Verifier 不写盘、不挂 pi
+扩展(`ResourceLoader` 显式置空),结论只通过工具参数回到 L0,判定权仍在
+`judge()`。配置的 verifier 模型解析不到时显式降级 hard-only,不静默退回会话模型。
 
-### 4.6.1 探针任务(spike)
+#### 4.7.1 探针任务(spike)
 
 `PlanTask.kind = "spike"`(缺省 `"impl"`)。用于**答案不在人那里、在代码里**的模糊:
 私有 API 用在几处、瓶颈在哪一层、升级报几个错。这类问题 `mission_ask` 无效。
@@ -361,28 +442,38 @@ FRAME 的价值是让"想不清楚"在烧掉一轮 PLAN 之前暴露,并给人�
 更重要的是,允许探针的产出直接进实现,等于给了一条"在没有 AC 的状态下改代码"的通路,
 绕过整个验证闸门。换脑也是必须的 —— 探针上下文里全是调研噪音(I5)。
 
-### 4.7 判定(Verdict)
+### 4.8 判定(Verdict)
 
-`judge(evidences, options)`(`src/core/verdict.ts:28`),七条优先级自上而下命中即返回:
+`judge(evidences, options)`(`src/core/verdict.ts`),七条优先级自上而下命中即返回:
 
 ```
 0. 无证据                → inconclusive   ← 防"没跑就算过"
 1. 环境指纹不符          → inconclusive   ← I9
-2. 任一证据 inconclusive → inconclusive
+2. 必需范围内的证据
+   inconclusive          → inconclusive   ← 范围外 AC 的无结论只是信息:
+                                             CHECK 按任务收集证据,挂在后续任务的
+                                             AC(典型:lint/build 回归)verifier 永远
+                                             判不出,让它阻断 = 当前任务注定熔断
 3. 任一 hard fail        → fail
 4. 必需 AC 缺证据        → inconclusive   ← 防漏跑当通过
-5. 任一 semi fail        → fail
+5. 任一 semi fail        → fail           ← 范围外也算:改坏了别人的回归项要拦
 6. 只有 soft 证据        → inconclusive   ← I3
 7. 其余                  → pass
 ```
 
 `inconclusive` 是第三态,**不是失败**:不计 attempts、不进熔断、直接回 DO
-(`src/core/machine.ts:126-160`)。但连续 `INCONCLUSIVE_STREAK_CAP = 3` 次
-(`src/core/machine.ts:52`)直接停机等人 —— 环境没人修,重试没有意义。
+(`VERDICT` 的 handler,`src/core/machine.ts`)。但连续 `INCONCLUSIVE_STREAK_CAP = 3` 次
+(`src/core/machine.ts`)直接停机等人 —— 环境没人修,重试没有意义。
 
-### 4.8 失败签名(Signature)与熔断(Breaker)
+**防空转与补证据闸门**:
+`verdict.ts` 对 `inconclusive` 进行双因分类(`inconclusiveCause`):
+- `env`:环境指纹漂移。无需改代码,不受补证据闸门限制(仅受连续 3 次停机兜底)。
+- `evidence`:缺机械断言、范围内核验无结论或仅有 soft 证据。此时状态机在当前任务挂起 `awaitingEvidence`,记录提交时的工作区树指纹(`treeFp`)及缺失的 `missingAcIds`。
+- **重交拦截**:在工作区未发生任何改动(git tree 指纹一致)时,执行者原样再次调用 `mission_submit` 会被状态机直接拦截并拒绝迁移,促使其补充有效机械断言或修改代码;当工作区产生修改(`treeFp` 变化)后放行,或通过 `mission_escalate` 升级方案。非 git 仓库自动退化放行。
 
-**签名** —— 把失败输出压成稳定的规范串再哈希。`normalize()`(`src/core/breaker.ts:69`)
+### 4.9 失败签名(Signature)与熔断(Breaker)
+
+**签名** —— 把失败输出压成稳定的规范串再哈希。`normalize()`(`src/core/breaker.ts`)
 丢弃行号、绝对路径、时间戳、耗时、对象 hash、UUID,只保留四类 token:
 
 - `test:AuthTest#refreshToken` —— 测试标识
@@ -391,15 +482,15 @@ FRAME 的价值是让"想不清楚"在烧掉一轮 PLAN 之前暴露,并给人�
 - `diag:ts2345` —— 编译/类型错误码
 
 抽不到任何 token 时退化为前三行的紧凑形式,而不是"永不相同"。
-最终 `sha256` 取前 12 位,`acId` 参与签名(`src/core/breaker.ts:110`),
+最终 `sha256` 取前 12 位,`acId` 参与签名(`signatureOf()`),
 不同 AC 的相同异常不会被合并。
 
-`src/core/breaker.ts:12-14` 标注这是**全文件最需要按实际数据调的参数**:
+`src/core/breaker.ts` 文件头标注这是**全文件最需要按实际数据调的参数**:
 
 - 归一化太严 → 同一病根算作不同失败,熔断永不触发
 - 归一化太松 → 不同问题被合并,误熔断
 
-**熔断** —— `decide()`(`src/core/breaker.ts:138`),优先级:
+**熔断** —— `decide()`(`src/core/breaker.ts`),优先级:
 
 ```
 attempts >= ATTEMPT_HARD_CAP   → halt      (签名一直在变也不许无限试)
@@ -407,52 +498,53 @@ attempts >= ATTEMPT_HARD_CAP   → halt      (签名一直在变也不许无限�
 其余                           → retry     (进 ACT 诊断一轮)
 ```
 
-熔断判定**已并入状态机**(`src/core/machine.ts:14-17`):`VERDICT(fail)` 到达时
+熔断判定**已并入状态机**(`src/core/machine.ts` 文件头):`VERDICT(fail)` 到达时
 机器内部直接调 `decide()`,签名计数也在机器内更新。hooks 层不做任何决策。
 
-### 4.9 换脑(Handoff)
+### 4.10 换脑(Handoff)
 
 **I5:每次升级必须换干净上下文。** 实现分两半:
 
-**软的一半** —— `ctx.newSession()` 创建新会话,只携带 MISSION.md + LOG.md 失败记录
+**软的一半** —— `ctx.newSession()` 创建新会话,只携带当前 generation 的 MISSION.md 投影 + LOG.md 失败记录
 + 最后一次失败证据,不带污染对话。
 
-**硬的一半** —— `state.pendingHandoff`(`src/core/types.ts:105-110`)。非 null 时
-闸门硬阻断一切非只读操作(`src/hooks/gate.ts:51`),唯一出口是 `/mission next`
+**硬的一半** —— `state.pendingHandoff`(`src/core/types.ts`)。非 null 时
+闸门硬阻断一切非只读操作(`gateCheck()` 的第一条分支),唯一出口是 `/mission next`
 发 `HANDOFF_DONE`。状态机层面也拒绝 `PLAN_FROZEN` 与 `SUBMIT`。
 
-**握手走磁盘,不走内存** —— pi 在 newSession 后会重建扩展实例,内存态必丢。
-所以新会话的 `session_start` 从 `missions/state/CURRENT` 读 mission id →
-读 STATE.json → 看到 `pendingHandoff` 非空 → 判定"这个全新会话就是换脑要的干净
-上下文",接上并发 `HANDOFF_DONE`(`src/runtime.ts:236-250`)。
-链路被打断时硬阻断仍在,手动 `/mission next` 兜底。
+**握手走磁盘,不走内存** —— HANDOFF_REQUEST 先把 UUID token、父 session、
+requested revision 与原因绑定进 SNAPSHOT;`newSession.setup()` 再写
+`pi-missions-handoff` custom marker。新会话的 `session_start` 只有在 reason、
+parent session、token、revision 全部匹配时才发 `HANDOFF_DONE`。
+普通 startup、错误 token 或陈旧 revision 都不能消费挂起请求;用户取消 newSession
+则显式发 `HANDOFF_CANCELLED`,解除硬阻断。
 
-### 4.10 闸门(Gate)
+### 4.11 闸门(Gate)
 
 两层粗细(`src/hooks/gate.ts`):
 
 1. **`setActiveTools()`** —— 粗粒度,LLM 看不到的工具不会调
 2. **`tool_call` 钩子** —— 细粒度,防 bash 绕过、防写冻结件
 
-`src/hooks/gate.ts:7` 有一条重要约束:**闸门只依赖 STATE,不依赖"上一个工具的
+`src/hooks/gate.ts` 文件头有一条重要约束:**闸门只依赖 STATE,不依赖"上一个工具的
 结果"** —— 并行工具执行时序不保证。
 
-### 4.11 环境指纹(Env Fingerprint)
+### 4.12 环境指纹(Env Fingerprint)
 
 `missions/scripts/env-fingerprint.sh` 的输出哈希。冻结时记录一次
 (`state.envFingerprint`),每次采集证据时重算。不符 → 整份判 `inconclusive`
-而不是 `fail`(I9)。理由(`src/core/verdict.ts:44`):**判 fail 会让 agent 去改代码,
+而不是 `fail`(I9)。理由(`src/core/verdict.ts` 文件头):**判 fail 会让 agent 去改代码,
 而病根在环境。**
 
-### 4.12 State Card
+### 4.13 State Card
 
-`before_agent_start` 钩子注入的一段结构化文本(`src/runtime.ts:737`),每轮对话都带:
+`before_agent_start` 钩子注入的一段结构化文本(`renderStateCard()`,`src/runtime.ts`),每轮对话都带:
 
 ```
 [MISSION] <id> · <tier> · phase=<phase> · task=<T1> · attempt=<n>
 GOAL: ...
 AC(冻结,不可修改):
-  - AC1: ./missions/scripts/verify.sh auth-integration 退出码 0 —— <描述>
+  - AC1: ./missions/state/<id>/generations/<n>/verify.sh auth-integration 退出码 0 —— <描述>
 CURRENT TASK: T1 <标题>(verify: auth-integration)
 PREV FAILURE: <上一轮失败原因>
 ⏸ 换脑挂起中:<原因>。请执行 /mission next。
@@ -461,9 +553,9 @@ PREV FAILURE: <上一轮失败原因>
 同一钩子把 `missions/phases/<phase>.md` 追加进 system prompt ——
 **I8:走到哪一步读哪一层**。相位提示词在仓库里,用户可改,改了就是规范(I6)。
 
-### 4.13 tick(内层循环驱动)
+### 4.14 tick(内层循环驱动)
 
-`agent_settled` 是**唯一安全的判定点**(`src/runtime.ts:498`)。按相位分流:
+`agent_settled` 是**唯一安全的判定点**(`onAgentSettled()`,`src/runtime.ts`)。按相位分流:
 
 - `check` → 跑 `runCheck()`(采证据 → judge → 发 VERDICT)
 - `act` → 发 `ADJUST_DONE` 回 DO(**ACT 就是一轮,不给第二轮**)
@@ -472,7 +564,7 @@ PREV FAILURE: <上一轮失败原因>
 对话的推进靠 `sendUserMessage(..., { deliverAs: "followUp" })`:判定完给 LLM 发一条
 DO brief 或 ACT brief,循环自己转起来。
 
-### 4.14 两层循环
+### 4.15 两层循环
 
 README 标题里的"双层循环":
 
@@ -484,31 +576,31 @@ README 标题里的"双层循环":
     理由:"lint/类型检查是每次编辑后立刻可得的,没理由攒到 CHECK"。
     命令未配置则关闭 —— 通用扩展无法发明跨语言的增量检查器,这是诚实的边界。
 
-### 4.15 其余术语
+### 4.16 其余术语
 
 | 术语 | 含义 | 位置 |
 |---|---|---|
-| **inMemory** | quick 档不落盘,计划与状态只在内存;升档时 `PERSIST_PLAN` 补写 | `src/runtime.ts:63` |
-| **CURRENT 指针** | `missions/state/CURRENT`,一行 mission id,重建实例时找回现场 | `src/store/paths.ts:65` |
+| **inMemory** | quick 档不落盘,计划与状态只在内存;升档时 `PERSIST_PLAN` 补写 | `MissionRuntimeState.inMemory`,`src/runtime.ts` |
+| **CURRENT 指针** | `missions/state/CURRENT`,仅定位活跃 mission;revision 落后不覆盖 snapshot | `currentPointer()`,`MissionRepository.loadCurrent()` |
 | **profile** | 用户原本的模型/thinking 现场,mission 开始时保存、结束时 `RESTORE` 恢复;随 mission 落盘以便跨会话接力 | `src/roles/models.ts` |
-| **里程碑(Milestone)** | complex 档的任务分组,分文件存 `M1.md`;里程碑最后一个任务重跑整组 verify 分支(回归) | `src/runtime.ts:415-418` |
-| **fence** | MISSION.md 尾部的 ```` ```mission ```` JSON 块,**机器的 source of truth**;resume 时只解析 fence,绝不回读散文 | `src/store/mission.ts:43` |
-| **降级模式** | 目标目录非 git 仓库:AC 冻结只剩 L0 闸门,无 git 审计链,semi 证据跳过(需要 git diff) | `src/runtime.ts:65` |
+| **里程碑(Milestone)** | complex 档的任务分组;里程碑最后一个任务重跑整组 verify 分支(回归) | `isLastTaskOfMilestone()`,`src/store/mission.ts` |
+| **generation** | 一组不可变 MISSION.md + verify.sh 投影,由 SNAPSHOT 中 generation 与 hash 绑定 | `MissionRepository.stagePlan()/publishStaged()` |
+| **降级模式** | 目标目录非 git 仓库:AC 冻结只剩 L0 闸门,无 git 审计链,semi 证据跳过(需要 git diff) | `src/store/git.ts` |
 
-### 4.16 LLM 可调用的工具
+### 4.17 LLM 可调用的工具
 
-五个(`src/tools.ts`),按相位分发,外加子进程里的第六个:
+五个(`src/tools.ts`),按相位分发,外加 Verifier 会话里的第六个:
 
 | 工具 | 相位 | 作用 |
 |---|---|---|
-| `mission_ask` | FRAME | 问一轮(≤3 个,整个 mission 只许一次,L0 强制) |
-| `mission_frame` | FRAME | 交出目标 + 约束 + 非目标,进入 PLAN |
-| `mission_write_plan` | PLAN | 原子提交 AC + 任务分解(含 spike)+ verify.sh 内容 |
+| `mission_ask` | DEFINE | 提问(每轮 ≤3 且每问带推荐答案;standard 2 轮 / complex 3 轮;要结账。L0 强制) |
+| `mission_define` | DEFINE | 交出目标 + **完成条件** + 约束 + 非目标 + 接缝 + 问答记录,进入 PLAN |
+| `mission_write_plan` | PLAN | 原子提交**方案** + AC(含 `covers`)+ 任务分解(含 spike)+ verify.sh 内容 |
 | `mission_submit` | DO | 声明已提交,触发判定(**不等于通过**)。无参数——判定依据早已冻结 |
 | `mission_escalate` | ACT | 主动升级 L2/L3 |
-| `mission_verdict` | — | 只存在于 Verifier 子进程,逐条 AC 提交结论 |
+| `mission_verdict` | — | 只存在于 Verifier AgentSession(`defineTool` 结构化参数),逐条 AC 提交结论 |
 
-**没有任何工具能直接改 STATE.json。** 状态推进全部由 L0 驱动。
+**没有任何工具能直接改 SNAPSHOT.json。** 状态推进全部由 L0 事件驱动并经 Repository CAS 提交。
 
 ---
 
@@ -518,15 +610,17 @@ README 标题里的"双层循环":
 
 ```
 /mission new "让登录快一点"
-  │  startNew → START_PHASE.standard = frame → SET_TOOLS(frame) + planner
+  │  startNew → START_PHASE.standard = define → SET_TOOLS(define) + planner
   ▼
-FRAME:LLM 读代码 → mission_ask(≤3 个)→ 本轮结束,等人回答
-  │                └→ evaluateAsk 拒掉超额与第二轮
-  │  人回答(普通消息)
+DEFINE:LLM 读代码 → mission_ask(每轮≤3,每问带推荐答案)→ 本轮结束,等人回答
+  │                └→ evaluateAsk 拒掉:没推荐答案 / 超额 / 超轮次 / 上一轮没结账
+  │  人回答(普通消息)→ 可以再问一轮(settled 必须变长)
   ▼
-mission_frame → plan.framing 落定 → FRAME_DONE → PLAN
+mission_define(goal + doneWhen + …)→ 范围确认 → DEFINE_DONE → PLAN
   ▼
-PLAN:mission_write_plan → validatePlan → 人工确认 → 基线跑 → 冻结 → DO
+PLAN:mission_write_plan → validatePlan + evaluateCoverage → 计划评审页
+  │                        └→ R 打回:意见回传 planner,累计 3 次转 L3 回 DEFINE
+  ▼                     批准 → 基线跑 → 冻结 → DO
 ```
 
 
@@ -540,12 +634,16 @@ LLM 调 mission_submit
   │  → SET_TOOLS(check) 收走写工具
   ▼
 agent_settled 触发 tick,phase === check → runCheck()
-  │  1. 算环境指纹
-  │  2. 逐个跑 verify.sh <分支> 拿退出码           → hard 证据
-  │  3. 起 Verifier 子进程,喂 AC + hard 结果 + diff → semi 证据
-  │  4. judge(evidences, { expectedFingerprint, requiredAcIds }) → Verdict
-  │  5. 证据归档到 missions/state/<id>/evidence/
-  │  6. 渲染 verdict 卡片(TUI 可见,不进 LLM 上下文)
+  │  1. 建立 CHECK.json(stage=preparing),随后每个子阶段原子更新
+  │  2. 算环境指纹
+  │  3. 逐个跑 verify.sh <分支> 拿退出码           → hard 证据
+  │     CHECK.json 同步记录当前分支、已完成分支与耗时
+  │  4. 起进程内 Verifier AgentSession,喂 AC + hard 结果 + diff → semi 证据
+  │     记录 running/completed/timeout/skipped/degraded
+  │  5. judge(evidences, { expectedFingerprint, requiredAcIds }) → Verdict
+  │  6. 完整命令、开始时间、耗时、exitCode、stdout/stderr
+  │     归档到 missions/state/<id>/evidence/
+  │  7. CHECK.json(stage=completed,outcome=...) + verdict 卡片
   ▼
 applyEvent(VERDICT)
   │  pass         → 下一任务(complex 档顺带换脑)/ 全完 → done + RESTORE
@@ -567,28 +665,29 @@ followUp 发 DO brief 或 ACT brief,循环继续
 ```
 <repo>/missions/
 ├── README.md                      工作流规则(脚手架铺设,已存在不覆盖)
-├── phases/{frame,plan,do,check,act}.md  相位提示词 ← 进哪个相位读哪个
+├── phases/{define,plan,do,check,act}.md  相位提示词 ← 进哪个相位读哪个
 ├── scripts/
-│   ├── verify.sh                  AC 的唯一执行入口,planner 起草,随 AC 冻结
-│   ├── env-fingerprint.sh         环境指纹
-│   └── verifier-tools.ts          子进程 Verifier 的扩展(提供 mission_verdict)
+│   └── env-fingerprint.sh         环境指纹
 ├── models.json                    角色 → 模型映射(可选)
-├── plans/<id>/
-│   ├── MISSION.md                 冻结计划(正文给人,尾部 fence 给机器)
-│   └── M1.md …                    complex 档的里程碑分文件
 ├── spikes/<id>/<taskId>.md        探针结论(执行者在 spike 任务里唯一能写的文件)
 └── state/
-    ├── CURRENT                    活跃 mission 指针
+    ├── CURRENT                    活跃 mission 定位提示(schema/id/revision)
     └── <id>/
-        ├── STATE.json             MissionState 全量(tmp + rename 原子写 + 串行队列)
+        ├── SNAPSHOT.json          v2 唯一机器真相源(plan/state/handoff/artifacts/revision)
+        ├── generations/<n>/
+        │   ├── MISSION.md         人类可读投影
+        │   └── verify.sh          当前 generation 独立裁判脚本
+        │   └── .tmp-*/            发布前临时目录,不参与恢复
+        ├── CHECK.json             CHECK 瞬时运行态(L0 独占写,状态页轮询)
         ├── LOG.md                 事件流水
         ├── profile.json           用户现场(模型/thinking)
         ├── evidence/              按 task/attempt 归档的原始证据
-        └── archive/               L3 归档的旧 MISSION.md
+        └── archive/               L3 归档
 ```
 
-`missions/state/` 默认写进 `.git/info/exclude`(不动用户的 `.gitignore`);
-`MISSION.md` 建议提交,git 提供 AC 冻结的审计链。
+CURRENT、SNAPSHOT、CHECK、LOG、profile、evidence 与 archive 默认写进
+`.git/info/exclude`(不动用户的 `.gitignore`);不可变 generations 建议提交,
+git 提供 AC 冻结的审计链。
 脚手架**已存在的文件不覆盖** —— 用户可以定制,仓库里的才是规范。
 
 ---
@@ -597,14 +696,14 @@ followUp 发 DO brief 或 ACT brief,循环继续
 
 | # | 不变量 | 实现位置 |
 |---|---|---|
-| I1 | 状态是仓库里的文件,不是会话里的对话 | `src/store/state.ts` + CURRENT 指针 + `ensureAttached()` |
-| I2 | AC 在 Plan 冻结,执行期只读 | `FREEZE_AC` + `src/hooks/gate.ts:57-68` + 工具集切换;判定依据先于执行冻结:`evaluateAdmission()` + `evaluateBaseline()` |
-| I3 | 判定证据必须来自执行者之外 | 子进程 Verifier + soft 永不触发 pass |
+| I1 | 状态是仓库里的文件,不是会话里的对话 | `MissionRepository` + SNAPSHOT/CURRENT + `ensureAttached()` |
+| I2 | AC 在 Plan 冻结,执行期只读 | `FREEZE_AC` + `gateCheck()` 的冻结件分支 + 工具集切换;判定依据先于执行冻结:`evaluateAdmission()` + `evaluateBaseline()` |
+| I3 | 判定证据必须来自执行者之外 | 只读独立 Verifier AgentSession + soft 永不触发 pass |
 | I4 | 熔断优先于重试 | `breaker.decide()`,并入 `VERDICT(fail)` 处理 |
 | I5 | 每次升级必须换干净上下文 | `pendingHandoff` 硬阻断 + 磁盘握手 |
 | I6 | 不在仓库里的等于不存在 | `missions/` 全套 + `ensureScaffold()` |
 | I7 | 确定性判定归代码,语义判断归模型 | hard 证据零模型成本;升档判据机械可测 |
-| I8 | 上下文按相位分层加载 | `before_agent_start` 读 `phases/<phase>.md`(含 `frame.md`) |
+| I8 | 上下文按相位分层加载 | `before_agent_start` 读 `phases/<phase>.md`(含 `define.md`) |
 | I9 | 环境不一致判 INCONCLUSIVE | 指纹比对 + `verdict.ts` 第 1 条 |
 
 ---
@@ -615,7 +714,7 @@ followUp 发 DO brief 或 ACT brief,循环继续
 
 ### 8.1 "AC 可执行" ≠ "AC 有判别力"(已收口大半)
 
-已经堵住的:冻结时的基线跑(4.5.1)要求每条 red AC 拿出一次真实的失败,
+已经堵住的:冻结时的基线跑(4.6.1)要求每条 red AC 拿出一次真实的失败,
 `ac1) exit 0 ;;` 这类空壳分支会被当场打回。
 
 仍然成立的限制:
@@ -632,7 +731,7 @@ followUp 发 DO brief 或 ACT brief,循环继续
 ### 8.2 quick 档仍然没有 AC,只有一条命令
 
 quick 档不落盘、不走 `validatePlan()`,`acceptanceCriteria` 恒为空,
-判定依据是单条 `quickVerifyCommand`,acId 固定为 `"quick"`,也没有子进程 Verifier
+判定依据是单条 `quickVerifyCommand`,acId 固定为 `"quick"`,也没有独立 Verifier
 交叉核对。**这一档的判定强度天然低于 standard**,是设计取舍(Q18),不是缺陷。
 
 已经收口的部分:那条命令现在必须由 `--verify` 在进 DO 前给出并冻结
@@ -642,15 +741,24 @@ quick 档不落盘、不走 `validatePlan()`,`acceptanceCriteria` 恒为空,
 仍然成立的限制:那条命令本身的判别力没有任何机械校验 —— `--verify "true"`
 能过。这与 8.1 是同一个洞的两个入口。
 
-### 8.3 FRAME 的退出没有机械判据
+### 8.3 DEFINE 的退出没有机械判据(已收口一半)
 
-提问预算是机械的,"问题是否已经定义清楚"不是。一个 agent 完全可以不问任何问题、
-把原始需求原样抄进 `goal` 就调用 `mission_frame` —— 系统不会拦。
+已经堵住的:`doneWhen` 与 `AcceptanceCriterion.covers` 的覆盖校验
+(`evaluateCoverage()`,4.4)。它判的不是"目标清不清楚",而是"人批准的那张清单
+有没有被逐条翻译成退出码" —— 漏一条冻结不了,多一条(孤儿 AC)同样冻结不了。
+提问闸门也从"数追问次数"变成了"每问必须带推荐答案 + 每轮必须结账"(4.4),
+后者判的是**这轮问答有没有推进决策**,比数次数更贴近真实的失败模式。
 
-这不是疏漏,是这一层的性质:目标的清晰度无法用退出码表达。设计上的补偿是
-把真正的关卡放在下游(`validatePlan` + 冻结基线),FRAME 只负责让问题**更早**暴露、
-并给人一次介入机会。如果 FRAME 被敷衍过去,代价会在冻结基线那一关显现 ——
-写不出能红的 AC。
+仍然成立的限制:
+
+- **`doneWhen` 本身的质量没有校验。** 一个 agent 完全可以不问任何问题,把原始需求
+  拆成两条含糊的完成条件("DW1: 体验更好")就调用 `mission_define` —— 系统不会拦。
+  它只能保证这两条被 AC 覆盖,不能保证它们值得覆盖。
+  这不是疏漏,是这一层的性质:清晰度无法用退出码表达。补偿是把关卡放在下游
+  (冻结基线要求每条 red AC 拿出一次真实的红,含糊的完成条件翻译不出这样的分支),
+  以及**放在人身上** —— 范围确认卡与计划评审页都是为此存在的介入点。
+- **`approach` 完全不可机械判定**,只查非空与 `why` 非空。这是刻意的:
+  决策与 AC 不是一一对应,强行配对会把好决策(排除一整片方案空间的那种)挤掉。
 
 ### 8.4 spike 的"不许改代码"仍有逃逸口
 
@@ -673,9 +781,9 @@ quick 档不落盘、不走 `validatePlan()`,`acceptanceCriteria` 恒为空,
 
 - mission 是**前台**的:占用当前会话,一次一个。后台批量编排用 pi-subagents。
 - 相位切换用 `setActiveTools` 改写工具集,plan/act/check 相位会隐藏其它扩展的工具。
-- 并行工具执行下 `tool_call` 不保证看到同批次兄弟工具的结果;闸门只依赖 STATE。
+- 并行工具执行下 `tool_call` 不保证看到同批次兄弟工具的结果;闸门只依赖已提交 SNAPSHOT。
 - 内存态不可信:pi 在 newSession/reload/重启时重建扩展实例。所有关键路径
-  (session_start、驱动类命令)都从 CURRENT 指针 + STATE.json 重附着。
-- 子进程 Verifier 每次 CHECK 冷启动一个 pi 进程;quick 档不用它。
+  (session_start、驱动类命令)都从 CURRENT 指针 + SNAPSHOT.json 重附着。
+- 独立 Verifier 每次 CHECK 起一个 in-memory AgentSession(pi ≥ 0.84.4);quick 档不用它。
 - `test/` 下的 UI 测试需要 `@earendil-works/pi-tui` 等 peer 依赖装好才能加载;
   core 的 49 个单测无外部依赖,`node --test` 直接跑。

@@ -13,10 +13,11 @@
 
 import type { AcceptanceCriterion, PlanMilestone, PlanTask } from "../store/mission.ts";
 import type { TaskEvidenceAttempt } from "../store/evidence.ts";
+import type { CheckState } from "../store/check.ts";
 import type { TaskState, Tier } from "../core/types.ts";
 import { thresholdFor } from "../core/breaker.ts";
 import { clip, pad, ruleLabel, wrap } from "./chrome.ts";
-import type { LineTheme } from "./dashboard.ts";
+import { checkProgressLines, fmtCheckDuration, type LineTheme } from "./dashboard.ts";
 
 export interface TaskDetailData {
 	task: PlanTask;
@@ -26,6 +27,8 @@ export interface TaskDetailData {
 	attempts: TaskEvidenceAttempt[];
 	spikeReport?: string;
 	tier?: Tier;
+	checkState?: CheckState | null;
+	now?: number;
 }
 
 const PLAIN: LineTheme = { fg: (_c, s) => s, bold: (s) => s };
@@ -68,6 +71,23 @@ function fmtTime(ts: number): string {
 	const d = new Date(ts);
 	const pad2 = (n: number) => String(n).padStart(2, "0");
 	return `${pad2(d.getHours())}:${pad2(d.getMinutes())}:${pad2(d.getSeconds())}`;
+}
+
+function streamLines(
+	t: LineTheme,
+	label: string,
+	content: string | undefined,
+	color: string,
+	width: number,
+): string[] {
+	const lines = [t.fg("muted", `    ${label}`)];
+	if (!content?.length) return [...lines, t.fg("dim", "      (空)")];
+	for (const outputLine of content.split("\n")) {
+		for (const wrappedLine of wrap(outputLine, Math.max(12, width - 6), 0)) {
+			lines.push(`      ${t.fg(color, wrappedLine)}`);
+		}
+	}
+	return lines;
 }
 
 /** 任务详情全部内容行。长文本折行,不截断 */
@@ -168,10 +188,21 @@ export function renderTaskDetail(
 
 	lines.push("");
 
-	// ── 4. 全部 attempt 证据历史 ──
-	lines.push(ruleLabel(t, width, `证据记录 (${data.attempts.length} 次尝试)`));
+	// ── 4. 当前 CHECK 运行态 ──
+	if (data.checkState?.taskId === task.id) {
+		lines.push(ruleLabel(t, width, `实时验证 · Attempt ${data.checkState.attempt}`));
+		lines.push(...checkProgressLines(data.checkState, data.now ?? Date.now(), t, width));
+		lines.push("");
+	}
+
+	// ── 5. 全部 attempt 证据历史 ──
+	const checkRunning =
+		data.checkState?.taskId === task.id &&
+		data.checkState.stage !== "completed" &&
+		data.checkState.stage !== "error";
+	lines.push(ruleLabel(t, width, checkRunning ? "证据记录 (本轮验证中)" : `证据记录 (${data.attempts.length} 次尝试)`));
 	if (data.attempts.length === 0) {
-		lines.push(t.fg("dim", "  (暂无执行证据记录)"));
+		lines.push(t.fg("dim", checkRunning ? "  (本轮结束后归档完整执行日志)" : "  (暂无执行证据记录)"));
 	} else {
 		for (const [ai, att] of data.attempts.entries()) {
 			if (ai > 0) lines.push("");
@@ -184,10 +215,17 @@ export function renderTaskDetail(
 			for (const ev of att.evidences) {
 				const evSt = EV_STYLE[ev.result] ?? EV_STYLE.inconclusive;
 				const exitStr = ev.exitCode !== undefined ? ` · exit=${ev.exitCode}` : "";
+				const durationStr = ev.durationMs !== undefined ? ` · ${fmtCheckDuration(ev.durationMs)}` : "";
 				lines.push(
-					`  ${t.fg(evSt.color, evSt.icon)} ${t.fg(evSt.color, ev.result.toUpperCase())} ${t.fg("dim", `@${ev.level}`)}  ${t.fg("accent", ev.acId)}${t.fg("dim", exitStr)}`,
+					`  ${t.fg(evSt.color, evSt.icon)} ${t.fg(evSt.color, ev.result.toUpperCase())} ${t.fg("dim", `@${ev.level}`)}  ${t.fg("accent", ev.acId)}${t.fg("dim", `${exitStr}${durationStr}`)}`,
 				);
-				if (ev.raw && ev.raw.trim()) {
+				if (ev.command) lines.push(...fieldWrapped(t, "命令", ev.command, width));
+				if (ev.startedAt) lines.push(field(t, "开始时间", fmtTime(ev.startedAt)));
+				const hasStreams = ev.stdout !== undefined || ev.stderr !== undefined;
+				if (hasStreams) {
+					lines.push(...streamLines(t, "stdout", ev.stdout, "dim", width));
+					lines.push(...streamLines(t, "stderr", ev.stderr, "error", width));
+				} else if (ev.raw && ev.raw.trim()) {
 					for (const rawLine of ev.raw.trim().split("\n")) {
 						for (const wl of wrap(rawLine, Math.max(12, width - 4), 0)) {
 							lines.push(`    ${t.fg("dim", wl)}`);
@@ -198,7 +236,7 @@ export function renderTaskDetail(
 		}
 	}
 
-	// ── 5. Spike 结论报告 ──
+	// ── 6. Spike 结论报告 ──
 	if (task.kind === "spike") {
 		lines.push("");
 		lines.push(ruleLabel(t, width, "Spike 书面结论"));

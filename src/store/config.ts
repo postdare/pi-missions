@@ -15,7 +15,7 @@ export interface MissionsConfig {
 	incrementalCheck?: string;
 	/** 公开 API 文件 glob(升档判据),如 ["src/api/**", "*.proto"] */
 	publicApiGlobs?: string[];
-	/** 子进程 Verifier 超时毫秒,默认 300000 */
+	/** 独立 Verifier AgentSession 超时毫秒,默认 300000 */
 	verifierTimeoutMs?: number;
 	/** 上下文水位(0-1),超过则主动换脑,默认 0.5 */
 	contextWatermark?: number;

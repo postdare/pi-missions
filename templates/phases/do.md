@@ -26,11 +26,11 @@ State Card 会标出来。探针的规矩和实现任务完全不同:
 
 ## 禁止
 
-- 修改 MISSION.md(验收标准已冻结;冻结段改动会被 git 闸门拒绝)。
-- 修改 `missions/state/` 下任何文件(状态由系统管理)。
+- 修改当前 generation 的 MISSION.md 或 verify.sh(验收标准已冻结)。
+- 修改 `missions/state/` 下任何文件(snapshot 与 generation 都由系统管理)。
 - 为了让验证通过而改 verify.sh / 测试断言本身 —— 那等同于篡改裁判,会被独立验证者发现。
 - 在 `mission_submit` 之后继续改代码(提交后写工具会被闸门拦住)。
 
 ## 提交前自检(不代替判定)
 
-可以自己先跑一遍 `./missions/scripts/verify.sh <分支>` 看退出码。绿了再提交,红了就继续修 —— 这能省掉整轮 CHECK 的开销。
+可以自己先按 State Card 给出的路径跑一遍 `verify.sh <分支>` 看退出码。绿了再提交,红了就继续修 —— 这能省掉整轮 CHECK 的开销。

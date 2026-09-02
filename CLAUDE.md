@@ -16,7 +16,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ## 命令
 
 ```bash
-npm test                                           # 全部:core 单测 + runtime/UI 冒烟(129 个)
+npm test                                           # 全部:core 单测 + runtime/UI 冒烟(226 个)
 node --test src/core/__tests__/breaker.test.ts     # 单个文件
 node --test --test-name-pattern="熔断" src/core/__tests__/breaker.test.ts   # 单个用例(名字是中文)
 npx tsc --noEmit                                   # 类型检查(tsconfig 只 include src/)
@@ -29,18 +29,19 @@ npx tsc --noEmit                                   # 类型检查(tsconfig 只 i
 
 ## 分层与硬约束
 
-完整架构、术语表、时序、不变量落点见 **[docs/ARCHITECTURE.md](./docs/ARCHITECTURE.md)**(带 `文件:行号`,与代码不符以代码为准);
+完整架构、术语表、时序、不变量落点见 **[docs/ARCHITECTURE.md](./docs/ARCHITECTURE.md)**(定位到`文件 + 符号名`,不写行号 —— 行号每次编辑都会漂;与代码不符以代码为准);
 使用侧行为见 README.md。下面只列改代码时必须守住的东西。
 
 ```
 src/index.ts    装配:挂 pi 事件、注册工具与命令、entry renderer
 src/runtime.ts  哑管道:采证据 → judge() → 喂事件给 machine → 翻译 Effect[] 成 pi 调用
-src/core/       纯函数,唯一裁判(machine/breaker/verdict/baseline/tier/frame/spike)
-src/store/      仓库读写(paths/mission·MISSION.md fence/state/log/evidence/git/scaffold)
-src/roles/      models.json 角色模型 + 子进程 Verifier
+src/core/       纯函数,唯一裁判(machine/breaker/verdict/baseline/tier/define/spike/coverage/review)
+src/store/      v2 Repository、generation 投影、log/evidence/git/scaffold
+src/roles/      models.json 角色模型 + 进程内 Verifier AgentSession
 src/hooks/      tool_call 闸门 + 编辑级增量反馈
-src/ui/         chrome(圆角盒框架)/ panel(/missions)/ status-view / dashboard / models-page
+src/ui/         chrome(圆角盒框架)/ panel(/missions)/ plan-review(冻结前评审)/ status-view / dashboard / models-page
 templates/      scaffold 铺进目标仓库的工作流文件(相位提示词、脚本)
+skills/         随包分发的 pi skill(入场导览:该不该开 mission、选哪档)
 ```
 
 1. **`src/core/` 必须保持纯净** —— 不 import pi、不读文件、不调网络、除事件携带的 `at`
@@ -51,12 +52,12 @@ templates/      scaffold 铺进目标仓库的工作流文件(相位提示词、
    不要在别处直接改 `state.*`。新增行为的正确形状是:加一个 `MissionEvent` +
    在 `machine.ts` 里处理 + 返回 `Effect`,由 `translateEffects()` 执行。
 3. **内存态不可信** —— pi 在 newSession/reload/重启时重建扩展实例。所有关键路径都从
-   `missions/state/CURRENT` 指针 + `STATE.json` 重附着(`ensureAttached()`)。
-   换脑的握手也走磁盘,不走内存。
+   `missions/state/CURRENT` 指针 + `SNAPSHOT.json` 重附着(`ensureAttached()`)。
+   换脑用 snapshot 中的 token/revision + 新会话 marker 握手,不走内存。
 4. **闸门只依赖 STATE**(`src/hooks/gate.ts`),不依赖"上一个工具的结果" ——
    并行工具执行时序不保证。相位能力矩阵在 `toolsForPhase()`。
-5. **AC 冻结后只读** —— 三道锁:工具集切换、`gate.ts` 拦 `missions/plans|state|verify.sh`
-   的 edit/write、bash 写操作粗检。别加绕过其中任何一道的"方便入口"。
+5. **AC 冻结后只读** —— 三道锁:工具集切换、`gate.ts` 拦 `missions/state/`
+   (snapshot 与所有 generation)的 edit/write、bash 写操作粗检。别加绕过其中任何一道的"方便入口"。
 6. **`mission_submit` 不接受任何参数** —— 判定依据必须先于执行冻结(I2/I3)。
    任何让执行者事后补判定标准的改动都是在拆这套设计。
 
@@ -102,6 +103,6 @@ templates/      scaffold 铺进目标仓库的工作流文件(相位提示词、
 
 ## 提交约定
 
-Conventional Commits + 中文正文,scope 用模块名:`fix(ui):` `feat(spike):` `feat(frame):`
+Conventional Commits + 中文正文,scope 用模块名:`fix(ui):` `feat(spike):` `feat(define):`
 `docs(readme):`。标题写清楚**症状或收益**,不是"修改了 xx 文件"
 (例:`fix(ui): 模型页用了不存在的主题色 "fg",选中模型后整个 TUI 崩掉`)。

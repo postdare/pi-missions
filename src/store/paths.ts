@@ -10,7 +10,6 @@ import * as path from "node:path";
 export interface RepoLayout {
 	/** missions/ 绝对路径 */
 	root: string;
-	plans: string;
 	state: string;
 	/** 探针结论:missions/spikes/<missionId>/<taskId>.md */
 	spikes: string;
@@ -18,25 +17,23 @@ export interface RepoLayout {
 	scripts: string;
 }
 
-export interface MissionPlanPaths {
-	dir: string;
-	missionMd: string;
-	milestoneFile: (milestoneId: string) => string;
-}
-
 export interface MissionStatePaths {
 	dir: string;
-	stateJson: string;
+	snapshotJson: string;
+	generationsDir: string;
+	generationDir: (revision: number) => string;
+	generationMissionMd: (revision: number) => string;
+	generationVerifySh: (revision: number) => string;
 	logMd: string;
 	evidenceDir: string;
 	archiveDir: string;
+	checkJson: string;
 }
 
 export function layout(cwd: string, dirName: string): RepoLayout {
 	const root = path.join(cwd, dirName);
 	return {
 		root,
-		plans: path.join(root, "plans"),
 		state: path.join(root, "state"),
 		spikes: path.join(root, "spikes"),
 		phases: path.join(root, "phases"),
@@ -44,23 +41,19 @@ export function layout(cwd: string, dirName: string): RepoLayout {
 	};
 }
 
-export function planPaths(l: RepoLayout, missionId: string): MissionPlanPaths {
-	const dir = path.join(l.plans, missionId);
-	return {
-		dir,
-		missionMd: path.join(dir, "MISSION.md"),
-		milestoneFile: (milestoneId: string) => path.join(dir, `${milestoneId}.md`),
-	};
-}
-
 export function statePaths(l: RepoLayout, missionId: string): MissionStatePaths {
 	const dir = path.join(l.state, missionId);
 	return {
 		dir,
-		stateJson: path.join(dir, "STATE.json"),
+		snapshotJson: path.join(dir, "SNAPSHOT.json"),
+		generationsDir: path.join(dir, "generations"),
+		generationDir: (revision: number) => path.join(dir, "generations", String(revision)),
+		generationMissionMd: (revision: number) => path.join(dir, "generations", String(revision), "MISSION.md"),
+		generationVerifySh: (revision: number) => path.join(dir, "generations", String(revision), "verify.sh"),
 		logMd: path.join(dir, "LOG.md"),
 		evidenceDir: path.join(dir, "evidence"),
 		archiveDir: path.join(dir, "archive"),
+		checkJson: path.join(dir, "CHECK.json"),
 	};
 }
 
@@ -77,16 +70,8 @@ export function spikeReport(l: RepoLayout, missionId: string, taskId: string): s
 	return path.join(l.spikes, missionId, `${taskId}.md`);
 }
 
-export function verifySh(l: RepoLayout): string {
-	return path.join(l.scripts, "verify.sh");
-}
-
 export function envFingerprintSh(l: RepoLayout): string {
 	return path.join(l.scripts, "env-fingerprint.sh");
-}
-
-export function verifierToolsTs(l: RepoLayout): string {
-	return path.join(l.scripts, "verifier-tools.ts");
 }
 
 export function modelsJson(l: RepoLayout): string {

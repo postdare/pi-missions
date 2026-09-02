@@ -12,6 +12,7 @@ import type { MissionState } from "../core/types.ts";
 import { ROLE_OF } from "../core/machine.ts";
 import { nearThreshold, thresholdFor } from "../core/breaker.ts";
 import type { EvidenceRecord } from "../store/evidence.ts";
+import type { CheckStage, CheckState } from "../store/check.ts";
 import { findTask, type MissionPlan } from "../store/mission.ts";
 import { clip, miniBar, pad, wrap } from "./chrome.ts";
 
@@ -58,15 +59,83 @@ function fieldWrapped(
 }
 
 const EV_ICON: Record<string, string> = { pass: "✓", fail: "✗", inconclusive: "?" };
+const STAGE_LABELS: Record<CheckStage, string> = {
+	preparing: "准备环境",
+	running_scripts: "执行脚本",
+	running_verifier: "独立核验",
+	judging: "生成判定",
+	completed: "完成",
+	error: "异常",
+};
 
 export function costTotal(state: MissionState): number {
 	return Object.values(state.cost).reduce((a, b) => a + (b ?? 0), 0);
+}
+
+/** 全角色 token 合计(个)。与美元账并列:网关不报价时只有它是真的 */
+export function tokenTotal(state: MissionState): number {
+	return Object.values(state.tokens ?? {}).reduce(
+		(a, u) => a + (u ? u.input + u.output + u.cacheRead + u.cacheWrite : 0),
+		0,
+	);
+}
+
+/** token 数的紧凑格式:1234 → 1.2k */
+export function formatTokens(n: number): string {
+	return n >= 1000 ? `${(n / 1000).toFixed(1)}k` : `${n}`;
 }
 
 export function fmtDuration(fromMs: number, nowMs: number): string {
 	const mins = Math.max(0, Math.round((nowMs - fromMs) / 60_000));
 	if (mins < 60) return `${mins}min`;
 	return `${Math.floor(mins / 60)}h${mins % 60}m`;
+}
+
+export function fmtCheckDuration(durationMs: number): string {
+	if (durationMs < 1000) return `${Math.max(0, Math.floor(durationMs))}ms`;
+	if (durationMs < 10_000) {
+		return `${(durationMs / 1000).toFixed(1).replace(/\.0$/, "")}s`;
+	}
+	const seconds = Math.max(0, Math.floor(durationMs / 1000));
+	if (seconds < 60) return `${seconds}s`;
+	return `${Math.floor(seconds / 60)}m${seconds % 60}s`;
+}
+
+/** CHECK 运行态摘要,供状态页与非 TUI 卡片复用。 */
+export function checkProgressLines(
+	check: CheckState,
+	now = Date.now(),
+	t: LineTheme = PLAIN,
+	width = 96,
+): string[] {
+	const elapsed = fmtCheckDuration(
+		check.stage === "completed" || check.stage === "error"
+			? check.updatedAt - check.startedAt
+			: now - check.startedAt,
+	);
+	const lines = [
+		field(t, "验证阶段", `${t.fg("accent", STAGE_LABELS[check.stage])} ${t.fg("dim", `· ${elapsed}`)}`),
+	];
+	if (check.currentBranch) {
+		lines.push(field(t, "正在执行", t.fg("accent", check.currentBranch)));
+	}
+	if (check.completedBranches.length > 0) {
+		const completed = check.completedBranches
+			.map((b) => {
+				const icon = EV_ICON[b.status] ?? "?";
+				const color = EV_COLOR[b.status] ?? "dim";
+				const duration = b.durationMs == null ? "" : ` ${fmtCheckDuration(b.durationMs)}`;
+				return t.fg(color, `${icon} ${b.acId}${duration}`);
+			})
+			.join(t.fg("dim", " · "));
+		lines.push(...fieldWrapped(t, "已完成", completed, width, 3));
+	}
+	if (check.verifier && check.verifier.status !== "pending") {
+		const duration = check.verifier.durationMs == null ? "" : ` · ${fmtCheckDuration(check.verifier.durationMs)}`;
+		lines.push(field(t, "独立核验", `${check.verifier.status}${t.fg("dim", duration)}`));
+	}
+	if (check.error) lines.push(...fieldWrapped(t, "异常", check.error, width, 3, "error"));
+	return lines.map((line) => clip(line, width));
 }
 
 // ─────────────────────────── 常驻状态条(主题化卡片) ───────────────────────────
@@ -79,7 +148,7 @@ export function fmtDuration(fromMs: number, nowMs: number): string {
  * 空心 → 实心表示"从想清楚到动手",act 与 do 同形靠颜色区分(警告色)。
  */
 export const PHASE_STYLE: Record<string, { icon: string; color: string; label: string }> = {
-	frame: { icon: "○", color: "accent", label: "定义" },
+	define: { icon: "○", color: "accent", label: "定义" },
 	plan: { icon: "◇", color: "accent", label: "规划" },
 	do: { icon: "●", color: "accent", label: "执行" },
 	check: { icon: "◆", color: "accent", label: "判定" },
@@ -111,6 +180,7 @@ export function renderWidgetCard(
 	state: MissionState,
 	now = Date.now(),
 	width = 120,
+	checkState?: CheckState | null,
 ): string[] {
 	const task = state.currentTask ? findTask(plan, state.currentTask) : undefined;
 	const t = state.currentTask ? state.tasks[state.currentTask] : undefined;
@@ -135,6 +205,11 @@ export function renderWidgetCard(
 	const elapsed = plan.createdAt ? fmtDuration(plan.createdAt, now) : null;
 	if (elapsed && elapsed !== "0min") rightBits.push(theme.fg("dim", elapsed));
 	if (cost >= 0.005) rightBits.push(theme.fg("accent", `$${cost.toFixed(2)}`));
+	else {
+		// 网关不报价时美元恒 0,token 才是真实消耗
+		const tok = tokenTotal(state);
+		if (tok > 0) rightBits.push(theme.fg("accent", `${formatTokens(tok)} tok`));
+	}
 	const right = rightBits.join(" ");
 
 	const leftW = visibleWidth(left);
@@ -154,6 +229,19 @@ export function renderWidgetCard(
 		bits.push(theme.fg(near ? "warning" : "dim", `attempt ${t.attempts}/${threshold}`));
 	}
 	if (bits.length > 0) lines.push(clip(`  ${bits.join(sep)}`, width));
+	if (state.phase === "check" && checkState?.taskId === state.currentTask) {
+		const stage = STAGE_LABELS[checkState.stage];
+		const elapsed = fmtCheckDuration(now - checkState.startedAt);
+		const current = checkState.currentBranch ? ` · ${checkState.currentBranch}` : "";
+		const doneCount = checkState.completedBranches.length;
+		const completed = doneCount > 0 ? ` · 脚本 ${doneCount} 项` : "";
+		lines.push(
+			clip(
+				`  ${theme.fg("accent", "◆")} ${stage} ${theme.fg("dim", `${elapsed}${completed}${current}`)}`,
+				width,
+			),
+		);
+	}
 
 	// 预警行(警告色)
 	if (t && nearThreshold(t, state.tier)) {
@@ -180,11 +268,12 @@ export interface OverviewOptions {
 	 * 置 true 就不再重复这些 —— 概览栏的空间要留给目标和当前任务。
 	 */
 	omitIdentity?: boolean;
+	checkState?: CheckState | null;
 }
 
 /**
  * 概览栏。排序即优先级:先说要干什么、现在卡在哪,再说机制性的账。
- * 刻意**不**显示会话文件名与逐字段的原始 STATE —— 那是排障时 `cat STATE.json` 的事,
+ * 刻意**不**显示会话文件名与逐字段的原始 SNAPSHOT —— 那是排障时查看仓库文件的事,
  * 放在这里只会把目标挤没。
  */
 export function overviewLines(plan: MissionPlan, state: MissionState, opts: OverviewOptions = {}): string[] {
@@ -236,6 +325,9 @@ export function overviewLines(plan: MissionPlan, state: MissionState, opts: Over
 			lines.push(...fieldWrapped(t, "上次失败", ts.lastFailureReason, width, 3, "error"));
 		}
 	}
+	if (state.phase === "check" && opts.checkState?.taskId === state.currentTask) {
+		lines.push(...checkProgressLines(opts.checkState, now, t, width));
+	}
 	if (state.pendingHandoff) {
 		lines.push(t.fg("warning", `⏸ 等待换脑: ${state.pendingHandoff} —— /mission next`));
 	}
@@ -257,13 +349,33 @@ export function overviewLines(plan: MissionPlan, state: MissionState, opts: Over
 
 	// 合计放最前面:这几行是次要信息,窄栏会被截掉,截掉的必须是分账明细而不是总额
 	const costEntries = Object.entries(state.cost).filter(([, v]) => (v ?? 0) > 0);
+	const tokMap = state.tokens ?? {};
+	const tokSum = tokenTotal(state);
+	const costSummary = [
+		costEntries.length > 0 ? `$${costTotal(state).toFixed(3)}` : "",
+		tokSum > 0 ? `${formatTokens(tokSum)} tok` : "",
+	]
+		.filter(Boolean)
+		.join(" + ");
+	// 分账按角色合并美元与 token(哪边有数显哪边)
+	const roles = [
+		...new Set([...costEntries.map(([r]) => r), ...Object.keys(tokMap)]),
+	] as Array<keyof typeof tokMap>;
+	const roleDetail = roles
+		.map((r) => {
+			const parts: string[] = [];
+			const money = state.cost[r];
+			if ((money ?? 0) > 0) parts.push(`$${money!.toFixed(3)}`);
+			const u = tokMap[r];
+			if (u) parts.push(`${formatTokens(u.input + u.output + u.cacheRead + u.cacheWrite)} tok`);
+			return `${r} ${parts.join("/")}`;
+		})
+		.join(" · ");
 	lines.push(
 		field(
 			t,
 			"成本",
-			costEntries.length > 0
-				? `$${costTotal(state).toFixed(3)}${dim(` · ${costEntries.map(([r, v]) => `${r} $${(v ?? 0).toFixed(3)}`).join(" · ")}`)}`
-				: dim("尚无记录"),
+			costSummary ? `${costSummary}${dim(` · ${roleDetail}`)}` : dim("尚无记录"),
 		),
 	);
 	lines.push(field(t, "指纹", state.envFingerprint ? dim(state.envFingerprint) : dim("未冻结(PLAN 完成后记录)")));
@@ -372,6 +484,7 @@ export function acLines(
 	dirName: string,
 	t: LineTheme = PLAIN,
 	width = 96,
+	verifyScriptPath?: string,
 ): string[] {
 	const dim = (s: string) => t.fg("dim", s);
 	if (plan.acceptanceCriteria.length === 0) {
@@ -379,7 +492,7 @@ export function acLines(
 			? [dim("(quick 档:无 AC,判定依据是 --verify 冻结的验证命令)")]
 			: [dim("(尚未冻结 AC:PLAN 相位调用 mission_write_plan 后显示)")];
 	}
-	const lines: string[] = [dim(`执行入口 ./${dirName}/scripts/verify.sh <分支>`), ""];
+	const lines: string[] = [dim(`执行入口 ${verifyScriptPath ?? `./${dirName}/state/<mission>/generations/<generation>/verify.sh`} <分支>`), ""];
 	for (const [i, ac] of plan.acceptanceCriteria.entries()) {
 		if (i > 0) lines.push("");
 		const ev = evidence.latest[ac.verify];
@@ -408,11 +521,13 @@ export function renderStatusDashboard(
 	logTail: string[],
 	dirName: string,
 	now = Date.now(),
+	checkState?: CheckState | null,
+	verifyScriptPath?: string,
 ): string {
 	const sections = [
-		overviewLines(plan, state, { now }),
+		overviewLines(plan, state, { now, checkState }),
 		["任务:", ...taskLines(plan, state).map((l) => (l ? `  ${l}` : l))],
-		["验收:", ...acLines(plan, evidence, dirName).map((l) => (l ? `  ${l}` : l))],
+		["验收:", ...acLines(plan, evidence, dirName, PLAIN, 96, verifyScriptPath).map((l) => (l ? `  ${l}` : l))],
 	];
 	if (logTail.length > 0) sections.push(["最近日志:", ...logTail.map((l) => `  ${l}`)]);
 	return sections.map((s) => s.join("\n")).join("\n\n");

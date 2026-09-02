@@ -54,3 +54,23 @@ export async function computeEnvFingerprint(exec: Exec, cwd: string, scriptPath:
 	}
 	return `sha256:${createHash("sha256").update(material).digest("hex").slice(0, 16)}`;
 }
+
+/**
+ * 计算工作区树指纹(HEAD + status + diff)。用于补证据闸门判定「工作区是否有任何实际改动」。
+ * 非 git 仓库或执行异常时返回 null(降级放行)。
+ */
+export async function computeGitTreeFingerprint(exec: Exec, cwd: string): Promise<string | null> {
+	try {
+		const head = await exec("git", ["rev-parse", "HEAD"], { cwd, timeout: 10_000 });
+		const status = await exec("git", ["status", "--porcelain"], { cwd, timeout: 10_000 });
+		const diff = await exec("git", ["-c", "core.pager=cat", "diff", "HEAD"], { cwd, timeout: 30_000 });
+		if (head.code !== 0 && status.code !== 0) return null;
+		const headStr = head.code === 0 ? head.stdout.trim() : "NO_HEAD";
+		const statusStr = status.code === 0 ? status.stdout : "";
+		const diffStr = diff.code === 0 ? diff.stdout : "";
+		const material = `HEAD:${headStr}\nSTATUS:\n${statusStr}\nDIFF:\n${diffStr}`;
+		return `sha256:${createHash("sha256").update(material).digest("hex").slice(0, 16)}`;
+	} catch {
+		return null;
+	}
+}

@@ -1,10 +1,9 @@
 /**
  * pi-missions · store/mission
  *
- * MISSION.md 的渲染与解析(Q11):
- *   正文给人看,尾部 ```mission fence 里的 JSON 是机器的 source of truth。
- *   L0 由 mission_write_plan 的结构化参数渲染,resume 时只解析 fence,
- *   绝不回读散文。AC 冻结校验同时覆盖正文与 fence。
+ * MISSION.md 的单向投影:
+ *   正文与尾部 ```mission fence 都给人审阅/排障,v2 的唯一机器真相源是 SNAPSHOT.json。
+ *   L0 由结构化 plan 渲染 generation,resume 不反向解析 MISSION.md。
  */
 
 import type { Tier } from "../core/types.ts";
@@ -16,6 +15,11 @@ export interface AcceptanceCriterion {
 	text: string;
 	/** verify.sh 的分支名 —— AC 的可执行入口,不写裸命令(I9) */
 	verify: string;
+	/**
+	 * 这条 AC 覆盖 definition.doneWhen 里的哪几条(DW1/DW2…)。
+	 * 校验见 core/coverage.ts:没漏(每条 DW 都有 AC)+ 没夹带(每条 AC 都有归属)。
+	 */
+	covers: string[];
 	/**
 	 * 冻结时该分支应有的状态。缺省 "red"。
 	 * red = 现在必须失败(红→绿才是证据);green = 回归项,现在必须已经通过。
@@ -41,21 +45,76 @@ export interface PlanMilestone {
 	tasks: PlanTask[];
 }
 
-/** FRAME 相位的产出:锐化后的目标 + 明确的边界。PLAN 据此设计 AC */
-export interface Framing {
+/** 一条人话的完成条件。PLAN 必须把它翻译成能跑出退出码的 AC */
+export interface DoneWhen {
+	/** DW1 / DW2 …,AC 的 covers 用它指代 */
+	id: string;
+	text: string;
+}
+
+/** DEFINE 相位的产出:锐化后的目标 + 完成条件 + 明确的边界。PLAN 据此设计 AC */
+export interface Definition {
 	/** 已确认的约束/前提(来自人工回答或代码事实) */
 	constraints: string[];
 	/** 明确不做的事 —— 边界写不出来,AC 就会漂 */
 	nonGoals: string[];
+	/**
+	 * 人话的完成条件清单。这是 DEFINE 唯一有机械化下游后果的产出:
+	 * 每条必须被至少一条 AC 覆盖(core/coverage.ts),否则计划冻结不了。
+	 */
+	doneWhen: DoneWhen[];
+	/**
+	 * 打算在哪一层验证(已有集成测试 / 契约比对 / CLI 冒烟 / grep 计数)。
+	 * 接缝要事先约定,不留到写 AC 时临时决定 —— 选错接缝原本要到冻结基线那一关才炸,
+	 * 那时整轮 PLAN 已经烧完了。不做机械校验,它的用途是上确认卡给人看一眼。
+	 */
+	verifySeam?: string;
+	/**
+	 * DEFINE 问答的落盘(没问过就是空数组)。人的回答只活在上下文里,换脑即丢,
+	 * 而提问额度已经烧掉了 —— 这是"内存态不可信"的一个真实缺口。
+	 */
+	resolved: { q: string; a: string }[];
 	at: number;
+}
+
+/** 一条方案决策。满足 ADR 三条判据(难逆转/反直觉/有真权衡)的,值得标 sticky */
+export interface ApproachDecision {
+	/** D1 / D2 … */
+	id: string;
+	/** 决定了什么 */
+	text: string;
+	/** 为什么 —— 没有理由的决策不是决策,是偏好 */
+	why: string;
+	/** 否决了什么。半年后有人再提同一个方案时,这一行能省掉一整轮讨论 */
+	rejected?: string;
+	/** 难以逆转 + 反直觉 + 有真权衡。留给将来 mission 完成时提示落 ADR */
+	sticky?: boolean;
+}
+
+/**
+ * 方案。原本 MissionPlan 从 goal 直接跳到 verify 分支,
+ * 中间的"打算怎么做"没有任何载体 —— 于是人看不到架构,L2(改方案)也没有落点。
+ *
+ * 它没有可追溯的对端(决策与 AC 不是一一对应:一条"不动 User 表"的决策可能不产生
+ * 任何 AC,它的价值是排除了一整片方案空间),所以**不假装它可机械判定** ——
+ * 校验只做最弱的一档,真正的过滤器是人在计划评审页读它。
+ */
+export interface Approach {
+	summary: string;
+	decisions: ApproachDecision[];
 }
 
 export interface MissionPlan {
 	missionId: string;
 	tier: Tier;
 	goal: string;
-	/** FRAME 的产出;quick 档与老 mission 没有 */
-	framing?: Framing;
+	/**
+	 * DEFINE 的产出。**只有 quick 档没有** —— 它不经过 DEFINE 相位,
+	 * 判定依据是 `--verify` 冻结的那条命令。standard/complex 一定有。
+	 */
+	definition?: Definition;
+	/** 方案。complex 强制,standard/quick 可选 */
+	approach?: Approach;
 	acceptanceCriteria: AcceptanceCriterion[];
 	milestones: PlanMilestone[];
 	/** verify.sh 完整内容,与 MISSION.md 原子冻结(Q6) */
@@ -98,6 +157,23 @@ export function validatePlan(plan: MissionPlan): string[] {
 	if (!plan.goal?.trim()) errors.push("goal 为空");
 	if (plan.acceptanceCriteria.length === 0) errors.push("至少需要一条验收标准(AC)");
 	if (taskOrder(plan).length === 0) errors.push("至少需要一个任务");
+
+	// approach:complex 强制。它是 L2(改方案)的载体,也是人在评审页真正要读的东西 ——
+	// 里程碑级的 mission 没有方案说明,等于让人批准一份只有验收标准的合同。
+	const ap = plan.approach;
+	if (plan.tier === "complex") {
+		if (!ap?.summary?.trim()) errors.push("complex 档必须写 approach.summary(整体怎么做、动哪几个模块)");
+		if (!ap?.decisions?.length) errors.push("complex 档必须至少写一条 approach.decisions(方案决策)");
+	}
+	if (ap) {
+		const dIds = new Set<string>();
+		for (const d of ap.decisions ?? []) {
+			if (dIds.has(d.id)) errors.push(`决策 id 重复:${d.id}`);
+			dIds.add(d.id);
+			if (!d.text?.trim()) errors.push(`${d.id} 的 text 为空`);
+			if (!d.why?.trim()) errors.push(`${d.id} 没写为什么 —— 没有理由的决策不是决策,是偏好`);
+		}
+	}
 
 	const acIds = new Set<string>();
 	const verifyNames = new Set<string>();
@@ -159,14 +235,35 @@ export function renderMissionMd(plan: MissionPlan): string {
 		"",
 	];
 	for (const ac of plan.acceptanceCriteria) {
-		lines.push(`- ${ac.id} (verify: \`${ac.verify}\`, baseline: ${ac.baseline ?? "red"}): ${ac.text}`);
+		const covers = ac.covers.length > 0 ? `, 覆盖: ${ac.covers.join("+")}` : "";
+		lines.push(`- ${ac.id} (verify: \`${ac.verify}\`, baseline: ${ac.baseline ?? "red"}${covers}): ${ac.text}`);
 	}
 	lines.push("");
 
-	if (plan.framing) {
-		lines.push("## Frame", "", `> 问题定义(FRAME 相位产出)`, "");
-		for (const c of plan.framing.constraints) lines.push(`- 约束:${c}`);
-		for (const n of plan.framing.nonGoals) lines.push(`- 不做:${n}`);
+	if (plan.definition) {
+		const f = plan.definition;
+		lines.push("## Define", "", `> 问题定义(DEFINE 相位产出)`, "");
+		lines.push("完成条件(每条都必须被上面的 AC 覆盖):", "");
+		for (const d of f.doneWhen) lines.push(`- ${d.id}: ${d.text}`);
+		lines.push("");
+		for (const c of f.constraints) lines.push(`- 约束:${c}`);
+		for (const n of f.nonGoals) lines.push(`- 不做:${n}`);
+		if (f.verifySeam?.trim()) lines.push(`- 接缝:${f.verifySeam}`);
+		lines.push("");
+		if (f.resolved.length > 0) {
+			lines.push("<details><summary>DEFINE 问答记录</summary>", "");
+			for (const r of f.resolved) lines.push(`- 问:${r.q}`, `  答:${r.a}`);
+			lines.push("", "</details>", "");
+		}
+	}
+
+	if (plan.approach) {
+		lines.push("## Approach", "", "> 方案(L2 升级改的就是这一段)", "", plan.approach.summary, "");
+		for (const d of plan.approach.decisions) {
+			lines.push(`- ${d.id}: ${d.text}`);
+			lines.push(`  - 为什么:${d.why}`);
+			if (d.rejected?.trim()) lines.push(`  - 否决:${d.rejected}`);
+		}
 		lines.push("");
 	}
 
@@ -216,7 +313,8 @@ export function parseMissionMd(content: string): MissionPlan | null {
 			missionId: payload.missionId,
 			tier: payload.tier,
 			goal: payload.goal,
-			framing: payload.framing,
+			definition: payload.definition,
+			approach: payload.approach,
 			acceptanceCriteria: payload.acceptanceCriteria,
 			milestones: payload.milestones,
 			verifyScript: payload.verifyScript,
@@ -232,7 +330,8 @@ function fencePayload(plan: MissionPlan) {
 		missionId: plan.missionId,
 		tier: plan.tier,
 		goal: plan.goal,
-		framing: plan.framing,
+		definition: plan.definition,
+		approach: plan.approach,
 		acceptanceCriteria: plan.acceptanceCriteria,
 		milestones: plan.milestones,
 		verifyScript: plan.verifyScript,

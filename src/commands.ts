@@ -7,15 +7,22 @@
 
 import * as fs from "node:fs";
 import type { Runtime } from "./runtime.ts";
-import { allTasks, parseMissionMd, type MissionPlan } from "./store/mission.ts";
-import { planPaths, statePaths, spikeReport } from "./store/paths.ts";
+import { allTasks, type MissionPlan } from "./store/mission.ts";
+import { statePaths, spikeReport } from "./store/paths.ts";
 import { readLog } from "./store/log.ts";
 import { latestEvidenceResults, readTaskEvidenceHistory, type TaskEvidenceAttempt } from "./store/evidence.ts";
-import { loadStateFile } from "./store/state.ts";
 import { openStatusView, statusFallbackText, type StatusViewData } from "./ui/status-view.ts";
 import { applyTierSelection, clearTierIndicator } from "./ui/tier-indicator.ts";
 import { openMissionsPanel } from "./ui/panel.ts";
+import {
+	acReviewLines,
+	approachLines,
+	openPlanReview,
+	scopeLines,
+	taskReviewLines,
+} from "./ui/plan-review.ts";
 import { STATE_ICON } from "./ui/models-page.ts";
+import { formatTokens } from "./ui/dashboard.ts";
 import { ROLE_ORDER, resolveRoleView } from "./roles/models.ts";
 import { ROLE_OF } from "./core/machine.ts";
 import type { MissionState } from "./core/types.ts";
@@ -29,34 +36,29 @@ export function registerCommands(pi: any, getRuntime: GetRuntime): void {
 		handler: async (_args: string, ctx: Ctx) => {
 			const rt0 = getRuntime(ctx);
 			await openMissionsPanel(ctx, rt0.layout, {
+				onLoadError: (error) => ctx.ui.notify(`Mission 列表跳过损坏项:${error.code}: ${error.message}`, "error"),
 				onSelectTier: (tier) => {
 					const rt = getRuntime(ctx);
 					rt.pendingTier = tier;
-					applyTierSelection(ctx, tier);
+					applyTierSelection(ctx, tier, () => {
+						getRuntime(ctx).pendingTier = null;
+					});
 				},
 				onDetail: async (id) => {
 					const d = statusDataFor(rt0, id);
 					if (!d) {
-						ctx.ui.notify(`找不到 mission "${id}" 的计划或状态`, "error");
+						ctx.ui.notify(missionLoadError(rt0, id), "error");
 						return;
 					}
-					const canResume = d.state.phase !== "done";
-					const canAbort = d.state.phase !== "done" && d.state.phase !== "halted";
-					await openStatusView(ctx, () => statusDataFor(rt0, id), {
-						onResume: canResume
-							? (mid) => pi.sendUserMessage(`/mission resume ${mid}`, { deliverAs: "followUp" })
-							: undefined,
-						onAbort: canAbort
-							? () => pi.sendUserMessage(`/mission abort`, { deliverAs: "followUp" })
-							: undefined,
-					});
+					await openStatusView(ctx, () => statusDataFor(rt0, id), statusViewOpts(pi, ctx, rt0, id));
 				},
 				onResume: (id) => {
-					pi.sendUserMessage(`/mission resume ${id}`, { deliverAs: "followUp" });
+					pi.sendUserMessage(`/mission resume ${id}`, { deliverAs: "followUp", expandPromptTemplates: true });
 				},
 				onAbort: (_id) => {
-					pi.sendUserMessage(`/mission abort`, { deliverAs: "followUp" });
+					pi.sendUserMessage(`/mission abort`, { deliverAs: "followUp", expandPromptTemplates: true });
 				},
+				isAttached: (id) => rt0.active?.state.missionId === id,
 				models: {
 					getData: () => {
 						const rt = getRuntime(ctx);
@@ -66,6 +68,7 @@ export function registerCommands(pi: any, getRuntime: GetRuntime): void {
 							models: rt.availableModels(ctx),
 							sessionLabel: rt.sessionModelLabel(ctx),
 							cost: a?.state.cost ?? {},
+							tokens: a?.state.tokens ?? {},
 							activeRole: a ? ROLE_OF[a.state.phase] : null,
 							dirName: rt.config.missionsDir,
 						};
@@ -107,19 +110,15 @@ export function registerCommands(pi: any, getRuntime: GetRuntime): void {
 
 			switch (sub) {
 				case "tier": {
-					// 手动设定/清除档位指示(不经面板)
+					// 手动设定档位指示(不经面板);取消按 Esc,不再提供 off 子命令
 					const t = rest.trim();
-					if (t === "off" || t === "clear" || t === "") {
-						rt.pendingTier = null;
-						clearTierIndicator(ctx);
-						ctx.ui.notify("已清除档位选择", "info");
-						return;
-					}
 					if (t !== "quick" && t !== "standard" && t !== "complex") {
-						return notifyUsage(ctx, "用法:/mission tier quick|standard|complex|off");
+						return notifyUsage(ctx, "用法:/mission tier quick|standard|complex(取消:按 Esc)");
 					}
 					rt.pendingTier = t;
-					applyTierSelection(ctx, t);
+					applyTierSelection(ctx, t, () => {
+						getRuntime(ctx).pendingTier = null;
+					});
 					return;
 				}
 
@@ -147,7 +146,7 @@ export function registerCommands(pi: any, getRuntime: GetRuntime): void {
 					pi.sendUserMessage(
 						r.tier === "quick"
 							? `[pi-missions] quick 任务(${r.id}):${rest}\n验证命令:${flags.verify}。完成后调用 mission_submit。`
-							: kickoff(rt.config.missionsDir, r.id, r.tier, rest, rt.active?.state.phase ?? "frame"),
+							: kickoff(rt.config.missionsDir, r.id, r.tier, rest, rt.active?.state.phase ?? "define"),
 						{ deliverAs: "followUp" },
 					);
 					return;
@@ -158,22 +157,9 @@ export function registerCommands(pi: any, getRuntime: GetRuntime): void {
 					const id = rest.trim() || rt.active?.state.missionId || null;
 					if (!id) return notifyUsage(ctx, "无活动 mission。/missions 查看历史,/mission resume <id> 恢复");
 					const d = statusDataFor(rt, id);
-					if (!d) return notifyUsage(ctx, `找不到 mission "${id}" 的计划或状态`);
+					if (!d) return notifyUsage(ctx, missionLoadError(rt, id));
 					if (ctx.hasUI) {
-						const canResume = d.state.phase !== "done";
-						const canAbort = d.state.phase !== "done" && d.state.phase !== "halted";
-						await openStatusView(
-							ctx,
-							() => statusDataFor(rt, id),
-							{
-								onResume: canResume
-									? (mid) => pi.sendUserMessage(`/mission resume ${mid}`, { deliverAs: "followUp" })
-									: undefined,
-								onAbort: canAbort
-									? () => pi.sendUserMessage(`/mission abort`, { deliverAs: "followUp" })
-									: undefined,
-							},
-						);
+						await openStatusView(ctx, () => statusDataFor(rt, id), statusViewOpts(pi, ctx, rt, id));
 					} else {
 						pi.appendEntry("missions-card", {
 							title: `${d.state.missionId} · ${d.state.tier} · ${d.state.phase}`,
@@ -195,7 +181,7 @@ export function registerCommands(pi: any, getRuntime: GetRuntime): void {
 					if (a.state.phase !== "do") return notifyUsage(ctx, `当前相位是 ${a.state.phase},/mission verify 只能在 do 相位`);
 					const r = await rt.applyEvent({ type: "SUBMIT", at: Date.now() }, ctx);
 					if (r.error) return notifyUsage(ctx, r.error);
-					await rt.runCheck(ctx);
+					void rt.startCheck(ctx);
 					return;
 				}
 
@@ -211,20 +197,23 @@ export function registerCommands(pi: any, getRuntime: GetRuntime): void {
 				}
 
 				case "plan": {
-					const a = rt.active;
-					if (!a) return notifyUsage(ctx, "无活动 mission");
-					if (a.state.phase !== "plan") return notifyUsage(ctx, "只有 PLAN 相位可以编辑计划(AC 已冻结)");
-					const pp = planPaths(rt.layout, a.state.missionId);
-					const current = fs.existsSync(pp.missionMd) ? fs.readFileSync(pp.missionMd, "utf8") : "";
-					if (!ctx.hasUI) return notifyUsage(ctx, `非交互环境,直接编辑 ${pp.missionMd}`);
-					const edited = await ctx.ui.editor("MISSION.md(冻结前可编辑)", current);
-					if (edited == null) return;
-					if (!parseMissionMd(edited)) {
-						return notifyUsage(ctx, "未写入:缺少合法的 ```mission fence(它是机器的 source of truth,请保留)");
+					// 任何相位都能只读查看:MISSION.md 从 define 起就落盘(goal/definition 是
+					// 换脑后的恢复锚点),冻结之后只是内容变全 —— 这个命令不再有可用窗口问题。
+					const id = rest.trim() || rt.active?.state.missionId || null;
+					if (!id) return notifyUsage(ctx, "无活动 mission。/missions 查看历史");
+					const d = statusDataFor(rt, id);
+					if (!d) return notifyUsage(ctx, missionLoadError(rt, id));
+					if (!ctx.hasUI) {
+						pi.appendEntry("missions-card", {
+							title: `${d.state.missionId} · 计划`,
+							body: planFallbackText(d),
+						});
+						return;
 					}
-					fs.mkdirSync(pp.dir, { recursive: true });
-					fs.writeFileSync(pp.missionMd, edited, "utf8");
-					ctx.ui.notify("已写入。注意:冻结以 mission_write_plan 的参数为准,手写修改请让 planner 并入其提交。", "warning");
+					if (flags.edit) {
+						return notifyUsage(ctx, "v2 的 MISSION.md 是只读投影，不支持手工编辑；请让 planner 调用 mission_write_plan");
+					}
+					await openPlanReview(ctx, () => ({ plan: d.plan, state: d.state }), { readOnly: true });
 					return;
 				}
 
@@ -255,8 +244,10 @@ export function registerCommands(pi: any, getRuntime: GetRuntime): void {
 					const rows = ROLE_ORDER.map((role) => {
 						const v = resolveRoleView(cfg, role, isAvailable, session);
 						const spent = a?.state.cost[role];
+						const tk = a?.state.tokens?.[role];
+						const tkSum = tk ? tk.input + tk.output + tk.cacheRead + tk.cacheWrite : 0;
 						const mark = STATE_ICON[v.state] ?? "?";
-						return `  ${mark} ${role.padEnd(10)} ${v.label}  · thinking=${v.thinking}${v.thinkingIsDefault ? "(默认)" : ""}${spent ? `  $${spent.toFixed(4)}` : ""}`;
+						return `  ${mark} ${role.padEnd(10)} ${v.label}  · thinking=${v.thinking}${v.thinkingIsDefault ? "(默认)" : ""}${spent ? `  $${spent.toFixed(4)}` : ""}${tkSum > 0 ? `  ${formatTokens(tkSum)} tok` : ""}`;
 					}).join("\n");
 					pi.appendEntry("missions-card", {
 						title: `角色模型映射(${rt.config.missionsDir}/models.json)`,
@@ -275,11 +266,32 @@ export function registerCommands(pi: any, getRuntime: GetRuntime): void {
 	});
 }
 
-/** 新 Mission 的开场白。按起始相位分流(standard/complex 起于 FRAME) */
+/** 新 Mission 的开场白。按起始相位分流(standard/complex 起于 DEFINE) */
 /**
  * 读某个 mission 的展示数据:优先取内存(活动 mission 的实时态),
  * 否则从磁盘读(只看不接管 —— 不改 CURRENT 指针、不切工具集)。
  */
+/** 非 TUI 环境下 /mission plan 的退化形态:同一批行构造器,不上色 */
+function planFallbackText(d: StatusViewData): string {
+	const t = { fg: (_c: string, x: string) => x, bold: (x: string) => x };
+	const W = 88;
+	return [
+		"目标与边界",
+		...scopeLines(d.plan, t, W),
+		"",
+		"方案",
+		...approachLines(d.plan, t, W),
+		"",
+		"验收标准",
+		...acReviewLines(d.plan, t, W),
+		"",
+		"任务",
+		...taskReviewLines(d.plan, d.state, t, W),
+		"",
+		`verify.sh 见 ${d.verifyScriptPath}(${(d.plan.verifyScript ?? "").split("\n").length} 行)`,
+	].join("\n");
+}
+
 function statusDataFor(rt: Runtime, missionId: string): StatusViewData | null {
 	const dirName = rt.config.missionsDir;
 	const cur = rt.active?.state.missionId === missionId ? rt.active : null;
@@ -287,17 +299,19 @@ function statusDataFor(rt: Runtime, missionId: string): StatusViewData | null {
 	let plan: MissionPlan | null = null;
 	let state: MissionState | null = null;
 	let logLines: string[] = [];
+	let generation = 0;
 
 	if (cur) {
 		plan = cur.plan;
 		state = cur.state;
+		generation = cur.generation;
 		logLines = cur.inMemory ? [] : readLog(sp.logMd).trim().split("\n").filter(Boolean);
 	} else {
-		const pp = planPaths(rt.layout, missionId);
-		const md = fs.existsSync(pp.missionMd) ? fs.readFileSync(pp.missionMd, "utf8") : null;
-		plan = md ? parseMissionMd(md) : null;
-		state = loadStateFile(sp.stateJson);
-		if (!plan || !state) return null;
+		const loaded = rt.repository.load(missionId);
+		if (!loaded.ok) return null;
+		plan = loaded.snapshot.plan;
+		state = loaded.snapshot.state;
+		generation = loaded.snapshot.artifacts.generation;
 		logLines = readLog(sp.logMd).trim().split("\n").filter(Boolean);
 	}
 	if (!plan || !state) return null;
@@ -324,18 +338,26 @@ function statusDataFor(rt: Runtime, missionId: string): StatusViewData | null {
 		evidence: { latest: latestEvidenceResults(sp.evidenceDir) },
 		taskEvidence,
 		spikeReports,
+		checkState: rt.checkStateFor(missionId),
 		logLines,
 		dirName,
+		verifyScriptPath: `./${dirName}/state/${missionId}/generations/${generation}/verify.sh`,
 	};
+}
+
+function missionLoadError(rt: Runtime, missionId: string): string {
+	const loaded = rt.repository.load(missionId);
+	return loaded.ok ? `mission "${missionId}" 暂时无法展示` : `mission "${missionId}" ${loaded.code}: ${loaded.error}`;
 }
 
 function kickoff(dirName: string, id: string, tier: string, goal: string, phase: string): string {
 	const head = `[pi-missions] 新 Mission 已创建(${id},${tier} 档),进入 ${phase.toUpperCase()} 相位。`;
-	if (phase === "frame") {
+	if (phase === "define") {
 		return (
-			`${head}阅读 ${dirName}/README.md 与 ${dirName}/phases/frame.md。` +
-			"先读代码,能从仓库里读到的别去问人;仍有影响验收标准的模糊就调用 mission_ask 问一轮" +
-			"(整个 mission 只许一轮、最多 3 个问题)并停下等回答,清楚了就调用 mission_frame。" +
+			`${head}阅读 ${dirName}/README.md 与 ${dirName}/phases/define.md。` +
+			"先读代码,能从仓库里读到的别去问人;仍有影响完成条件的模糊就调用 mission_ask 提问" +
+			"(一轮最多 3 个,每个必须带推荐答案;standard 2 轮、complex 3 轮)并停下等回答," +
+			"清楚了就调用 mission_define 交出目标、完成条件(doneWhen)与边界。" +
 			`原始需求:${goal}`
 		);
 	}
@@ -349,6 +371,33 @@ function notifyUsage(ctx: Ctx, msg: string): void {
 	ctx.ui.notify(msg, "warning");
 }
 
+/**
+ * 状态视图的统一接线:恢复/中止/补充核验指令。
+ * 恢复只对「被 halt、换脑挂起、或未附着(中断/别的会话)」的 mission 开放;
+ * 正在本会话跑着的 mission 没有恢复入口,中止也只对它有意义(/mission abort 作用于活动 mission)。
+ */
+export function statusViewOpts(pi: any, ctx: Ctx, rt: Runtime, id: string) {
+	return {
+		getCheckState: () => rt.checkStateFor(id),
+		onResume: (mid: string) => pi.sendUserMessage(`/mission resume ${mid}`, { deliverAs: "followUp", expandPromptTemplates: true }),
+		canResume: (d: StatusViewData) =>
+			d.state.phase !== "done" &&
+			(d.state.phase === "halted" || !!d.state.pendingHandoff || rt.active?.state.missionId !== d.state.missionId),
+		onAbort: () => pi.sendUserMessage(`/mission abort`, { deliverAs: "followUp", expandPromptTemplates: true }),
+		canAbort: (d: StatusViewData) =>
+			d.state.phase !== "done" &&
+			d.state.phase !== "halted" &&
+			rt.active?.state.missionId === d.state.missionId,
+		onSteer: (_mid: string, text: string) => {
+			void rt.steerVerifier(ctx, text).then((r) => {
+				if ("error" in r) ctx.ui.notify(`补充指令未送达:${r.error}`, "warning");
+			});
+		},
+	};
+}
+
+const BOOL_FLAGS = new Set(["edit"]);
+
 function parseArgs(args: string): { sub: string; rest: string; flags: Record<string, string> } {
 	const flags: Record<string, string> = {};
 	// --key=value 与 --key value / --key "quoted value"
@@ -358,6 +407,13 @@ function parseArgs(args: string): { sub: string; rest: string; flags: Record<str
 	});
 	rest = rest.replace(/--([\w-]+)\s+("[^"]*"|'[^']*')/g, (_m, k, v) => {
 		flags[k] = String(v).replace(/^["']|["']$/g, "");
+		return "";
+	});
+	// 无值开关。走白名单而不是"凡 --xxx 都算":目标文本里出现 --xxx 的时候
+	// 不该被悄悄吃掉(/mission new "重构 --legacy 模块")
+	rest = rest.replace(/--([\w-]+)/g, (m, k) => {
+		if (!BOOL_FLAGS.has(String(k))) return m;
+		flags[k] = "true";
 		return "";
 	});
 	const parts = rest.trim().split(/\s+/).filter(Boolean);

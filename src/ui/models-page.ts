@@ -11,7 +11,7 @@
  */
 
 import { visibleWidth } from "@earendil-works/pi-tui";
-import type { Role } from "../core/types.ts";
+import type { Role, RoleTokenUsage } from "../core/types.ts";
 import {
 	availabilityOf,
 	DEFAULT_THINKING,
@@ -22,6 +22,7 @@ import {
 	type RoleModelView,
 } from "../roles/models.ts";
 import { clip, CURSOR, pad } from "./chrome.ts";
+import { formatTokens } from "./dashboard.ts";
 
 interface Theme {
 	fg(color: string, text: string): string;
@@ -42,6 +43,8 @@ export interface ModelsPageData {
 	sessionLabel: string;
 	/** 活动 mission 的按角色花费;无活动 mission 为空 */
 	cost: Partial<Record<Role, number>>;
+	/** 按角色 token 用量(网关不报价时美元恒 0,它是真实消耗) */
+	tokens?: Partial<Record<Role, RoleTokenUsage>>;
 	/** 活动 mission 的相位角色(用于标出"当前正在用") */
 	activeRole: Role | null;
 	dirName: string;
@@ -125,7 +128,11 @@ export function modelRows(d: ModelsPageData, selected: number, t: Theme, width =
 			: t.fg("accent", v.thinking);
 		const thinking = pad(thinkingText, thinkingW);
 		const spent = d.cost[role];
-		const money = showCost ? pad(spent ? t.fg("muted", `$${spent.toFixed(4)}`) : "", COL_COST) : "";
+		const tokU = d.tokens?.[role];
+		const tokSum = tokU ? tokU.input + tokU.output + tokU.cacheRead + tokU.cacheWrite : 0;
+		// 美元优先;网关不报价(cost 恒 0)时显 token,两者都没有留空
+		const cellText = spent ? `$${spent.toFixed(4)}` : tokSum > 0 ? `${formatTokens(tokSum)} tok` : "";
+		const money = showCost ? pad(cellText ? t.fg("muted", cellText) : "", COL_COST) : "";
 		// 窄屏放不下这个尾标,直接不显示 —— 截成 "← …" 反而看不懂
 		const here = d.activeRole === role && showTag ? t.fg("accent", "← 当前相位") : "";
 		const row = `${cursor}${on ? t.bold(name) : t.fg("muted", name)}${icon}${pad(label, labelW)}${thinking}${money}${here}`;

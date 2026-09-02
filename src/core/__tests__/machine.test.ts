@@ -20,10 +20,10 @@ const unknown: Verdict = { outcome: "inconclusive", failing: [], reason: "env dr
 
 const has = (effects: Effect[], type: Effect["type"]) => effects.some((e) => e.type === type);
 
-/** 把 mission 推到 plan 相位(standard/complex 起于 frame) */
+/** 把 mission 推到 plan 相位(standard/complex 起于 define) */
 function toPlan(tier: "quick" | "standard" | "complex" = "standard"): MissionState {
 	const s = mk(tier);
-	return s.phase === "frame" ? transition(s, { type: "FRAME_DONE", at: AT }).state : s;
+	return s.phase === "define" ? transition(s, { type: "DEFINE_DONE", at: AT }).state : s;
 }
 
 /** 把 mission 推到 do 相位 */
@@ -56,39 +56,44 @@ test("PLAN_FROZEN 只能在 plan 相位", () => {
 
 test("空任务列表无法进入 DO", () => {
 	const s = initialState({ missionId: "m1", tier: "standard", taskOrder: [] });
-	const r = transition(transition(s, { type: "FRAME_DONE", at: AT }).state, { type: "PLAN_FROZEN", at: AT });
+	const r = transition(transition(s, { type: "DEFINE_DONE", at: AT }).state, { type: "PLAN_FROZEN", at: AT });
 	assert.ok(r.error);
 });
 
-// ─────────────── FRAME ───────────────
+// ─────────────── DEFINE ───────────────
 
-test("standard/complex 起于 FRAME,quick 直接起于 PLAN", () => {
-	assert.equal(mk("standard").phase, "frame");
-	assert.equal(mk("complex").phase, "frame");
+test("standard/complex 起于 DEFINE,quick 直接起于 PLAN", () => {
+	assert.equal(mk("standard").phase, "define");
+	assert.equal(mk("complex").phase, "define");
 	assert.equal(mk("quick").phase, "plan", "quick 的判定依据是 --verify,没有 AC 要定义");
 });
 
-test("FRAME_DONE 进 PLAN 并切到 planner 工具集", () => {
-	const r = transition(mk(), { type: "FRAME_DONE", at: AT });
+test("DEFINE_DONE 进 PLAN 并切到 planner 工具集", () => {
+	const r = transition(mk(), { type: "DEFINE_DONE", at: AT });
 	assert.equal(r.state.phase, "plan");
 	assert.ok(has(r.effects, "SET_TOOLS"));
 	assert.ok(has(r.effects, "SET_ROLE"));
 });
 
-test("FRAME 相位之外不能发 FRAME_DONE / FRAME_ASKED", () => {
-	assert.ok(transition(toPlan(), { type: "FRAME_DONE", at: AT }).error);
-	assert.ok(transition(toDo(), { type: "FRAME_ASKED", at: AT }).error);
+test("DEFINE 相位之外不能发 DEFINE_DONE / DEFINE_ASKED", () => {
+	assert.ok(transition(toPlan(), { type: "DEFINE_DONE", at: AT }).error);
+	assert.ok(transition(toDo(), { type: "DEFINE_ASKED", at: AT, settled: [] }).error);
 });
 
-test("FRAME_ASKED 记账提问轮数(预算判定在 core/frame.ts)", () => {
-	const r = transition(mk(), { type: "FRAME_ASKED", at: AT });
-	assert.equal(r.state.frameAsks, 1);
-	assert.equal(r.state.phase, "frame", "提问不迁移相位,等人回答");
+test("DEFINE_ASKED 记账提问轮数与结账快照(闸门判定在 core/define.ts)", () => {
+	const r = transition(mk(), { type: "DEFINE_ASKED", at: AT, settled: ["D1"] });
+	assert.equal(r.state.defineAsks, 1);
+	assert.deepEqual(r.state.defineSettled, ["D1"], "下一轮要靠它判断上一轮有没有推进决策");
+	assert.equal(r.state.phase, "define", "提问不迁移相位,等人回答");
+
+	const r2 = transition(r.state, { type: "DEFINE_ASKED", at: AT, settled: ["D1", "D2"] });
+	assert.equal(r2.state.defineAsks, 2);
+	assert.deepEqual(r2.state.defineSettled, ["D1", "D2"]);
 });
 
-test("换脑挂起时 FRAME_DONE 被拒", () => {
+test("换脑挂起时 DEFINE_DONE 被拒", () => {
 	const s = transition(mk(), { type: "HANDOFF_REQUEST", at: AT, reason: "x" }).state;
-	assert.ok(transition(s, { type: "FRAME_DONE", at: AT }).error);
+	assert.ok(transition(s, { type: "DEFINE_DONE", at: AT }).error);
 });
 
 // ─────────────── SUBMIT / PASS 推进 ───────────────
@@ -197,6 +202,101 @@ test("INCONCLUSIVE 回 do 且不计 attempts、不进熔断", () => {
 	assert.ok(has(r.effects, "NOTIFY"));
 });
 
+test("inconclusive·evidence 挂待补证据闸门并记下 treeFp,同指纹 SUBMIT 被拒绝", () => {
+	const tree1 = "sha256:1111111111111111";
+	const tree2 = "sha256:2222222222222222";
+	let s = toDo();
+	// 第 1 次提交带指纹 tree1
+	s = transition(s, { type: "SUBMIT", at: AT, treeFp: tree1 }).state;
+	assert.equal(s.tasks.T1.submittedTreeFp, tree1);
+
+	// 判定为 evidence 类 inconclusive
+	const evVerdict: Verdict = {
+		outcome: "inconclusive",
+		inconclusiveCause: "evidence",
+		missingAcIds: ["AC1"],
+		failing: [],
+		reason: "缺少验收证据:AC1",
+	};
+	s = transition(s, { type: "VERDICT", at: AT, verdict: evVerdict }).state;
+	assert.equal(s.phase, "do");
+	assert.ok(s.tasks.T1.awaitingEvidence);
+	assert.equal(s.tasks.T1.awaitingEvidence?.treeFp, tree1);
+	assert.deepEqual(s.tasks.T1.awaitingEvidence?.acIds, ["AC1"]);
+
+	// 工作区无改动(指纹仍为 tree1)原样重交 → 被拦截
+	const rejected = transition(s, { type: "SUBMIT", at: AT, treeFp: tree1 });
+	assert.ok(rejected.error);
+	assert.match(rejected.error!, /未检测到任何改动/);
+	assert.equal(rejected.state.phase, "do");
+
+	// 补充证据或修改实现后(指纹变为 tree2)重交 → 放行并进入 check,清空 awaitingEvidence
+	const accepted = transition(s, { type: "SUBMIT", at: AT, treeFp: tree2 });
+	assert.ok(!accepted.error);
+	assert.equal(accepted.state.phase, "check");
+	assert.equal(accepted.state.tasks.T1.submittedTreeFp, tree2);
+	assert.equal(accepted.state.tasks.T1.awaitingEvidence, null);
+});
+
+test("inconclusive·env 不设闸门,原样重交可放行", () => {
+	const tree = "sha256:1111111111111111";
+	let s = toDo();
+	s = transition(s, { type: "SUBMIT", at: AT, treeFp: tree }).state;
+	const envVerdict: Verdict = {
+		outcome: "inconclusive",
+		inconclusiveCause: "env",
+		failing: [],
+		reason: "环境指纹不符",
+	};
+	s = transition(s, { type: "VERDICT", at: AT, verdict: envVerdict }).state;
+	assert.equal(s.phase, "do");
+	assert.equal(s.tasks.T1.awaitingEvidence, null);
+
+	// 原样重交放行
+	const okSubmit = transition(s, { type: "SUBMIT", at: AT, treeFp: tree });
+	assert.ok(!okSubmit.error);
+	assert.equal(okSubmit.state.phase, "check");
+});
+
+test("非 git 仓库(treeFp 为 null)时闸门退化放行", () => {
+	let s = toDo();
+	s = transition(s, { type: "SUBMIT", at: AT, treeFp: null }).state;
+	const evVerdict: Verdict = {
+		outcome: "inconclusive",
+		inconclusiveCause: "evidence",
+		missingAcIds: ["AC1"],
+		failing: [],
+		reason: "AC1 无结论",
+	};
+	s = transition(s, { type: "VERDICT", at: AT, verdict: evVerdict }).state;
+	assert.equal(s.phase, "do");
+
+	// treeFp 为 null 时放行
+	const res = transition(s, { type: "SUBMIT", at: AT, treeFp: null });
+	assert.ok(!res.error);
+	assert.equal(res.state.phase, "check");
+});
+
+test("待补证据闸门不影响 ESCALATE 逃生口", () => {
+	const tree = "sha256:1111111111111111";
+	let s = toDo();
+	s = transition(s, { type: "SUBMIT", at: AT, treeFp: tree }).state;
+	const evVerdict: Verdict = {
+		outcome: "inconclusive",
+		inconclusiveCause: "evidence",
+		missingAcIds: ["AC2"],
+		failing: [],
+		reason: "缺少验收证据:AC2",
+	};
+	s = transition(s, { type: "VERDICT", at: AT, verdict: evVerdict }).state;
+	assert.ok(s.tasks.T1.awaitingEvidence);
+
+	// 在 DO 调 ESCALATE 正常工作
+	const escalated = transition(s, { type: "ESCALATE", at: AT, to: 2, reason: "AC 分解有误" });
+	assert.ok(!escalated.error);
+	assert.equal(escalated.state.phase, "plan");
+});
+
 test("连续 INCONCLUSIVE 达上限停机(环境漂移防死循环)", () => {
 	let s = toCheck();
 	for (let i = 1; i < INCONCLUSIVE_STREAK_CAP; i++) {
@@ -230,8 +330,8 @@ test("L3 升级挂起等人工确认,确认后归档并换脑回 plan", () => {
 	assert.notEqual(r3.state.phase, "plan", "L3 确认前不迁移相位");
 
 	const okd = transition(r3.state, { type: "ESCALATION_CONFIRMED", at: AT });
-	assert.equal(okd.state.phase, "frame", "L3 = 改问题定义,落点是 FRAME 不是 PLAN");
-	assert.equal(okd.state.frameAsks, 0, "新的问题定义值得再问一轮");
+	assert.equal(okd.state.phase, "define", "L3 = 改问题定义,落点是 DEFINE 不是 PLAN");
+	assert.equal(okd.state.defineAsks, 0, "新的问题定义值得再问一轮");
 	assert.ok(has(okd.effects, "ARCHIVE_PLAN"));
 	assert.ok(has(okd.effects, "HANDOFF"));
 	assert.ok(okd.state.pendingHandoff);
@@ -271,6 +371,27 @@ test("无挂起时 HANDOFF_DONE 被拒绝", () => {
 	assert.ok(r.error);
 });
 
+test("HANDOFF_CANCELLED 显式解除挂起", () => {
+	const pending = transition(toDo(), { type: "HANDOFF_REQUEST", at: AT, reason: "manual" }).state;
+	const cancelled = transition(pending, { type: "HANDOFF_CANCELLED", at: AT, reason: "newSession cancelled" });
+	assert.equal(cancelled.state.pendingHandoff, null);
+	assert.ok(has(cancelled.effects, "NOTIFY"));
+	assert.ok(transition(toDo(), { type: "HANDOFF_CANCELLED", at: AT, reason: "x" }).error);
+});
+
+test("RECOVER_INTERRUPTED_CHECK 只接受匹配的 check/act 相位", () => {
+	const check = transition(toDo(), { type: "SUBMIT", at: AT }).state;
+	const recovered = transition(check, { type: "RECOVER_INTERRUPTED_CHECK", at: AT, from: "check" });
+	assert.equal(recovered.state.phase, "do");
+	assert.ok(transition(toDo(), { type: "RECOVER_INTERRUPTED_CHECK", at: AT, from: "check" }).error);
+
+	const act = {
+		...toDo(),
+		phase: "act" as const,
+	};
+	assert.equal(transition(act, { type: "RECOVER_INTERRUPTED_CHECK", at: AT, from: "act" }).state.phase, "do");
+});
+
 // ─────────────── 升档 ───────────────
 
 test("PROMOTE_TIER 只能升不能降,quick 升档补落盘", () => {
@@ -280,6 +401,41 @@ test("PROMOTE_TIER 只能升不能降,quick 升档补落盘", () => {
 	assert.ok(has(up.effects, "PERSIST_PLAN"));
 	const down = transition(up.state, { type: "PROMOTE_TIER", at: AT, to: "quick", reason: "x" });
 	assert.ok(down.error);
+});
+
+test("RECORD_ROLE_COST 只累计角色费用,不改变相位", () => {
+	const s = toDo();
+	const r = transition(s, { type: "RECORD_ROLE_COST", at: AT, role: "verifier", amount: 0.012 });
+	assert.equal(r.state.phase, "do");
+	assert.equal(r.state.cost.verifier, 0.012);
+	assert.equal(r.effects.length, 0);
+	assert.ok(transition(r.state, { type: "RECORD_ROLE_COST", at: AT, role: "verifier", amount: 0 }).error);
+});
+
+test("RECORD_ROLE_COST:网关不报价时 amount=0 也可记 token 账,逐字段累计", () => {
+	const s = toDo();
+	const tokens = { input: 1200, output: 300, cacheRead: 5000, cacheWrite: 0 };
+	// amount=0 + 无 tokens 仍然拒绝(空记账没有意义)
+	assert.ok(transition(s, { type: "RECORD_ROLE_COST", at: AT, role: "verifier", amount: 0 }).error);
+	const r1 = transition(s, { type: "RECORD_ROLE_COST", at: AT, role: "verifier", amount: 0, tokens });
+	assert.ok(!r1.error, JSON.stringify(r1.error));
+	assert.deepEqual(r1.state.tokens?.verifier, tokens);
+	assert.equal(r1.state.cost.verifier, undefined, "amount=0 不动美元账");
+	// 累计:同角色再记一笔,token 逐字段相加
+	const r2 = transition(r1.state, { type: "RECORD_ROLE_COST", at: AT, role: "verifier", amount: 0.01, tokens });
+	assert.equal(r2.state.tokens?.verifier?.input, 2400);
+	assert.equal(r2.state.tokens?.verifier?.cacheRead, 10000);
+	assert.equal(r2.state.cost.verifier, 0.01);
+	// 负数 amount 永远拒绝
+	assert.ok(transition(s, { type: "RECORD_ROLE_COST", at: AT, role: "verifier", amount: -1, tokens }).error);
+});
+
+test("RECORD_TOUCHED_FILE 去重并单调记录公开 API", () => {
+	let s = toDo();
+	s = transition(s, { type: "RECORD_TOUCHED_FILE", at: AT, path: "src/a.ts", publicApi: false }).state;
+	s = transition(s, { type: "RECORD_TOUCHED_FILE", at: AT + 1, path: "src/a.ts", publicApi: true }).state;
+	assert.deepEqual(s.metrics.touchedFiles, ["src/a.ts"]);
+	assert.equal(s.metrics.touchedPublicApi, true);
 });
 
 // ─────────────── ABORT ───────────────
@@ -334,4 +490,40 @@ test("kind 随每次冻结重算:同一 id 可以从 spike 变回 impl", () => {
 	assert.equal(asSpike.tasks.T1.kind, "spike");
 	const asImpl = transition({ ...asSpike, phase: "plan" as const }, { type: "PLAN_FROZEN", at: AT }).state;
 	assert.equal(asImpl.tasks.T1.kind, "impl");
+});
+
+// ─────────────── PLAN:人工打回 ───────────────
+
+test("PLAN_REJECTED 只能在 plan 相位,且记账打回次数与意见", () => {
+	assert.ok(transition(toDo(), { type: "PLAN_REJECTED", at: AT, comment: "x" }).error);
+
+	const r1 = transition(toPlan(), { type: "PLAN_REJECTED", at: AT, comment: "AC2 那条根本不会红" });
+	assert.equal(r1.state.phase, "plan", "上限之内不迁移相位,让 planner 重交");
+	assert.equal(r1.state.planReview?.rejections, 1);
+	assert.deepEqual(r1.state.planReview?.notes, ["AC2 那条根本不会红"]);
+
+	const r2 = transition(r1.state, { type: "PLAN_REJECTED", at: AT, comment: "任务粒度太粗" });
+	assert.equal(r2.state.planReview?.rejections, 2);
+	assert.deepEqual(r2.state.planReview?.notes, ["AC2 那条根本不会红", "任务粒度太粗"]);
+	assert.equal(r2.state.phase, "plan");
+});
+
+test("连打三次 → 硬拦转 L3:回 DEFINE、归档旧计划、强制换脑、重置提问轮次", () => {
+	let s = toPlan();
+	for (let i = 0; i < 2; i++) {
+		s = transition(s, { type: "PLAN_REJECTED", at: AT, comment: `第 ${i + 1} 次` }).state;
+	}
+	// 先把提问轮次用掉,验证 L3 会把它还回来
+	s = { ...s, defineAsks: 2, defineSettled: ["D1"] };
+
+	const r = transition(s, { type: "PLAN_REJECTED", at: AT, comment: "还是不对" });
+	assert.equal(r.state.phase, "define", "L3 的落点是 DEFINE,不是 PLAN —— 问题定义错了,换个姿势拆方案没用");
+	assert.equal(r.state.escalation.level, 3);
+	assert.equal(r.state.defineAsks, 0, "新的问题定义值得再问一轮");
+	assert.deepEqual(r.state.defineSettled, []);
+	assert.ok(r.state.pendingHandoff, "重新定义问题不能在被三版废方案污染的上下文里做");
+	assert.ok(has(r.effects, "ARCHIVE_PLAN"));
+	assert.ok(has(r.effects, "HANDOFF"));
+	assert.ok(has(r.effects, "NOTIFY"));
+	assert.equal(r.state.escalation.history.at(-1)?.to, 3);
 });

@@ -431,6 +431,10 @@ export interface PanelCallbacks {
 	onResume?: (missionId: string) => void;
 	/** 在 mission 行按 Ctrl+A:中止执行该 mission */
 	onAbort?: (missionId: string) => void;
+	/** 该 mission 是否正附着在本会话的 Runtime 上(进行中)—— 它不需要恢复,中止也只对它有意义 */
+	isAttached?: (missionId: string) => boolean;
+	/** 初次扫描发现损坏条目时报告；轮询不重复打扰 */
+	onLoadError?: (error: { code: "missing" | "corrupt" | "conflict"; message: string }) => void;
 	/** 「模型」页的数据与写入(runtime 提供);缺省则该页显示为不可用 */
 	models?: ModelsBridge;
 }
@@ -444,7 +448,7 @@ export interface ModelsBridge {
 
 export async function openMissionsPanel(ctx: any, l: RepoLayout, cb: PanelCallbacks): Promise<void> {
 	if (!ctx.hasUI) {
-		const missions = scanMissions(l);
+		const missions = scanMissions(l, cb.onLoadError);
 		if (missions.length === 0) {
 			ctx.ui.notify("没有历史 mission。/mission new <目标> 新建", "info");
 			return;
@@ -458,7 +462,7 @@ export async function openMissionsPanel(ctx: any, l: RepoLayout, cb: PanelCallba
 	}
 
 	await ctx.ui.custom((tui: any, theme: Theme, _kb: any, done: (r: void) => void) => {
-		let missions = scanMissions(l);
+		let missions = scanMissions(l, cb.onLoadError);
 		/** 任务页筛选文本(输入即筛选) */
 		let filter = "";
 		/** 选中项:0 = 「开始新任务」行,1..n = 筛选后的 mission */
@@ -644,7 +648,12 @@ export async function openMissionsPanel(ctx: any, l: RepoLayout, cb: PanelCallba
 				if (matchesKey(input, Key.ctrl("r"))) {
 					if (selected > 0) {
 						const m = filtered[selected - 1];
-						if (m && m.state.phase !== "done" && cb.onResume) {
+						// 只对真正可恢复的 mission 生效:被 halt、换脑挂起或未附着(中断/其它会话)
+						const resumable =
+							m &&
+							m.state.phase !== "done" &&
+							(m.state.phase === "halted" || !!m.state.pendingHandoff || !cb.isAttached?.(m.missionId));
+						if (resumable && cb.onResume) {
 							close();
 							cb.onResume(m.missionId);
 							return;
@@ -655,7 +664,8 @@ export async function openMissionsPanel(ctx: any, l: RepoLayout, cb: PanelCallba
 				if (matchesKey(input, Key.ctrl("a"))) {
 					if (selected > 0) {
 						const m = filtered[selected - 1];
-						if (m && m.state.phase !== "done" && m.state.phase !== "halted" && cb.onAbort) {
+						// /mission abort 只作用于当前附着的 mission,别把按键留给"中止别的"
+						if (m && m.state.phase !== "done" && m.state.phase !== "halted" && cb.isAttached?.(m.missionId) && cb.onAbort) {
 							close();
 							cb.onAbort(m.missionId);
 							return;

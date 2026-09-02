@@ -38,6 +38,7 @@ import {
 import type { MissionState } from "../core/types.ts";
 import { allTasks, findMilestoneOf, type MissionPlan } from "../store/mission.ts";
 import type { TaskEvidenceAttempt } from "../store/evidence.ts";
+import type { CheckState } from "../store/check.ts";
 import {
 	acLines,
 	costTotal,
@@ -57,8 +58,10 @@ export interface StatusViewData {
 	evidence: EvidenceSummary;
 	taskEvidence?: Record<string, TaskEvidenceAttempt[]>;
 	spikeReports?: Record<string, string>;
+	checkState?: CheckState | null;
 	logLines: string[];
 	dirName: string;
+	verifyScriptPath: string;
 }
 
 export type StatusMode = "mission" | "task-detail";
@@ -107,6 +110,8 @@ export interface StatusView {
 	scroll: [number, number, number];
 	canResume: boolean;
 	canAbort?: boolean;
+	/** CHECK 进行中且 Verifier 正在运行时,允许按 S 补充核验指令 */
+	canSteer?: boolean;
 	mode?: StatusMode;
 	selectedTask?: number;
 	taskDetailScroll?: number;
@@ -180,6 +185,8 @@ export function renderStatus(v: StatusView): string[] {
 				attempts,
 				spikeReport,
 				tier: d.state.tier,
+				checkState: d.checkState?.taskId === currentTask.id ? d.checkState : null,
+				now: v.now,
 			},
 			t,
 			inner,
@@ -227,6 +234,7 @@ export function renderStatus(v: StatusView): string[] {
 			: ([["↑↓", "滚动"]] as Array<[string, string]>)),
 		...(v.canResume ? ([["Ctrl+R", "恢复"]] as Array<[string, string]>) : []),
 		...(v.canAbort ? ([["Ctrl+A", "中止"]] as Array<[string, string]>) : []),
+		...(v.canSteer ? ([["S", "补充指令"]] as Array<[string, string]>) : []),
 		["R", "刷新"],
 		["Esc", "关闭"],
 	];
@@ -244,8 +252,14 @@ export function renderStatus(v: StatusView): string[] {
 	const leftW = narrow ? inner : Math.max(16, inner - 3 - rightW);
 
 	// 盒标题给了 id/档位,头行给了相位与进度 —— 概览栏不再重复,空间留给目标
-	const overview = overviewLines(d.plan, d.state, { now: v.now, theme: t, width: leftW, omitIdentity: true });
-	const ac = acLines(d.plan, d.evidence, d.dirName, t, leftW);
+	const overview = overviewLines(d.plan, d.state, {
+		now: v.now,
+		theme: t,
+		width: leftW,
+		omitIdentity: true,
+		checkState: d.checkState,
+	});
+	const ac = acLines(d.plan, d.evidence, d.dirName, t, leftW, d.verifyScriptPath);
 	const logAll = d.logLines.length > 0 ? d.logLines.map((l) => t.fg("dim", l)) : [t.fg("dim", "(暂无日志)")];
 
 	const clamp = (i: Focus, len: number, winH: number) => {
@@ -360,6 +374,14 @@ export function renderStatus(v: StatusView): string[] {
 export interface StatusViewOpts {
 	onResume?: (missionId: string) => void;
 	onAbort?: (missionId: string) => void;
+	/** CHECK 进行中按 S 补充核验指令;由 Runtime 审计进 CHECK.json/LOG.md。 */
+	onSteer?: (missionId: string, text: string) => void;
+	/** Ctrl+R 只对真正可恢复的 mission 显示/生效(被 halt、中断或未附着的) */
+	canResume?: (d: StatusViewData) => boolean;
+	/** Ctrl+A 只对附着在本 Runtime 上、仍在运行的 mission 显示/生效 */
+	canAbort?: (d: StatusViewData) => boolean;
+	/** 自动刷新时只读轻量 CHECK.json,避免每 2 秒重扫全部历史证据。 */
+	getCheckState?: () => CheckState | null;
 }
 
 export async function openStatusView(
@@ -396,7 +418,37 @@ export async function openStatusView(
 			}
 			if (!closed) tui.requestRender();
 		};
-		const timer = setInterval(refresh, 2_000);
+		const pollCheck = () => {
+			if (closed || data?.state.phase !== "check") return;
+			const previous = data.checkState;
+			if (previous && (previous.stage === "completed" || previous.stage === "error")) {
+				refresh();
+				return;
+			}
+			if (!opts?.getCheckState) {
+				refresh();
+				return;
+			}
+			let next: CheckState | null;
+			try {
+				next = opts.getCheckState();
+			} catch {
+				return;
+			}
+			if (!next) return;
+			if (next.updatedAt === previous?.updatedAt) {
+				// CHECK 内容没变化时仍刷新计时文本,不重读完整日志/证据。
+				tui.requestRender();
+				return;
+			}
+			data = { ...data, checkState: next };
+			if (next.stage === "completed" || next.stage === "error") {
+				refresh();
+			} else {
+				tui.requestRender();
+			}
+		};
+		const timer = setInterval(pollCheck, 2_000);
 
 		const close = () => {
 			if (closed) return;
@@ -404,6 +456,16 @@ export async function openStatusView(
 			clearInterval(timer);
 			done(undefined);
 		};
+
+		// 恢复/中止/补充指令的可行性随 data 变化,渲染与按键共用同一份判定
+		const resumeAllowed = () =>
+			!!opts?.onResume && !!data && (opts.canResume ? opts.canResume(data) : data.state.phase !== "done");
+		const abortAllowed = () =>
+			!!opts?.onAbort &&
+			!!data &&
+			(opts.canAbort ? opts.canAbort(data) : data.state.phase !== "done" && data.state.phase !== "halted");
+		const steerAllowed = () =>
+			!!opts?.onSteer && data?.state.phase === "check" && data?.checkState?.verifier?.status === "running";
 
 		return {
 			render: (w: number) =>
@@ -415,8 +477,9 @@ export async function openStatusView(
 					data,
 					focus,
 					scroll,
-					canResume: !!opts?.onResume,
-					canAbort: !!opts?.onAbort,
+					canResume: resumeAllowed(),
+					canAbort: abortAllowed(),
+					canSteer: steerAllowed(),
 					mode,
 					selectedTask,
 					taskDetailScroll,
@@ -455,19 +518,31 @@ export async function openStatusView(
 				if (matchesKey(input, Key.escape) || matchesKey(input, "q")) return close();
 				if (matchesKey(input, Key.ctrl("r"))) {
 					// 从 missions 面板进入的 detail 页可直接恢复执行
-					if (opts?.onResume && data) {
+					if (resumeAllowed() && data) {
 						const id = data.state.missionId;
 						close();
-						opts.onResume(id);
+						opts!.onResume!(id);
 					}
 					return;
 				}
 				if (matchesKey(input, Key.ctrl("a"))) {
-					if (opts?.onAbort && data) {
+					if (abortAllowed() && data) {
 						const id = data.state.missionId;
 						close();
-						opts.onAbort(id);
+						opts!.onAbort!(id);
 					}
+					return;
+				}
+				if (matchesKey(input, "s") && steerAllowed()) {
+					// 补充核验指令:只影响当前这次 CHECK 的抽查重点,冻结的 AC 不受影响
+					const id = data!.state.missionId;
+					void (async () => {
+						const text = await ctx.ui.input(
+							"补充核验指令",
+							"只补充本次核验的抽查重点;验收标准已冻结,改不了",
+						);
+						if (text?.trim() && steerAllowed()) opts!.onSteer!(id, text.trim());
+					})();
 					return;
 				}
 				if (matchesKey(input, Key.tab)) {
@@ -510,5 +585,14 @@ export async function openStatusView(
 
 /** 非 TUI 环境的降级输出 */
 export function statusFallbackText(d: StatusViewData): string {
-	return renderStatusDashboard(d.plan, d.state, d.evidence, d.logLines.slice(-5), d.dirName);
+	return renderStatusDashboard(
+		d.plan,
+		d.state,
+		d.evidence,
+		d.logLines.slice(-5),
+		d.dirName,
+		Date.now(),
+		d.checkState,
+		d.verifyScriptPath,
+	);
 }

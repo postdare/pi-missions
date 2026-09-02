@@ -32,9 +32,9 @@ export const THINKING_LEVELS = ["off", "minimal", "low", "medium", "high", "xhig
 export const ROLE_ORDER: Role[] = ["planner", "executor", "verifier", "escalator"];
 
 export const ROLE_DESC: Record<Role, string> = {
-	planner: "FRAME 定义问题 + PLAN 设计 AC",
+	planner: "DEFINE 定义问题 + PLAN 设计 AC",
 	executor: "DO 写代码(主力消耗)",
-	verifier: "子进程独立核对 AC —— 判定权外置(I3)",
+	verifier: "进程内独立 AgentSession 核对 AC —— 判定权外置(I3)",
 	escalator: "ACT 一轮失败诊断",
 };
 

@@ -14,9 +14,10 @@ import { execFile } from "node:child_process";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import { Runtime, renderStateCard } from "../src/runtime.ts";
+import { Runtime, renderStateCard, renderDoBrief } from "../src/runtime.ts";
 import { parseMissionMd } from "../src/store/mission.ts";
 import { toolsForPhase } from "../src/hooks/gate.ts";
+import type { MissionSnapshotV2 } from "../src/store/repository.ts";
 
 function execReal(cmd: string, args: string[], opts?: { cwd?: string; timeout?: number }) {
 	return new Promise<{ code: number; stdout: string; stderr: string; killed: boolean }>((resolve) => {
@@ -59,10 +60,13 @@ function mockCtx(cwd: string) {
 			confirm: async () => true,
 		},
 		getContextUsage: () => ({ tokens: 0, contextWindow: 100_000, percent: 0 }),
-		sessionManager: { getSessionFile: () => "/tmp/fake-session.jsonl" },
+		sessionManager: { getSessionFile: () => "/tmp/fake-session.jsonl", getEntries: () => [] },
 		modelRegistry: { find: () => undefined },
 	};
 }
+
+/** 所有 mission 共用的一条完成条件;AC 用 covers: ["DW1"] 指回它 */
+const DW = [{ id: "DW1", text: "hello.txt 存在且内容含 hello" }];
 
 const VERIFY_SH = `#!/usr/bin/env bash
 case "$1" in
@@ -77,12 +81,17 @@ async function newMission(tmp: string) {
 	const rt = new Runtime(pi, tmp);
 	const start = await rt.startNew(ctx, "create hello.txt", "standard");
 	assert.ok("id" in start, JSON.stringify(start));
-	assert.equal(rt.active!.state.phase, "frame", "standard 起于 FRAME");
-	const fr = await rt.frame(ctx, { goal: "create hello.txt", constraints: [], nonGoals: [] });
+	assert.equal(rt.active!.state.phase, "define", "standard 起于 DEFINE");
+	const fr = await rt.define(ctx, {
+		goal: "create hello.txt",
+		doneWhen: [{ id: "DW1", text: "仓库根目录有一个内容含 hello 的 hello.txt" }],
+		constraints: [],
+		nonGoals: [],
+	});
 	assert.ok("ok" in fr, JSON.stringify(fr));
 	const wp = await rt.writePlan(ctx, {
 		goal: "create hello.txt",
-		acceptanceCriteria: [{ id: "AC1", text: "hello.txt 存在且含 hello", verify: "hello-exists" }],
+		acceptanceCriteria: [{ id: "AC1", text: "hello.txt 存在且含 hello", verify: "hello-exists", covers: ["DW1"] }],
 		milestones: [{ id: "M1", title: "only", tasks: [{ id: "T1", title: "create hello.txt", verify: ["hello-exists"] }] }],
 		verifyScript: VERIFY_SH,
 	});
@@ -92,13 +101,27 @@ async function newMission(tmp: string) {
 	return { pi, ctx, rt };
 }
 
+function snapshotOf(rt: Runtime): MissionSnapshotV2 {
+	const loaded = rt.repository.load(rt.active!.state.missionId);
+	assert.ok(loaded.ok, loaded.error);
+	return loaded.snapshot;
+}
+
+function missionMdOf(rt: Runtime): string {
+	return rt.repository.generationMissionMd(snapshotOf(rt));
+}
+
+function verifyShOf(rt: Runtime): string {
+	return rt.repository.generationVerifySh(snapshotOf(rt));
+}
+
 test("完整闭环:fail → act → adjust → pass → done", async () => {
 	const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "pi-missions-smoke-"));
 	const { pi, ctx, rt } = await newMission(tmp);
 
 	// 计划与脚手架已落盘
-	assert.ok(fs.existsSync(path.join(tmp, "missions", "plans", rt.active!.state.missionId, "MISSION.md")));
-	assert.ok(fs.existsSync(path.join(tmp, "missions", "scripts", "verify.sh")));
+	assert.ok(fs.existsSync(missionMdOf(rt)));
+	assert.ok(fs.existsSync(verifyShOf(rt)));
 	assert.ok(fs.existsSync(path.join(tmp, "missions", "phases", "do.md")));
 
 	// 第一轮:hello.txt 不存在 → hard fail → act
@@ -108,6 +131,26 @@ test("完整闭环:fail → act → adjust → pass → done", async () => {
 	assert.equal(rt.active!.state.phase, "act");
 	assert.equal(rt.active!.state.tasks.T1.sameSignatureCount, 1);
 	assert.ok(pi.calls.entries.some((e) => e.type === "missions-verdict" && e.data.verdict.outcome === "fail"));
+	const checkFile = path.join(tmp, "missions", "state", rt.active!.state.missionId, "CHECK.json");
+	const check = JSON.parse(fs.readFileSync(checkFile, "utf8"));
+	assert.equal(check.stage, "completed");
+	assert.equal(check.outcome, "fail");
+	assert.equal(check.completedBranches[0].acId, "hello-exists");
+	assert.equal(check.completedBranches[0].exitCode, 1);
+	const firstEvidenceFile = path.join(
+		tmp,
+		"missions",
+		"state",
+		rt.active!.state.missionId,
+		"evidence",
+		"T1-attempt1.json",
+	);
+	const firstEvidence = JSON.parse(fs.readFileSync(firstEvidenceFile, "utf8")).evidences[0];
+	assert.match(firstEvidence.command, /verify\.sh hello-exists/);
+	assert.equal(typeof firstEvidence.startedAt, "number");
+	assert.equal(typeof firstEvidence.durationMs, "number");
+	assert.equal(typeof firstEvidence.stdout, "string");
+	assert.equal(typeof firstEvidence.stderr, "string");
 	// act 的 followUp 已发出
 	assert.ok(pi.calls.followUps.some((m) => m.includes("ACT")));
 
@@ -126,8 +169,8 @@ test("完整闭环:fail → act → adjust → pass → done", async () => {
 	assert.equal(rt.active!.state.phase, "done");
 
 	// 状态与日志落盘
-	const stateFile = path.join(tmp, "missions", "state", rt.active!.state.missionId, "STATE.json");
-	const saved = JSON.parse(fs.readFileSync(stateFile, "utf8"));
+	const snapshotFile = path.join(tmp, "missions", "state", rt.active!.state.missionId, "SNAPSHOT.json");
+	const saved = JSON.parse(fs.readFileSync(snapshotFile, "utf8")).state;
 	assert.equal(saved.phase, "done");
 	assert.equal(saved.tasks.T1.status, "done");
 	const log = fs.readFileSync(path.join(tmp, "missions", "state", rt.active!.state.missionId, "LOG.md"), "utf8");
@@ -137,16 +180,150 @@ test("完整闭环:fail → act → adjust → pass → done", async () => {
 	assert.ok(fs.readdirSync(path.join(tmp, "missions", "state", rt.active!.state.missionId, "evidence")).length >= 2);
 });
 
+test("CHECK 执行异常转为 INCONCLUSIVE 并回到 DO,不会卡死在 check", async () => {
+	const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "pi-missions-smoke-"));
+	const { pi, ctx, rt } = await newMission(tmp);
+	const originalExec = pi.exec;
+	pi.exec = async (cmd: string, args: string[], opts?: { cwd?: string; timeout?: number }) => {
+		if (cmd === "bash" && String(args[0]).endsWith("verify.sh")) {
+			throw new Error("spawn failed");
+		}
+		return originalExec(cmd, args, opts);
+	};
+
+	const submitted = await rt.applyEvent({ type: "SUBMIT", at: Date.now() }, ctx);
+	assert.ok(!submitted.error);
+	await rt.runCheck(ctx);
+	assert.equal(rt.active!.state.phase, "do");
+	assert.equal(rt.active!.state.tasks.T1.inconclusiveStreak, 1);
+	const checkFile = path.join(tmp, "missions", "state", rt.active!.state.missionId, "CHECK.json");
+	const check = JSON.parse(fs.readFileSync(checkFile, "utf8"));
+	assert.equal(check.stage, "error");
+	assert.match(check.error, /spawn failed/);
+	assert.ok(pi.calls.followUps.some((message) => message.includes("DO")));
+});
+
+test("配置的 verifier 模型解析不到 → 显式 hard-only 降级,不静默退回会话模型", async () => {
+	const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "pi-missions-smoke-"));
+	const { ctx, rt } = await newMission(tmp);
+	rt.active!.git = true; // 临时目录不是 git 仓库;这里要测的是模型解析,不是仓库探测
+	// 会话模型明明可用,但 verifier 配的是一个 modelRegistry 里不存在的模型
+	(ctx as any).model = { provider: "session", id: "main" };
+	fs.writeFileSync(
+		path.join(tmp, "missions", "models.json"),
+		JSON.stringify({ verifier: { provider: "openai", model: "gpt-x", thinking: "low" } }),
+	);
+	fs.writeFileSync(path.join(tmp, "hello.txt"), "hello\n");
+
+	const submitted = await rt.applyEvent({ type: "SUBMIT", at: Date.now() }, ctx);
+	assert.ok(!submitted.error);
+	await rt.runCheck(ctx);
+
+	const checkFile = path.join(tmp, "missions", "state", rt.active!.state.missionId, "CHECK.json");
+	const check = JSON.parse(fs.readFileSync(checkFile, "utf8"));
+	assert.equal(check.verifier.status, "degraded");
+	assert.match(check.verifier.message, /openai\/gpt-x 不可用/, "要写明是哪个配置不可用,而不是静默换模型");
+	const log = fs.readFileSync(path.join(tmp, "missions", "state", rt.active!.state.missionId, "LOG.md"), "utf8");
+	assert.ok(log.includes("降级为 hard-only"), "降级必须进审计链");
+	// hard 证据仍然足够:不因为 verifier 缺席而误伤
+	assert.equal(rt.active!.state.phase, "done");
+});
+
+test("startCheck 对并发调用复用同一个 CHECK", async () => {
+	const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "pi-missions-smoke-"));
+	const { ctx, rt } = await newMission(tmp);
+	let finish!: () => void;
+	const pending = new Promise<void>((resolve) => {
+		finish = resolve;
+	});
+	let runs = 0;
+	rt.runCheck = async () => {
+		runs += 1;
+		await pending;
+	};
+
+	const first = rt.startCheck(ctx);
+	const second = rt.startCheck(ctx);
+	assert.strictEqual(second, first);
+	assert.equal(runs, 1);
+
+	rt.active = {
+		...rt.active!,
+		state: structuredClone(rt.active!.state),
+	};
+	const otherMissionInstance = rt.startCheck(ctx);
+	assert.notStrictEqual(otherMissionInstance, first);
+	assert.equal(runs, 2, "新的附着实例不应被旧 CHECK 阻塞");
+
+	finish();
+	await Promise.all([first, otherMissionInstance]);
+
+	const third = rt.startCheck(ctx);
+	assert.notStrictEqual(third, first);
+	await third;
+	assert.equal(runs, 3);
+});
+
+test("startCheck 吸收后台异常并允许重试", async () => {
+	const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "pi-missions-smoke-"));
+	const { ctx, rt } = await newMission(tmp);
+	let runs = 0;
+	rt.runCheck = async () => {
+		runs += 1;
+		throw new Error("background failed");
+	};
+
+	await assert.doesNotReject(rt.startCheck(ctx));
+	await assert.doesNotReject(rt.startCheck(ctx));
+	assert.equal(runs, 2);
+	assert.ok(ctx.notifications.some((message) => message.includes("background failed")));
+});
+
+test("CHECK widget 运行时刷新计时,销毁后停止", async () => {
+	const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "pi-missions-smoke-"));
+	const { ctx, rt } = await newMission(tmp);
+	let factory: ((tui: any, theme: any) => { dispose?: () => void }) | undefined;
+	(ctx.ui as any).setWidget = (_key: string, content: typeof factory) => {
+		factory = content;
+	};
+	rt.active!.state.phase = "check";
+	(rt as any).liveCheckState = {
+		taskId: "T1",
+		attempt: 1,
+		startedAt: Date.now(),
+		updatedAt: Date.now(),
+		stage: "running_verifier",
+		completedBranches: [],
+		verifier: { status: "running", startedAt: Date.now() },
+		summary: "核验中",
+	};
+
+	rt.refreshWidget(ctx);
+	assert.ok(factory);
+	let renders = 0;
+	const component = factory!(
+		{ requestRender: () => void (renders += 1) },
+		{ fg: (_color: string, text: string) => text, bold: (text: string) => text },
+	);
+	await new Promise((resolve) => setTimeout(resolve, 550));
+	assert.ok(renders > 0);
+
+	component.dispose?.();
+	const stoppedAt = renders;
+	await new Promise((resolve) => setTimeout(resolve, 550));
+	assert.equal(renders, stoppedAt);
+});
+
 test("计划不合法时被 writePlan 拒绝", async () => {
 	const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "pi-missions-smoke-"));
 	const pi = mockPi();
 	const ctx = mockCtx(tmp);
 	const rt = new Runtime(pi, tmp);
 	await rt.startNew(ctx, "x", "standard");
-	await rt.frame(ctx, { goal: "x", constraints: [], nonGoals: [] });
+	await rt.define(ctx, { goal: "x", doneWhen: DW, constraints: [], nonGoals: [] });
 	const r = await rt.writePlan(ctx, {
 		goal: "x",
-		acceptanceCriteria: [{ id: "AC1", text: "y", verify: "missing-branch" }],
+		acceptanceCriteria: [{ id: "AC1", text: "y", verify: "missing-branch" , covers: ["DW1"] }],
 		milestones: [{ id: "M1", title: "m", tasks: [{ id: "T1", title: "t", verify: ["missing-branch"] }] }],
 		verifyScript: "#!/usr/bin/env bash\nexit 0\n",
 	});
@@ -160,9 +337,9 @@ test("闸门:do 相位写冻结件被拦,pendingHandoff 硬阻断", async () => 
 	const { ctx, rt } = await newMission(tmp);
 
 	// do 相位写 MISSION.md → 拦
-	assert.ok(rt.gate("write", { path: `missions/plans/${rt.active!.state.missionId}/MISSION.md` }));
+	assert.ok(rt.gate("write", { path: `missions/state/${rt.active!.state.missionId}/generations/1/MISSION.md` }));
 	// do 相位写 state → 拦
-	assert.ok(rt.gate("edit", { path: `missions/state/${rt.active!.state.missionId}/STATE.json` }));
+	assert.ok(rt.gate("edit", { path: `missions/state/${rt.active!.state.missionId}/SNAPSHOT.json` }));
 	// 普通文件 → 放行
 	assert.equal(rt.gate("write", { path: "src/main.ts" }), null);
 
@@ -188,18 +365,33 @@ test("跨实例换脑接力:新 Runtime 从磁盘握手完成 HANDOFF_DONE", asy
 	// 模拟 pi 在 newSession 后重建扩展实例:全新 Runtime,同一仓库
 	const pi2 = mockPi();
 	const ctx2 = mockCtx(tmp);
+	const handoff = rt.active!.handoff!;
+	ctx2.sessionManager = {
+		getSessionFile: () => "/tmp/replacement-session.jsonl",
+		getEntries: () => [
+			{
+				type: "custom",
+				customType: "pi-missions-handoff",
+				data: {
+					missionId: rt.active!.state.missionId,
+					token: handoff.token,
+					revision: handoff.requestedRevision,
+				},
+			},
+		],
+	};
 	const rt2 = new Runtime(pi2, tmp);
 	assert.equal(rt2.active, null, "新实例内存为空");
 
-	await rt2.onSessionStart(ctx2);
+	await rt2.onSessionStart({ reason: "new", previousSessionFile: handoff.parentSession }, ctx2);
 
 	// 从磁盘接上 + 换脑握手完成 + 闸门重新生效
 	assert.ok(rt2.active, "必须从磁盘重附着");
 	assert.equal(rt2.active!.state.pendingHandoff, null, "HANDOFF_DONE 已落账");
 	assert.equal(rt2.active!.state.phase, "do");
-	assert.equal(rt2.active!.state.sessionMap.T1, "/tmp/fake-session.jsonl");
+	assert.equal(rt2.active!.state.sessionMap.T1, "/tmp/replacement-session.jsonl");
 	assert.ok(
-		rt2.gate("write", { path: `missions/plans/${rt2.active!.state.missionId}/MISSION.md` }),
+		rt2.gate("write", { path: `missions/state/${rt2.active!.state.missionId}/generations/1/MISSION.md` }),
 		"闸门在接力后必须重新生效",
 	);
 	assert.equal(rt2.gate("write", { path: "src/main.ts" }), null, "换脑完成后写工具解冻");
@@ -207,6 +399,52 @@ test("跨实例换脑接力:新 Runtime 从磁盘握手完成 HANDOFF_DONE", asy
 	assert.ok(
 		fs.existsSync(path.join(tmp, "missions", "state", rt2.active!.state.missionId, "profile.json")),
 	);
+});
+
+test("/mission next:写入 handoff marker；newSession 取消则显式解锁", async () => {
+	const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "pi-missions-smoke-"));
+	const pi = mockPi();
+	const ctx = mockCtx(tmp) as any;
+	const rt = new Runtime(pi, tmp);
+	await rt.startNew(ctx, "验证换脑 marker", "standard");
+	let marker: unknown = null;
+	ctx.newSession = async (opts: any) => {
+		await opts.setup({
+			appendCustomEntry: (type: string, data: unknown) => {
+				marker = { type, data };
+			},
+			appendMessage: () => {},
+		});
+		return { cancelled: false };
+	};
+
+	assert.deepEqual(await rt.handoff(ctx), { ok: true });
+	assert.equal((marker as any).type, "pi-missions-handoff");
+	assert.equal((marker as any).data.token, rt.active!.handoff!.token);
+	assert.ok(rt.active!.state.pendingHandoff, "新会话尚未握手前必须保持硬阻断");
+
+	const tmp2 = fs.mkdtempSync(path.join(os.tmpdir(), "pi-missions-smoke-"));
+	const ctx2 = mockCtx(tmp2) as any;
+	ctx2.newSession = async () => ({ cancelled: true });
+	const rt2 = new Runtime(mockPi(), tmp2);
+	await rt2.startNew(ctx2, "验证取消换脑", "standard");
+	assert.deepEqual(await rt2.handoff(ctx2), { ok: true });
+	assert.equal(rt2.active!.state.pendingHandoff, null);
+	assert.equal(rt2.active!.handoff, null);
+	const saved = rt2.repository.load(rt2.active!.state.missionId);
+	assert.ok(saved.ok, saved.error);
+	assert.equal(saved.snapshot.handoff, null);
+
+	const tmp3 = fs.mkdtempSync(path.join(os.tmpdir(), "pi-missions-smoke-"));
+	const ctx3 = mockCtx(tmp3) as any;
+	ctx3.newSession = async () => {
+		throw new Error("session backend unavailable");
+	};
+	const rt3 = new Runtime(mockPi(), tmp3);
+	await rt3.startNew(ctx3, "验证换脑创建失败", "standard");
+	const failed = await rt3.handoff(ctx3);
+	assert.match("error" in failed ? failed.error : "", /session backend unavailable/);
+	assert.ok(rt3.active!.state.pendingHandoff, "创建失败后保留挂起请求，允许重试");
 });
 
 test("ensureAttached:内存丢失时驱动命令从磁盘悄悄接上", async () => {
@@ -272,7 +510,7 @@ test("quick 带 --verify:命令进 DO 前冻结,走完判定闭环", async () =>
 	assert.equal(rt.active!.state.phase, "done");
 });
 
-test("quick 无 --verify:不进 DO,自动升 standard 停在 FRAME", async () => {
+test("quick 无 --verify:不进 DO,自动升 standard 停在 DEFINE", async () => {
 	const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "pi-missions-smoke-"));
 	const pi = mockPi();
 	const ctx = mockCtx(tmp);
@@ -282,14 +520,14 @@ test("quick 无 --verify:不进 DO,自动升 standard 停在 FRAME", async () =>
 	assert.ok("id" in r, JSON.stringify(r));
 	assert.equal(r.tier, "standard", "没有判定依据就不该有快车道");
 	assert.equal(rt.active!.state.tier, "standard");
-	assert.equal(rt.active!.state.phase, "frame", "模糊输入先去定义问题,再谈 AC");
+	assert.equal(rt.active!.state.phase, "define", "模糊输入先去定义问题,再谈 AC");
 	assert.equal(rt.active!.quickVerifyCommand, undefined);
 	assert.equal(rt.active!.inMemory, false, "升档后走正常落盘路径");
 	assert.ok(ctx.notifications.some((m) => m.includes("--verify")), "要告诉人为什么升档了");
 
-	// FRAME 相位:只读 + 问一轮 + 交定义,连 mission_write_plan 都还没给
+	// DEFINE 相位:只读 + 问一轮 + 交定义,连 mission_write_plan 都还没给
 	const tools = pi.calls.activeTools.at(-1)!;
-	assert.ok(tools.includes("mission_ask") && tools.includes("mission_frame"));
+	assert.ok(tools.includes("mission_ask") && tools.includes("mission_define"));
 	assert.ok(!tools.includes("mission_write_plan"), "问题没定义清楚不给写计划");
 	assert.ok(!tools.includes("write"));
 });
@@ -312,11 +550,11 @@ test("空壳 AC(冻结时就绿)被基线打回,计划不冻结", async () => {
 	const ctx = mockCtx(tmp);
 	const rt = new Runtime(pi, tmp);
 	await rt.startNew(ctx, "x", "standard");
-	await rt.frame(ctx, { goal: "x", constraints: [], nonGoals: [] });
+	await rt.define(ctx, { goal: "x", doneWhen: DW, constraints: [], nonGoals: [] });
 
 	const r = await rt.writePlan(ctx, {
 		goal: "x",
-		acceptanceCriteria: [{ id: "AC1", text: "看起来可执行,其实是空壳", verify: "always-ok" }],
+		acceptanceCriteria: [{ id: "AC1", text: "看起来可执行,其实是空壳", verify: "always-ok" , covers: ["DW1"] }],
 		milestones: [{ id: "M1", title: "m", tasks: [{ id: "T1", title: "t", verify: ["always-ok"] }] }],
 		verifyScript: '#!/usr/bin/env bash\ncase "$1" in\n  always-ok) exit 0 ;;\n  *) exit 2 ;;\nesac\n',
 	});
@@ -324,7 +562,10 @@ test("空壳 AC(冻结时就绿)被基线打回,计划不冻结", async () => {
 	assert.ok("error" in r, "exit 0 的分支必须被拒");
 	assert.match((r as any).error, /在动手之前就已经通过/);
 	assert.equal(rt.active!.state.phase, "plan", "计划未冻结,仍在 PLAN");
-	assert.ok(!fs.existsSync(path.join(tmp, "missions", "plans", rt.active!.state.missionId, "MISSION.md")), "被拒的计划不落 MISSION.md");
+	// MISSION.md 从 define 起就存在(恢复锚点),但被拒的计划内容不能进去
+	const onDisk = parseMissionMd(fs.readFileSync(missionMdOf(rt), "utf8"));
+	assert.equal(onDisk?.acceptanceCriteria.length, 0, "被拒的 AC 不落 MISSION.md");
+	assert.equal(onDisk?.verifyScript, "", "被拒的 verify.sh 不落 MISSION.md");
 	const log = fs.readFileSync(path.join(tmp, "missions", "state", rt.active!.state.missionId, "LOG.md"), "utf8");
 	assert.ok(log.includes("baseline REJECTED"));
 });
@@ -335,7 +576,7 @@ test("回归项显式声明 baseline green 才放行,并与红项共存", async 
 	const ctx = mockCtx(tmp);
 	const rt = new Runtime(pi, tmp);
 	await rt.startNew(ctx, "x", "standard");
-	await rt.frame(ctx, { goal: "x", constraints: [], nonGoals: [] });
+	await rt.define(ctx, { goal: "x", doneWhen: DW, constraints: [], nonGoals: [] });
 
 	const script = '#!/usr/bin/env bash\ncase "$1" in\n  hello-exists) test -f hello.txt ;;\n  no-regression) exit 0 ;;\n  *) exit 2 ;;\nesac\n';
 
@@ -343,8 +584,8 @@ test("回归项显式声明 baseline green 才放行,并与红项共存", async 
 	const bad = await rt.writePlan(ctx, {
 		goal: "x",
 		acceptanceCriteria: [
-			{ id: "AC1", text: "hello.txt 存在", verify: "hello-exists" },
-			{ id: "AC2", text: "现有测试不许挂", verify: "no-regression" },
+			{ id: "AC1", text: "hello.txt 存在", verify: "hello-exists" , covers: ["DW1"] },
+			{ id: "AC2", text: "现有测试不许挂", verify: "no-regression" , covers: ["DW1"] },
 		],
 		milestones: [{ id: "M1", title: "m", tasks: [{ id: "T1", title: "t", verify: ["hello-exists"] }] }],
 		verifyScript: script,
@@ -356,17 +597,207 @@ test("回归项显式声明 baseline green 才放行,并与红项共存", async 
 	const ok = await rt.writePlan(ctx, {
 		goal: "x",
 		acceptanceCriteria: [
-			{ id: "AC1", text: "hello.txt 存在", verify: "hello-exists" },
-			{ id: "AC2", text: "现有测试不许挂", verify: "no-regression", baseline: "green" },
+			{ id: "AC1", text: "hello.txt 存在", verify: "hello-exists" , covers: ["DW1"] },
+			{ id: "AC2", text: "现有测试不许挂", verify: "no-regression", baseline: "green" , covers: ["DW1"] },
 		],
 		milestones: [{ id: "M1", title: "m", tasks: [{ id: "T1", title: "t", verify: ["hello-exists"] }] }],
 		verifyScript: script,
 	});
 	assert.ok("ok" in ok, JSON.stringify(ok));
 	assert.equal(rt.active!.state.phase, "do");
-	const md = fs.readFileSync(path.join(tmp, "missions", "plans", rt.active!.state.missionId, "MISSION.md"), "utf8");
+	const md = fs.readFileSync(missionMdOf(rt), "utf8");
 	assert.ok(md.includes("baseline: green"), "MISSION.md 要写明基线声明");
 	assert.ok(md.includes("baseline: red"));
+});
+
+test("完成条件覆盖:漏一条 / 孤儿 AC 都冻结不了", async () => {
+	const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "pi-missions-smoke-"));
+	const pi = mockPi();
+	const ctx = mockCtx(tmp);
+	const rt = new Runtime(pi, tmp);
+	await rt.startNew(ctx, "x", "standard");
+	await rt.define(ctx, {
+		goal: "x",
+		doneWhen: [
+			{ id: "DW1", text: "hello.txt 存在且含 hello" },
+			{ id: "DW2", text: "现有测试不许挂" },
+		],
+		constraints: [],
+		nonGoals: [],
+	});
+
+	const script = '#!/usr/bin/env bash\ncase "$1" in\n  hello-exists) test -f hello.txt ;;\n  no-regression) exit 0 ;;\n  *) exit 2 ;;\nesac\n';
+	const ms = [{ id: "M1", title: "m", tasks: [{ id: "T1", title: "t", verify: ["hello-exists"] }] }];
+
+	// DW2 没有任何 AC 覆盖 —— "人以为会做、机器不会验"的那部分
+	const missing = await rt.writePlan(ctx, {
+		goal: "x",
+		acceptanceCriteria: [{ id: "AC1", text: "hello.txt 存在", verify: "hello-exists", covers: ["DW1"] }],
+		milestones: ms,
+		verifyScript: script,
+	});
+	assert.ok("error" in missing);
+	assert.match((missing as any).error, /没有任何 AC 覆盖:DW2/);
+
+	// 孤儿 AC —— planner 在批准的目标之外自己加戏
+	const orphan = await rt.writePlan(ctx, {
+		goal: "x",
+		acceptanceCriteria: [
+			{ id: "AC1", text: "hello.txt 存在", verify: "hello-exists", covers: ["DW1", "DW2"] },
+			{ id: "AC2", text: "顺手加的", verify: "no-regression", baseline: "green" },
+		],
+		milestones: ms,
+		verifyScript: script,
+	});
+	assert.ok("error" in orphan);
+	assert.match((orphan as any).error, /AC2 没有声明它覆盖哪条完成条件/);
+	assert.equal(rt.active!.state.phase, "plan", "被拒不迁移相位");
+
+	// 两条都覆盖上就放行
+	const ok = await rt.writePlan(ctx, {
+		goal: "x",
+		acceptanceCriteria: [
+			{ id: "AC1", text: "hello.txt 存在", verify: "hello-exists", covers: ["DW1"] },
+			{ id: "AC2", text: "现有测试不许挂", verify: "no-regression", baseline: "green", covers: ["DW2"] },
+		],
+		milestones: ms,
+		verifyScript: script,
+	});
+	assert.ok("ok" in ok, JSON.stringify(ok));
+	const md = fs.readFileSync(missionMdOf(rt), "utf8");
+	assert.ok(md.includes("覆盖: DW1"), "AC 与完成条件的对应关系要写进 MISSION.md");
+	assert.ok(md.includes("DW2: 现有测试不许挂"));
+});
+
+test("approach:complex 缺方案冻结不了,standard 可选;方案进 MISSION.md 与 fence", async () => {
+	const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "pi-missions-smoke-"));
+	const pi = mockPi();
+	const ctx = mockCtx(tmp);
+	const rt = new Runtime(pi, tmp);
+	await rt.startNew(ctx, "x", "complex");
+	await rt.define(ctx, { goal: "x", doneWhen: DW, constraints: [], nonGoals: [] });
+
+	const acs = [{ id: "AC1", text: "hello.txt 存在且含 hello", verify: "hello-exists", covers: ["DW1"] }];
+	const ms = [{ id: "M1", title: "m", tasks: [{ id: "T1", title: "t", verify: ["hello-exists"] }] }];
+
+	const noApproach = await rt.writePlan(ctx, { goal: "x", acceptanceCriteria: acs, milestones: ms, verifyScript: VERIFY_SH });
+	assert.ok("error" in noApproach);
+	assert.match((noApproach as any).error, /complex 档必须写 approach/);
+
+	// 决策没写为什么 —— 没有理由的决策不是决策,是偏好
+	const noWhy = await rt.writePlan(ctx, {
+		goal: "x",
+		approach: { summary: "直接写文件", decisions: [{ id: "D1", text: "用 fs.writeFileSync", why: "  " }] },
+		acceptanceCriteria: acs,
+		milestones: ms,
+		verifyScript: VERIFY_SH,
+	});
+	assert.ok("error" in noWhy);
+	assert.match((noWhy as any).error, /D1 没写为什么/);
+
+	const ok = await rt.writePlan(ctx, {
+		goal: "x",
+		approach: {
+			summary: "在仓库根直接落一个 hello.txt,不引入任何构建步骤",
+			decisions: [{ id: "D1", text: "不建 src/ 目录", why: "这个 mission 只产出一个文本文件", rejected: "起一个生成脚本" }],
+		},
+		acceptanceCriteria: acs,
+		milestones: ms,
+		verifyScript: VERIFY_SH,
+	});
+	assert.ok("ok" in ok, JSON.stringify(ok));
+
+	const md = fs.readFileSync(missionMdOf(rt), "utf8");
+	assert.ok(md.includes("## Approach"));
+	assert.ok(md.includes("否决:起一个生成脚本"));
+	const parsed = parseMissionMd(md)!;
+	assert.equal(parsed.approach?.decisions[0].id, "D1", "方案要能从 fence 解析回来 —— 换脑后 planner 得读得到");
+});
+
+test("计划评审:打回带意见回传 planner,连打三次转 L3 回 DEFINE", async () => {
+	const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "pi-missions-smoke-"));
+	const pi = mockPi();
+	let approve = false;
+	const comment = "AC1 那条根本不会红,换个能判别的写法";
+	const ctx = { ...mockCtx(tmp), hasUI: true } as any;
+	// 评审页在测试里退化成一个可控的裁决,但**真的渲染一遍** ——
+	// 用真实的 plan/state 跑一次 render 才能发现"评审页在真实数据上炸了"
+	ctx.ui = {
+		...ctx.ui,
+		custom: async (factory: any) => {
+			const plain = { fg: (_c: string, x: string) => x, bg: (_c: string, x: string) => x, bold: (x: string) => x };
+			const comp = factory({ requestRender: () => {}, terminal: { rows: 24 } }, plain, {}, () => {});
+			for (const w of [40, 96]) assert.ok(comp.render(w).length > 0);
+			return { status: approve ? "approved" : "rejected" };
+		},
+		editor: async () => comment,
+	};
+
+	const rt = new Runtime(pi, tmp);
+	await rt.startNew(ctx, "x", "standard");
+	await rt.define(ctx, { goal: "x", doneWhen: DW, constraints: [], nonGoals: [] });
+
+	const params = {
+		goal: "x",
+		acceptanceCriteria: [{ id: "AC1", text: "hello.txt 存在且含 hello", verify: "hello-exists", covers: ["DW1"] }],
+		milestones: [{ id: "M1", title: "only", tasks: [{ id: "T1", title: "t", verify: ["hello-exists"] }] }],
+		verifyScript: VERIFY_SH,
+	};
+
+	// 第一次打回:意见回传给 planner,并进 STATE + State Card + LOG
+	const r1 = await rt.writePlan(ctx, params);
+	assert.ok("error" in r1);
+	assert.match((r1 as any).error, /人工打回.第 1 次./);
+	assert.ok((r1 as any).error.includes(comment), "打回意见必须回传 —— 只回一个 bit 的\"不行\"没法改");
+	assert.equal(rt.active!.state.phase, "plan");
+	assert.equal(rt.active!.state.planReview?.rejections, 1);
+	const card = renderStateCard(rt.active!.plan, rt.active!.state, "missions");
+	assert.ok(card.includes("PREV REJECTION"), "换脑之后 planner 也要读得到");
+	assert.ok(card.includes(comment));
+	const logMd = fs.readFileSync(path.join(tmp, "missions", "state", rt.active!.state.missionId, "LOG.md"), "utf8");
+	assert.ok(logMd.includes(comment));
+
+	// 第二次
+	assert.ok("error" in (await rt.writePlan(ctx, params)));
+	assert.equal(rt.active!.state.planReview?.rejections, 2);
+
+	// 第三次:硬拦,转 L3 回 DEFINE 并挂起换脑
+	const r3 = await rt.writePlan(ctx, params);
+	assert.ok("error" in r3);
+	assert.match((r3 as any).error, /不再重交/);
+	assert.equal(rt.active!.state.phase, "define");
+	assert.equal(rt.active!.state.escalation.level, 3);
+	assert.ok(rt.active!.state.pendingHandoff);
+	assert.equal(rt.active!.state.defineAsks, 0, "重新定义问题时提问轮次要还回来");
+
+	// 换脑后重新定义 → 批准 → 正常冻结
+	await rt.applyEvent({ type: "HANDOFF_DONE", at: Date.now() }, ctx);
+	await rt.define(ctx, { goal: "x2", doneWhen: DW, constraints: [], nonGoals: [] });
+	approve = true;
+	const ok = await rt.writePlan(ctx, params);
+	assert.ok("ok" in ok, JSON.stringify(ok));
+	assert.equal(rt.active!.state.phase, "do");
+});
+
+test("计划评审:Esc 取消不记作打回", async () => {
+	const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "pi-missions-smoke-"));
+	const ctx = { ...mockCtx(tmp), hasUI: true } as any;
+	ctx.ui = {
+		...ctx.ui,
+		custom: async () => ({ status: "cancelled" }),
+	};
+	const rt = new Runtime(mockPi(), tmp);
+	await rt.startNew(ctx, "x", "standard");
+	await rt.define(ctx, { goal: "x", doneWhen: DW, constraints: [], nonGoals: [] });
+	const result = await rt.writePlan(ctx, {
+		goal: "x",
+		acceptanceCriteria: [{ id: "AC1", text: "hello.txt 存在且含 hello", verify: "hello-exists", covers: ["DW1"] }],
+		milestones: [{ id: "M1", title: "only", tasks: [{ id: "T1", title: "t", verify: ["hello-exists"] }] }],
+		verifyScript: VERIFY_SH,
+	});
+	assert.deepEqual(result, { error: "计划评审已取消,未冻结也未记作打回" });
+	assert.equal(rt.active!.state.planReview.rejections, 0);
+	assert.equal(rt.active!.state.phase, "plan");
 });
 
 test("L2 重规划不被基线锁死:已经做完的部分变绿也能重新冻结", async () => {
@@ -382,7 +813,7 @@ test("L2 重规划不被基线锁死:已经做完的部分变绿也能重新冻�
 	// 同一份 AC(L2 不许改 AC)此刻已经是绿的 —— 若仍跑基线,planner 将无路可走
 	const r = await rt.writePlan(ctx, {
 		goal: "create hello.txt",
-		acceptanceCriteria: [{ id: "AC1", text: "hello.txt 存在且含 hello", verify: "hello-exists" }],
+		acceptanceCriteria: [{ id: "AC1", text: "hello.txt 存在且含 hello", verify: "hello-exists" , covers: ["DW1"] }],
 		milestones: [{ id: "M1", title: "only", tasks: [{ id: "T1", title: "create hello.txt", verify: ["hello-exists"] }] }],
 		verifyScript: VERIFY_SH,
 	});
@@ -399,11 +830,11 @@ test("被基线拒掉的计划不会污染 State Card(a.plan 不提前认账)", 
 	const ctx = mockCtx(tmp);
 	const rt = new Runtime(pi, tmp);
 	await rt.startNew(ctx, "x", "standard");
-	await rt.frame(ctx, { goal: "x", constraints: [], nonGoals: [] });
+	await rt.define(ctx, { goal: "x", doneWhen: DW, constraints: [], nonGoals: [] });
 
 	const r = await rt.writePlan(ctx, {
 		goal: "x",
-		acceptanceCriteria: [{ id: "AC1", text: "空壳", verify: "always-ok" }],
+		acceptanceCriteria: [{ id: "AC1", text: "空壳", verify: "always-ok" , covers: ["DW1"] }],
 		milestones: [{ id: "M1", title: "m", tasks: [{ id: "T1", title: "t", verify: ["always-ok"] }] }],
 		verifyScript: '#!/usr/bin/env bash\ncase "$1" in\n  always-ok) exit 0 ;;\n  *) exit 2 ;;\nesac\n',
 	});
@@ -415,35 +846,88 @@ test("被基线拒掉的计划不会污染 State Card(a.plan 不提前认账)", 
 	assert.ok(card.includes("尚未冻结"));
 });
 
-test("FRAME:提问预算由 L0 强制 —— 一轮、最多 3 个", async () => {
+function q(id: string, text: string, over: Record<string, unknown> = {}) {
+	return { id, text, recommend: "按接口 p95 口径", impact: `决定 ${id} 对应的完成条件怎么写`, ...over };
+}
+
+test("DEFINE:提问闸门由 L0 强制 —— 每问带推荐答案、每轮 ≤3、standard 2 轮、要结账", async () => {
 	const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "pi-missions-smoke-"));
 	const pi = mockPi();
 	const ctx = mockCtx(tmp);
 	const rt = new Runtime(pi, tmp);
 	await rt.startNew(ctx, "让登录快一点", "standard");
-	assert.equal(rt.active!.state.phase, "frame");
+	assert.equal(rt.active!.state.phase, "define");
 
-	// 超过 3 个:拒,且不消耗预算
-	const tooMany = await rt.ask(ctx, ["q1", "q2", "q3", "q4"]);
+	// 超过每轮 3 个:拒,且不消耗轮次
+	const tooMany = await rt.ask(ctx, [q("Q1", "a"), q("Q2", "b"), q("Q3", "c"), q("Q4", "d")], []);
 	assert.ok("error" in tooMany);
-	assert.equal(rt.active!.state.frameAsks, 0, "被拒的提问不算一轮");
+	assert.equal(rt.active!.state.defineAsks, 0, "被拒的提问不算一轮");
 
-	// 首轮 3 个:放行,问题以卡片交给人
-	const first = await rt.ask(ctx, ["『快』指首屏还是接口?", "目标多少 ms?", "允许改数据库 schema 吗?"]);
+	// 没有推荐答案:拒 —— 那是懒问题
+	const lazy = await rt.ask(ctx, [q("Q1", "能详细说说需求吗?", { recommend: "" })], []);
+	assert.ok("error" in lazy);
+	assert.match((lazy as any).error, /没有给推荐答案/);
+	assert.equal(rt.active!.state.defineAsks, 0);
+
+	// 首轮 3 个:放行,问题连同推荐答案以卡片交给人
+	const first = await rt.ask(
+		ctx,
+		[q("Q1", "『快』指首屏还是接口?"), q("Q2", "目标多少 ms?"), q("Q3", "允许改数据库 schema 吗?")],
+		[],
+	);
 	assert.ok("ok" in first);
-	assert.equal(rt.active!.state.frameAsks, 1);
-	assert.ok(pi.calls.entries.some((e) => e.type === "missions-card" && String(e.data.body).includes("目标多少 ms?")));
+	assert.equal(rt.active!.state.defineAsks, 1);
+	const card1 = pi.calls.entries.find((e) => e.type === "missions-card");
+	assert.ok(String(card1.data.body).includes("目标多少 ms?"));
+	assert.ok(String(card1.data.body).includes("推荐:"), "推荐答案要跟问题一起呈现");
+	assert.ok(String(card1.data.title).includes("第 1/2 轮"));
 
-	// 第二轮:拒 —— 连环追问在这里被截断
-	const second = await rt.ask(ctx, ["再问一个"]);
-	assert.ok("error" in second);
-	assert.match((second as any).error, /只许问一轮/);
+	// 第二轮但没结账:拒 —— 上一轮问完什么都没定下来
+	const stalled = await rt.ask(ctx, [q("Q4", "再问一个")], []);
+	assert.ok("error" in stalled);
+	assert.match((stalled as any).error, /没有任何决策落定/);
+	assert.equal(rt.active!.state.defineAsks, 1, "被拒不消耗轮次");
 
-	// 交定义 → 进 PLAN,约束/边界进 State Card
-	const fr = await rt.frame(ctx, {
+	// 第二轮 + 结账增长:放行
+	const second = await rt.ask(ctx, [q("Q4", "限流是否也算在内?")], ["Q1", "Q2"]);
+	assert.ok("ok" in second, JSON.stringify(second));
+	assert.equal(rt.active!.state.defineAsks, 2);
+	assert.deepEqual(rt.active!.state.defineSettled, ["Q1", "Q2"]);
+
+	// 第三轮:standard 只有 2 轮
+	const third = await rt.ask(ctx, [q("Q5", "还有吗?")], ["Q1", "Q2", "Q4"]);
+	assert.ok("error" in third);
+	assert.match((third as any).error, /轮次已经用完/);
+
+	// 问过就必须交回答 —— 换脑之后上下文里的回答就没了
+	const noResolved = await rt.define(ctx, {
 		goal: "登录接口 p95 从 800ms 降到 300ms 以内",
+		doneWhen: [{ id: "DW1", text: "登录接口 p95 < 300ms" }],
+		constraints: [],
+		nonGoals: [],
+	});
+	assert.ok("error" in noResolved);
+	assert.match((noResolved as any).error, /没有交 resolved/);
+
+	// doneWhen 为空也不行
+	const noDw = await rt.define(ctx, {
+		goal: "x",
+		doneWhen: [],
+		constraints: [],
+		nonGoals: [],
+		resolved: [{ q: "『快』指什么?", a: "接口" }],
+	});
+	assert.ok("error" in noDw);
+	assert.match((noDw as any).error, /doneWhen 为空/);
+
+	// 交定义 → 进 PLAN,完成条件/约束/边界/接缝进 State Card
+	const fr = await rt.define(ctx, {
+		goal: "登录接口 p95 从 800ms 降到 300ms 以内",
+		doneWhen: [{ id: "DW1", text: "登录接口 p95 < 300ms" }],
 		constraints: ["不改数据库 schema"],
 		nonGoals: ["前端首屏优化"],
+		verifySeam: "已有集成测试 test/auth/*",
+		resolved: [{ q: "『快』指首屏还是接口?", a: "接口" }],
 	});
 	assert.ok("ok" in fr, JSON.stringify(fr));
 	assert.equal(rt.active!.state.phase, "plan");
@@ -452,54 +936,81 @@ test("FRAME:提问预算由 L0 强制 —— 一轮、最多 3 个", async () =>
 	const card = renderStateCard(rt.active!.plan, rt.active!.state, "missions");
 	assert.ok(card.includes("不改数据库 schema"));
 	assert.ok(card.includes("前端首屏优化"));
+	assert.ok(card.includes("DW1"), "完成条件要进 State Card —— PLAN 得照着它写 AC");
+	assert.ok(card.includes("已有集成测试 test/auth/*"));
 
 	// PLAN 相位不能再提问,也不能重复定义
-	assert.ok("error" in (await rt.ask(ctx, ["x"])));
-	assert.ok("error" in (await rt.frame(ctx, { goal: "y", constraints: [], nonGoals: [] })));
+	assert.ok("error" in (await rt.ask(ctx, [q("Q9", "x")], [])));
+	assert.ok("error" in (await rt.define(ctx, { goal: "y", doneWhen: DW, constraints: [], nonGoals: [] })));
 });
 
-test("FRAME 的产出进 MISSION.md fence,冻结后可解析回来", async () => {
+test("DEFINE 范围确认:complex 恒确认,拒绝则停在 DEFINE 且不返还轮次", async () => {
+	const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "pi-missions-smoke-"));
+	const pi = mockPi();
+	let answer = false;
+	const ctx = { ...mockCtx(tmp), hasUI: true } as any;
+	ctx.ui = { ...ctx.ui, confirm: async () => answer };
+	const rt = new Runtime(pi, tmp);
+	await rt.startNew(ctx, "重构鉴权", "complex");
+
+	const params = {
+		goal: "把鉴权从 session 迁到 JWT",
+		doneWhen: [{ id: "DW1", text: "旧 session 中间件不再被引用" }],
+		constraints: [],
+		nonGoals: ["刷新令牌轮换"],
+	};
+	const rejected = await rt.define(ctx, params);
+	assert.ok("error" in rejected);
+	assert.match((rejected as any).error, /拒绝了这个范围定义/);
+	assert.equal(rt.active!.state.phase, "define", "被拒就停在 DEFINE");
+
+	answer = true;
+	assert.ok("ok" in (await rt.define(ctx, params)));
+	assert.equal(rt.active!.state.phase, "plan");
+});
+
+test("DEFINE 的产出进 MISSION.md fence,冻结后可解析回来", async () => {
 	const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "pi-missions-smoke-"));
 	const pi = mockPi();
 	const ctx = mockCtx(tmp);
 	const rt = new Runtime(pi, tmp);
 	await rt.startNew(ctx, "create hello.txt", "standard");
-	await rt.frame(ctx, { goal: "create hello.txt", constraints: ["只动仓库根目录"], nonGoals: ["不碰 CI"] });
+	await rt.define(ctx, { goal: "create hello.txt", doneWhen: DW, constraints: ["只动仓库根目录"], nonGoals: ["不碰 CI"] });
 	const wp = await rt.writePlan(ctx, {
 		goal: "create hello.txt",
-		acceptanceCriteria: [{ id: "AC1", text: "hello.txt 存在且含 hello", verify: "hello-exists" }],
+		acceptanceCriteria: [{ id: "AC1", text: "hello.txt 存在且含 hello", verify: "hello-exists" , covers: ["DW1"] }],
 		milestones: [{ id: "M1", title: "only", tasks: [{ id: "T1", title: "create hello.txt", verify: ["hello-exists"] }] }],
 		verifyScript: VERIFY_SH,
 	});
 	assert.ok("ok" in wp, JSON.stringify(wp));
 
-	const md = fs.readFileSync(path.join(tmp, "missions", "plans", rt.active!.state.missionId, "MISSION.md"), "utf8");
-	assert.ok(md.includes("## Frame"));
+	const md = fs.readFileSync(missionMdOf(rt), "utf8");
+	assert.ok(md.includes("## Define"));
 	assert.ok(md.includes("只动仓库根目录"));
 	const parsed = parseMissionMd(md);
-	assert.deepEqual(parsed!.framing!.nonGoals, ["不碰 CI"]);
+	assert.deepEqual(parsed!.definition!.nonGoals, ["不碰 CI"]);
 });
 
-test("L3 落点是 FRAME:归档旧计划、重置提问预算、换脑简报按相位分流", async () => {
+test("L3 落点是 DEFINE:归档旧计划、重置提问预算、换脑简报按相位分流", async () => {
 	const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "pi-missions-smoke-"));
 	const { ctx, rt } = await newMission(tmp);
 	ctx.hasUI = true; // L3 必须人工确认;非交互环境视为拒绝(→ halted),那是另一条路径
 
 	await rt.applyEvent({ type: "ESCALATE", at: Date.now(), to: 3, reason: "AC 定义错了" }, ctx);
 	// CONFIRM 效果 → mockCtx.confirm 恒 true → ESCALATION_CONFIRMED
-	assert.equal(rt.active!.state.phase, "frame", "L3 回 FRAME 而不是 PLAN");
-	assert.equal(rt.active!.state.frameAsks, 0, "新的问题定义可以再问一轮");
+	assert.equal(rt.active!.state.phase, "define", "L3 回 DEFINE 而不是 PLAN");
+	assert.equal(rt.active!.state.defineAsks, 0, "新的问题定义可以再问一轮");
 	assert.ok(rt.active!.state.pendingHandoff, "升级必须换脑(I5)");
 	assert.ok(fs.readdirSync(path.join(tmp, "missions", "state", rt.active!.state.missionId, "archive")).length > 0);
 
-	// 换脑完成后工具集回到 FRAME:没有 mission_write_plan,也没有写工具
+	// 换脑完成后工具集回到 DEFINE:没有 mission_write_plan,也没有写工具
 	await rt.applyEvent({ type: "HANDOFF_DONE", at: Date.now() }, ctx);
 	assert.equal(rt.gate("write", { path: "src/main.ts" }), null);
 	const tools = toolsForPhase(rt.active!.state.phase);
-	assert.ok(tools.includes("mission_frame") && !tools.includes("mission_write_plan"));
+	assert.ok(tools.includes("mission_define") && !tools.includes("mission_write_plan"));
 
 	// 重新定义 → 回到 PLAN,可以带新的 AC 重新冻结
-	const fr = await rt.frame(ctx, { goal: "换个说法的目标", constraints: [], nonGoals: [] });
+	const fr = await rt.define(ctx, { goal: "换个说法的目标", doneWhen: DW, constraints: [], nonGoals: [] });
 	assert.ok("ok" in fr, JSON.stringify(fr));
 	assert.equal(rt.active!.state.phase, "plan");
 });
@@ -517,10 +1028,10 @@ async function spikeMission(tmp: string) {
 	const ctx = mockCtx(tmp);
 	const rt = new Runtime(pi, tmp);
 	await rt.startNew(ctx, "迁移到新 ORM", "standard");
-	await rt.frame(ctx, { goal: "迁移到新 ORM", constraints: [], nonGoals: [] });
+	await rt.define(ctx, { goal: "迁移到新 ORM", doneWhen: DW, constraints: [], nonGoals: [] });
 	const wp = await rt.writePlan(ctx, {
 		goal: "迁移到新 ORM",
-		acceptanceCriteria: [{ id: "AC1", text: "hello.txt 存在", verify: "hello-exists" }],
+		acceptanceCriteria: [{ id: "AC1", text: "hello.txt 存在", verify: "hello-exists" , covers: ["DW1"] }],
 		milestones: [
 			{
 				id: "M1",
@@ -579,7 +1090,7 @@ test("spike:出结论 → 回 PLAN 重新规划,并强制换脑", async () => {
 	await rt.applyEvent({ type: "HANDOFF_DONE", at: Date.now() }, ctx);
 	const again = await rt.writePlan(ctx, {
 		goal: "迁移到新 ORM",
-		acceptanceCriteria: [{ id: "AC1", text: "hello.txt 存在", verify: "hello-exists" }],
+		acceptanceCriteria: [{ id: "AC1", text: "hello.txt 存在", verify: "hello-exists" , covers: ["DW1"] }],
 		milestones: [
 			{
 				id: "M1",
@@ -613,11 +1124,11 @@ test("spike 的结构约束:必须有 question,不能有 verify 分支", async (
 	const ctx = mockCtx(tmp);
 	const rt = new Runtime(pi, tmp);
 	await rt.startNew(ctx, "x", "standard");
-	await rt.frame(ctx, { goal: "x", constraints: [], nonGoals: [] });
+	await rt.define(ctx, { goal: "x", doneWhen: DW, constraints: [], nonGoals: [] });
 
 	const bad = await rt.writePlan(ctx, {
 		goal: "x",
-		acceptanceCriteria: [{ id: "AC1", text: "hello.txt 存在", verify: "hello-exists" }],
+		acceptanceCriteria: [{ id: "AC1", text: "hello.txt 存在", verify: "hello-exists" , covers: ["DW1"] }],
 		milestones: [
 			{ id: "M1", title: "m", tasks: [{ id: "T1", title: "探", kind: "spike", verify: ["hello-exists"] }] },
 		],
@@ -642,8 +1153,8 @@ test("spike 的结论文件放行不能变成绕过闸门的通道", async () =>
 	assert.ok(rt.gate("write", { path: `evil${report.rel}` }));
 
 	// 冻结件仍然受保护(spike 的放行分支不早退)
-	assert.ok(rt.gate("write", { path: `missions/plans/${rt.active!.state.missionId}/MISSION.md` }));
-	assert.ok(rt.gate("write", { path: "missions/scripts/verify.sh" }));
+	assert.ok(rt.gate("write", { path: `missions/state/${rt.active!.state.missionId}/generations/1/MISSION.md` }));
+	assert.ok(rt.gate("write", { path: `missions/state/${rt.active!.state.missionId}/SNAPSHOT.json` }));
 });
 
 test("模型设置:写 models.json、记 LOG.md、verifier 中途换裁判要告警", async () => {
@@ -675,4 +1186,180 @@ test("模型设置:写 models.json、记 LOG.md、verifier 中途换裁判要告
 	await rt.setRoleModel(ctx, "executor", null, "xhigh");
 	assert.ok(pi.calls.thinking.length > before, "当前相位的角色要立刻生效,不等下次相位切换");
 	assert.equal(pi.calls.thinking.at(-1), "xhigh");
+});
+
+test("define/plan 阶段换脑可恢复:goal 与 definition 先于冻结落盘(I1)", async () => {
+	const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "pi-missions-smoke-"));
+	const pi = mockPi();
+	const ctx = mockCtx(tmp);
+	const rt = new Runtime(pi, tmp);
+	const start = await rt.startNew(ctx, "重构组件管理页", "standard");
+	assert.ok("id" in start, JSON.stringify(start));
+	const id = start.id;
+	assert.equal(rt.active!.state.phase, "define");
+
+	// define 阶段(还没走到 PLAN):MISSION.md 必须已经落盘,goal 可解析
+	const mdPath = missionMdOf(rt);
+	assert.ok(fs.existsSync(mdPath), "define 阶段就要有 MISSION.md —— 否则换脑后 attach 没有锚点");
+	const parsed = parseMissionMd(fs.readFileSync(mdPath, "utf8"));
+	assert.equal(parsed?.goal, "重构组件管理页");
+
+	// 模拟会话重建:全新 Runtime 实例,靠 CURRENT 指针从磁盘接上
+	const rt2 = new Runtime(mockPi(), tmp);
+	assert.ok(await rt2.ensureAttached(mockCtx(tmp)), "define 阶段的 mission 必须能重附着");
+	assert.equal(rt2.active!.state.phase, "define");
+	assert.equal(rt2.active!.plan.goal, "重构组件管理页");
+
+	// DEFINE 完成 → plan 阶段:definition 落盘,再换脑也不丢
+	const dr = await rt2.define(mockCtx(tmp), {
+		goal: "重构组件管理页:合并成单列表",
+		doneWhen: [{ id: "DW1", text: "整页一个栅格,每种组件一张卡" }],
+		constraints: [],
+		nonGoals: ["不动首屏布局"],
+	});
+	assert.ok("ok" in dr, JSON.stringify(dr));
+	assert.equal(rt2.active!.state.phase, "plan");
+
+	const rt3 = new Runtime(mockPi(), tmp);
+	assert.ok(await rt3.ensureAttached(mockCtx(tmp)), "plan 阶段的 mission 必须能重附着");
+	assert.equal(rt3.active!.state.phase, "plan");
+	assert.equal(rt3.active!.plan.goal, "重构组件管理页:合并成单列表");
+	assert.equal(rt3.active!.plan.definition?.doneWhen[0]?.text, "整页一个栅格,每种组件一张卡");
+	assert.deepEqual(rt3.active!.plan.definition?.nonGoals, ["不动首屏布局"]);
+});
+
+test("换脑握手:错误 token 与普通 startup 都不能消费 pendingHandoff", async () => {
+	const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "pi-missions-smoke-"));
+	const pi = mockPi();
+	const ctx = mockCtx(tmp);
+	const rt = new Runtime(pi, tmp);
+	const start = await rt.startNew(ctx, "验证换脑身份", "standard");
+	assert.ok("id" in start, JSON.stringify(start));
+	await rt.applyEvent({ type: "HANDOFF_REQUEST", at: Date.now(), reason: "context-watermark 61.53%" }, ctx);
+	const handoff = rt.active!.handoff!;
+
+	const wrongCtx = mockCtx(tmp);
+	wrongCtx.sessionManager = {
+		getSessionFile: () => "/tmp/wrong-session.jsonl",
+		getEntries: () => [
+			{
+				type: "custom",
+				customType: "pi-missions-handoff",
+				data: { missionId: start.id, token: "wrong", revision: handoff.requestedRevision },
+			},
+		],
+	};
+	const wrong = new Runtime(mockPi(), tmp);
+	await wrong.onSessionStart({ reason: "new", previousSessionFile: handoff.parentSession }, wrongCtx);
+	assert.equal(wrong.active, null);
+	assert.ok(wrongCtx.notifications.some((m) => m.includes("token")));
+
+	const startupCtx = mockCtx(tmp);
+	const startup = new Runtime(mockPi(), tmp);
+	await startup.onSessionStart({ reason: "startup" }, startupCtx);
+	assert.equal(startup.active, null);
+	assert.ok(startupCtx.notifications.some((m) => m.includes("只能由 /mission next")));
+	assert.ok(rt.repository.load(start.id).ok, "错误会话不能损坏 snapshot");
+});
+
+test("成本分账:网关不报价时 token 账照记(message_end 按角色累计)", async () => {
+	const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "pi-missions-smoke-"));
+	const { rt } = await newMission(tmp); // do 相位,当前角色 executor
+
+	// cost.total = 0(自建网关不报价):美元不记,token 必须记
+	await rt.onMessageEnd(
+		{ role: "assistant", usage: { input: 1000, output: 200, cacheRead: 8000, cacheWrite: 0, cost: { total: 0 } } },
+		mockCtx(tmp),
+	);
+	assert.deepEqual(rt.active!.state.tokens?.executor, { input: 1000, output: 200, cacheRead: 8000, cacheWrite: 0 });
+	assert.equal(rt.active!.state.cost.executor, undefined, "没报价就不记美元");
+
+	// 累计:第二条消息两本账都加
+	await rt.onMessageEnd(
+		{ role: "assistant", usage: { input: 500, output: 100, cacheRead: 0, cacheWrite: 0, cost: { total: 0.002 } } },
+		mockCtx(tmp),
+	);
+	assert.equal(rt.active!.state.tokens?.executor?.input, 1500);
+	assert.equal(rt.active!.state.tokens?.executor?.cacheRead, 8000);
+	assert.equal(rt.active!.state.cost.executor, 0.002);
+
+	// 非 assistant 消息不记账
+	await rt.onMessageEnd(
+		{ role: "user", usage: { input: 999, output: 0, cacheRead: 0, cacheWrite: 0 } },
+		mockCtx(tmp),
+	);
+	assert.equal(rt.active!.state.tokens?.executor?.input, 1500);
+});
+
+test("重复 tool_result 不创建无变化 snapshot revision", async () => {
+	const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "pi-missions-smoke-"));
+	const ctx = mockCtx(tmp);
+	const rt = new Runtime(mockPi(), tmp);
+	await rt.startNew(ctx, "验证改动面去重", "standard");
+
+	await rt.onToolResult({ toolName: "edit", input: { path: "src/a.ts" }, isError: false }, ctx);
+	const firstRevision = rt.active!.revision;
+	await rt.onToolResult({ toolName: "edit", input: { path: "src/a.ts" }, isError: false }, ctx);
+	assert.equal(rt.active!.revision, firstRevision);
+});
+
+test("补证据闸门:inconclusive 后原样重交被拦截,修改工作区后放行", async () => {
+	const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "pi-missions-smoke-"));
+	// 初始化 git 仓库使 treeFp 生效
+	await execReal("git", ["init"], { cwd: tmp });
+	await execReal("git", ["config", "user.name", "test"], { cwd: tmp });
+	await execReal("git", ["config", "user.email", "test@example.com"], { cwd: tmp });
+	await execReal("git", ["commit", "--allow-empty", "-m", "init"], { cwd: tmp });
+
+	const { pi, ctx, rt } = await newMission(tmp);
+	assert.equal(rt.active!.state.phase, "do");
+
+	// 第 1 次 SUBMIT(带自动计算的 treeFp)
+	const sub1 = await rt.applyEvent({ type: "SUBMIT", at: Date.now() }, ctx);
+	assert.ok(!sub1.error);
+	assert.equal(rt.active!.state.phase, "check");
+	const tree1 = rt.active!.state.tasks.T1.submittedTreeFp;
+	assert.ok(tree1 && tree1.startsWith("sha256:"));
+
+	// 收到 evidence 类 inconclusive 判决
+	await rt.applyEvent(
+		{
+			type: "VERDICT",
+			at: Date.now(),
+			verdict: {
+				outcome: "inconclusive",
+				inconclusiveCause: "evidence",
+				missingAcIds: ["AC1"],
+				failing: [],
+				reason: "缺少验收证据:AC1",
+			},
+		},
+		ctx,
+	);
+	assert.equal(rt.active!.state.phase, "do");
+	assert.ok(rt.active!.state.tasks.T1.awaitingEvidence);
+	assert.equal(rt.active!.state.tasks.T1.awaitingEvidence?.treeFp, tree1);
+
+	// State Card 与 DO brief 渲染提示
+	const card = renderStateCard(rt.active!.plan, rt.active!.state);
+	assert.ok(card.includes("AWAITING EVIDENCE"));
+	const brief = renderDoBrief(rt.active!.plan, rt.active!.state);
+	assert.ok(brief.includes("回到 DO:T1") && brief.includes("缺少验收证据:AC1") && brief.includes("补证据闸门"));
+	assert.ok(ctx.notifications.some((m) => m.includes("无法判定") && m.includes("缺少验收证据:AC1")));
+
+	// 未改动工作区原样重交 → 被拦截
+	const sub2 = await rt.applyEvent({ type: "SUBMIT", at: Date.now() }, ctx);
+	assert.ok(sub2.error);
+	assert.match(sub2.error!, /未检测到任何改动/);
+	assert.equal(rt.active!.state.phase, "do");
+
+	// 真实修改工作区文件
+	fs.writeFileSync(path.join(tmp, "hello.txt"), "hello world\n");
+
+	// 再次提交 → 指纹变化,放行进 check,awaitingEvidence 复位
+	const sub3 = await rt.applyEvent({ type: "SUBMIT", at: Date.now() }, ctx);
+	assert.ok(!sub3.error);
+	assert.equal(rt.active!.state.phase, "check");
+	assert.equal(rt.active!.state.tasks.T1.awaitingEvidence, null);
+	assert.notEqual(rt.active!.state.tasks.T1.submittedTreeFp, tree1);
 });

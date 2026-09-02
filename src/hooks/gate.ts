@@ -12,23 +12,23 @@ import type { Phase, Tier } from "../core/types.ts";
 
 export const BUILTIN_ALL = ["read", "bash", "edit", "write", "grep", "find", "ls"];
 
-export const MISSION_TOOLS = ["mission_ask", "mission_frame", "mission_write_plan", "mission_submit", "mission_escalate"];
+export const MISSION_TOOLS = ["mission_ask", "mission_define", "mission_write_plan", "mission_submit", "mission_escalate"];
 
 const READONLY = new Set(["read", "grep", "find", "ls"]);
 
 /** 相位 → 工具集(§3 能力矩阵) */
 export function toolsForPhase(phase: Phase): string[] {
 	switch (phase) {
-		case "frame":
+		case "define":
 			// 只读 + 问一轮 + 交定义。写工具与 mission_write_plan 都不给:
-			// 问题还没定义清楚就动手,正是 FRAME 要拦住的事。
-			return [...READONLY, "mission_ask", "mission_frame"];
+			// 问题还没定义清楚就动手,正是 DEFINE 要拦住的事。
+			return [...READONLY, "mission_ask", "mission_define"];
 		case "plan":
 			return [...READONLY, "mission_write_plan"];
 		case "do":
 			return [...BUILTIN_ALL, "mission_submit"];
 		case "check":
-			// CHECK 由 L0 执行(verify.sh + 子进程 Verifier),LLM 无回合
+			// CHECK 由 L0 执行(verify.sh + 进程内 Verifier AgentSession),LLM 无回合
 			return [...READONLY];
 		case "act":
 			return [...READONLY, "mission_escalate"];
@@ -96,24 +96,17 @@ export function gateCheck(g: GateInput): string | null {
 	if (g.toolName === "edit" || g.toolName === "write") {
 		const p = String(g.input.path ?? "").replace(/\\/g, "/");
 		if (p.includes(`${g.missionsDirName}/state/`)) {
-			return "missions/state/ 由 L0 裁判管理,执行者不可写(I3)";
-		}
-		if (p.includes(`${g.missionsDirName}/plans/`)) {
-			return "MISSION.md 已冻结:AC 只能经 L3 升级修改,计划只能由 mission_write_plan 写入(I2)";
-		}
-		if (p.includes(`${g.missionsDirName}/scripts/verify.sh`) && g.phase !== "plan") {
-			return "verify.sh 已随 AC 冻结;修改验收的执行入口等于篡改裁判(I2/I3)";
+			return "missions/state/ 保存 v2 snapshot 与不可变 generation,只能由 L0 Repository 写入(I2/I3)";
 		}
 	}
 
 	// bash 粗检:防绕开 edit/write 闸门直接改冻结件(尽力而为,社会约束之外的机械兜底)
 	if (g.toolName === "bash" && g.phase !== "plan") {
 		const cmd = String(g.input.command ?? "");
-		const touchesProtected =
-			cmd.includes(`${g.missionsDirName}/state/`) || cmd.includes(`${g.missionsDirName}/plans/`) || cmd.includes(`${g.missionsDirName}/scripts/verify.sh`);
+		const touchesProtected = cmd.includes(`${g.missionsDirName}/state/`);
 		const writeish = /(>>?|sed\s+-i|tee\b|\brm\b|\bmv\b|\bcp\b|chmod|git\s+add.*missions)/.test(cmd);
 		if (touchesProtected && writeish) {
-			return `命令疑似修改 missions/ 受保护文件(plans/state/verify.sh),已拦截(I2/I3)`;
+			return `命令疑似修改 missions/state/ 下的 snapshot 或 generation,已拦截(I2/I3)`;
 		}
 	}
 

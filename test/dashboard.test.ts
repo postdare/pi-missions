@@ -106,6 +106,47 @@ test("widget:右对齐时长/成本;换脑挂起警告色", () => {
 	assert.ok(usedColors.includes("warning")); // 换脑提示是警告色
 });
 
+test("widget:网关不报价(美元=0)时显 token 用量,不显 $0", () => {
+	const s = runningState();
+	s.cost = {}; // 没报价
+	s.tokens = { executor: { input: 30_100, output: 8_000, cacheRead: 641_600, cacheWrite: 0 }, verifier: { input: 12_000, output: 2_300, cacheRead: 55_000, cacheWrite: 0 } };
+	const lines = renderWidgetCard(mockTheme, plan, s, Date.now(), 120);
+	assert.ok(lines[0].includes("749.0k tok"), `token 合计右对齐在行 1:${lines[0]}`);
+	assert.ok(!lines.some((l) => l.includes("$0")), "美元为零不显示 $");
+});
+
+test("CHECK:widget 与概览显示实时阶段、耗时和当前分支", () => {
+	const s = runningState();
+	s.phase = "check";
+	const check = {
+		taskId: "T2",
+		attempt: 2,
+		startedAt: 10_000,
+		updatedAt: 12_000,
+		stage: "running_scripts" as const,
+		currentBranch: "auth-integration",
+		completedBranches: [
+			{ acId: "lint", status: "pass" as const, exitCode: 0, durationMs: 800 },
+		],
+		verifier: { status: "pending" as const },
+	};
+	const widget = renderWidgetCard(mockTheme, plan, s, 15_000, 120, check).join("\n");
+	assert.ok(widget.includes("执行脚本"));
+	assert.ok(widget.includes("5s"));
+	assert.ok(widget.includes("脚本 1 项"));
+	assert.ok(!widget.includes("已完成 1"));
+	assert.ok(widget.includes("auth-integration"));
+	const overview = overviewLines(plan, s, {
+		now: 15_000,
+		theme: mockTheme,
+		width: 80,
+		checkState: check,
+	}).join("\n");
+	assert.ok(overview.includes("验证阶段"));
+	assert.ok(overview.includes("已完成"));
+	assert.ok(overview.includes("lint"));
+});
+
 test("dashboard:任务清单 + AC 证据状态 + 成本分账 + 日志", () => {
 	const out = renderStatusDashboard(
 		plan,

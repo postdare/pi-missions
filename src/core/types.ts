@@ -10,23 +10,31 @@
 
 import type { TaskKind } from "./spike.ts";
 
-export type Phase = "frame" | "plan" | "do" | "check" | "act" | "done" | "halted";
+export type Phase = "define" | "plan" | "do" | "check" | "act" | "done" | "halted";
 
 export type Tier = "quick" | "standard" | "complex";
 
 /**
  * 升级阶梯:1=改实现 2=改方案 3=改问题定义。
- * 每一级对应相位图上的一条反向边:L1 回 DO、L2 回 PLAN、L3 回 FRAME。
+ * 每一级对应相位图上的一条反向边:L1 回 DO、L2 回 PLAN、L3 回 DEFINE。
  */
 export type EscalationLevel = 1 | 2 | 3;
 
 export type Role = "planner" | "executor" | "verifier" | "escalator";
 
+/** 单角色累计 token 用量(单位:个,不是美元) */
+export interface RoleTokenUsage {
+	input: number;
+	output: number;
+	cacheRead: number;
+	cacheWrite: number;
+}
+
 // ─────────────────────────────── 证据 ───────────────────────────────
 
 /**
  * hard —— 编译/测试/lint/类型检查的退出码。由 L0 直接执行 verify.sh 采集,零模型成本。
- * semi —— 逐条核对冻结 AC。由独立 Verifier 子进程产出。
+ * semi —— 逐条核对冻结 AC。由独立 Verifier AgentSession 产出。
  * soft —— 执行者自述。只能触发 ACT,永远不能触发 PASS。
  */
 export type EvidenceLevel = "hard" | "semi" | "soft";
@@ -43,6 +51,16 @@ export interface Evidence {
 	exitCode?: number;
 	/** 采集该证据时的环境指纹。与 mission 记录不符则整份判定 inconclusive */
 	envFingerprint?: string;
+	/** 完整执行命令(可选) */
+	command?: string;
+	/** 开始时间戳(可选) */
+	startedAt?: number;
+	/** 执行耗时毫秒数(可选) */
+	durationMs?: number;
+	/** 完整 stdout(可选) */
+	stdout?: string;
+	/** 完整 stderr(可选) */
+	stderr?: string;
 }
 
 export type VerdictOutcome = "pass" | "fail" | "inconclusive";
@@ -54,6 +72,10 @@ export interface Verdict {
 	failing: Evidence[];
 	/** 人类可读的判定理由,直接写入 LOG.md */
 	reason: string;
+	/** 无结论的具体成因: env=环境指纹不符; evidence=缺少或未采到机械/半客观证据 */
+	inconclusiveCause?: "env" | "evidence";
+	/** 缺证据的 AC 列表(用于缺失验收证据时明确提示) */
+	missingAcIds?: string[];
 }
 
 // ─────────────────────────────── 任务与 Mission ───────────────────────────────
@@ -75,6 +97,14 @@ export interface TaskState {
 	sameSignatureCount: number;
 	/** 连续 INCONCLUSIVE 次数。环境漂移时防死循环,达到上限直接停机 */
 	inconclusiveStreak: number;
+	/** 最近一次提交时的工作区树指纹(用于判定原样重交) */
+	submittedTreeFp?: string | null;
+	/** 上一轮因缺证据判 inconclusive 时挂上的待补证据要求 */
+	awaitingEvidence?: {
+		reason: string;
+		acIds: string[];
+		treeFp: string | null;
+	} | null;
 }
 
 export interface EscalationRecord {
@@ -116,16 +146,33 @@ export interface MissionState {
 	pendingHandoff: string | null;
 	/** taskId → 执行该任务的 session 文件路径(换脑后更新) */
 	sessionMap: Record<string, string>;
-	/** FRAME 相位已用掉的提问轮数(预算见 core/frame.ts)。老 STATE.json 缺此字段按 0 算 */
-	frameAsks?: number;
+	/** DEFINE 相位已用掉的提问轮数(闸门见 core/define.ts) */
+	defineAsks: number;
+	/**
+	 * 上一轮提问时记下的"已落定决策 id"快照。
+	 * 结账判据靠它判断上一轮问答有没有推进决策(见 core/define.ts 的 evaluateAsk)——
+	 * 必须落盘:换脑之后新会话不知道上一轮问过什么,内存态不可信。
+	 */
+	defineSettled: string[];
+	/**
+	 * 计划评审的打回记账。判据见 core/review.ts:连续打回到上限就转 L3。
+	 * notes 必须落盘 —— 打回意见只活在上下文里的话,换脑之后 planner 又只剩 1 bit。
+	 */
+	planReview: { rejections: number; notes: string[] };
 	/**
 	 * 已经跑完的探针数(不论成败)。
 	 * 不能靠扫 tasks 得知:重写计划时 PLAN_FROZEN 只保留新 taskOrder 里的任务,
 	 * 跑过的 spike 会从 tasks 里消失 —— 额度必须自己记账。
 	 */
-	spikesRun?: number;
+	spikesRun: number;
 	/** 按角色分账的累计成本(美元),来自 message_end 的 usage.cost.total */
 	cost: Partial<Record<Role, number>>;
+	/**
+	 * 按角色分账的累计 token 用量。与 cost 并列的原因:
+	 * 自建网关常常不报价(usage.cost.total = 0),美元账是空的,
+	 * 但 token 账永远是真的 —— 成本优化只能看它。
+	 */
+	tokens?: Partial<Record<Role, RoleTokenUsage>>;
 	metrics: MissionMetrics;
 	updatedAt: number;
 }
@@ -133,12 +180,21 @@ export interface MissionState {
 // ─────────────────────────────── 状态机 I/O ───────────────────────────────
 
 export type MissionEvent =
-	/** FRAME 用掉一轮提问(预算判定在 core/frame.ts,机器只记账) */
-	| { type: "FRAME_ASKED"; at: number }
+	/** DEFINE 用掉一轮提问(闸门判定在 core/define.ts,机器只记账 + 存结账快照) */
+	| { type: "DEFINE_ASKED"; at: number; settled: string[] }
 	/** 问题定义完成,进入 PLAN。goal 由调用方写进 plan,机器只管相位 */
-	| { type: "FRAME_DONE"; at: number }
-	| { type: "PLAN_FROZEN"; at: number; taskOrder?: string[]; spikes?: string[] }
-	| { type: "SUBMIT"; at: number }
+	| { type: "DEFINE_DONE"; at: number }
+	| {
+			type: "PLAN_FROZEN";
+			at: number;
+			taskOrder?: string[];
+			spikes?: string[];
+			envFingerprint?: string | null;
+			sessionFile?: string;
+	  }
+	/** 人工在计划评审页打回。达到上限时机器直接转 DEFINE(判据在 core/review.ts) */
+	| { type: "PLAN_REJECTED"; at: number; comment: string }
+	| { type: "SUBMIT"; at: number; treeFp?: string | null }
 	| { type: "VERDICT"; at: number; verdict: Verdict }
 	/** ACT 相位完成调整,回到 DO 重试。act 相位一轮对话结束后由 tick 发出 */
 	| { type: "ADJUST_DONE"; at: number }
@@ -150,9 +206,17 @@ export type MissionEvent =
 	/** 请求换脑(上下文水位、人工 /mission next)。进入 pendingHandoff 硬阻断 */
 	| { type: "HANDOFF_REQUEST"; at: number; reason: string }
 	/** 换脑完成(新会话 session_start)。解除硬阻断 */
-	| { type: "HANDOFF_DONE"; at: number; sessionFile?: string }
+	| { type: "HANDOFF_DONE"; at: number; sessionFile?: string; token?: string; revision?: number }
+	/** newSession 被取消或人工恢复。显式解除换脑挂起,不允许 runtime 直接改 state */
+	| { type: "HANDOFF_CANCELLED"; at: number; reason: string }
+	/** 进程退出打断 CHECK/ACT。恢复时统一回 DO,尝试次数保持不变 */
+	| { type: "RECOVER_INTERRUPTED_CHECK"; at: number; from: "check" | "act" }
 	/** 机械升档(tier.ts 判定)。quick→standard 会补落盘(PERSIST_PLAN) */
 	| { type: "PROMOTE_TIER"; at: number; to: Tier; reason: string }
+	/** 独立 AgentSession 的模型费用与 token 用量。只记账,不参与相位判定。 */
+	| { type: "RECORD_ROLE_COST"; at: number; role: Role; amount: number; tokens?: RoleTokenUsage }
+	/** 工具结果记录改动面，供机械升档使用 */
+	| { type: "RECORD_TOUCHED_FILE"; at: number; path: string; publicApi: boolean }
 	| { type: "ABORT"; at: number; reason: string };
 
 /**

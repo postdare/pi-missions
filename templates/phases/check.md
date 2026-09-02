@@ -1,8 +1,8 @@
 # CHECK 相位
 
-判定由系统(L0)执行:verify.sh 退出码是 hard 证据,独立验证者子进程产出 semi 证据。你一般不需要做任何事。
+判定由系统(L0)执行:verify.sh 退出码是 hard 证据,独立验证者(进程内 AgentSession)产出 semi 证据。你一般不需要做任何事。
 
-如果你是**独立验证者**(子进程,只有 read + bash):
+如果你是**独立验证者**(独立会话,只有 read/grep/find/ls 等只读工具):
 
 1. 对照冻结的 AC 逐条核对当前改动(git diff + 相关源码)。
 2. 每条 AC 给出 pass / fail / inconclusive(证据不足就 inconclusive,不要猜)。

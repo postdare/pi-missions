@@ -9,10 +9,11 @@
  *      Proxy 在 set 时把任何赋值都染成档位色,才能压住。
  *   3. 不预填命令:用户直接输入目标,提交时 onSubmit 被 Proxy 包裹,自动拼成
  *      /mission quick <目标> 或 /mission new <目标>;以 / 开头的输入原样放行。
+ *   4. Esc 取消选择:Proxy 拦 handleInput,清掉指示与 pendingTier,保留已输入文字。
  * mission 启动后自动清除(状态条接管显示)。
  */
 
-import { Editor, truncateToWidth } from "@earendil-works/pi-tui";
+import { Editor, Key, matchesKey, truncateToWidth } from "@earendil-works/pi-tui";
 import type { Tier } from "../core/types.ts";
 
 /**
@@ -49,23 +50,40 @@ let activeTier: Tier | null = null;
  * pi 会把默认编辑器的 borderColor 拷给自定义编辑器,而 Proxy 保证后续
  * 每次渲染的赋值都被染成档位色。
  */
-export function applyTierIndicator(ctx: any, tier: Tier): void {
+export function applyTierIndicator(ctx: any, tier: Tier, onCancel?: () => void): void {
 	if (!ctx.hasUI) return;
 	activeTier = tier;
 
 	// 编辑器上方的彩色指示条
 	ctx.ui.setWidget(WIDGET_KEY, (_tui: any, theme: any) => ({
 		render: (width: number) => [
-			colorize(theme, tier, truncateToWidth(`◆ mission 档位: ${TIER_LABEL[tier]} · 输入目标回车即可`, Math.min(width, 120))),
+			colorize(theme, tier, truncateToWidth(`◆ mission 档位: ${TIER_LABEL[tier]} · 输入目标回车即可,Esc 取消`, Math.min(width, 120))),
 		],
 		invalidate: () => {},
 	}));
 
-	// 编辑器:边框染档位色 + onSubmit 自动包命令
+	// 编辑器:边框染档位色 + onSubmit 自动包命令 + Esc 取消
 	ctx.ui.setEditorComponent((tui: any, editorTheme: any) => {
 		const base = new Editor(tui, editorTheme);
 		const theme = ctx.ui.theme; // 边框着色用主题 accent 或 ANSI 高亮
 		const proxied = new Proxy(base, {
+			get(target: any, prop: string | symbol, receiver: any): unknown {
+				if (prop === "handleInput") {
+					return (data: string) => {
+						// Esc = 放弃这次档位选择;只在档位指示生效的窗口期拦截
+						if (matchesKey(data, Key.escape)) {
+							const text = base.getText();
+							clearTierIndicator(ctx);
+							if (text) ctx.ui.setEditorText(text);
+							ctx.ui.notify("已取消档位选择", "info");
+							onCancel?.();
+							return;
+						}
+						target.handleInput(data);
+					};
+				}
+				return Reflect.get(target, prop, receiver);
+			},
 			set(target: any, prop: string | symbol, value: unknown, receiver: any): boolean {
 				if (prop === "borderColor") {
 					// pi 每次渲染都重新赋值(默认/thinking/bash 色),统一染成档位色
@@ -110,9 +128,9 @@ export function clearTierIndicator(ctx: any): void {
 	ctx.ui.setEditorComponent(undefined);
 }
 
-/** 选中档位后的完整动作:指示 + 清空编辑器等待输入 */
-export function applyTierSelection(ctx: any, tier: Tier): void {
-	applyTierIndicator(ctx, tier);
+/** 选中档位后的完整动作:指示 + 清空编辑器等待输入;onCancel 在 Esc 取消时回调(清 pendingTier) */
+export function applyTierSelection(ctx: any, tier: Tier, onCancel?: () => void): void {
+	applyTierIndicator(ctx, tier, onCancel);
 	ctx.ui.setEditorText("");
 	ctx.ui.notify(`已选 ${tier} 档 —— 直接输入目标,回车自动带上档位命令`, "info");
 }

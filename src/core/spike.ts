@@ -3,7 +3,7 @@
  *
  * 探针任务(spike)。
  *
- * FRAME 处理的是"描述不清":答案在人的脑子里,问一轮就能补齐。
+ * DEFINE 处理的是"描述不清":答案在人的脑子里,问一轮就能补齐。
  * 但还有一类模糊,答案不在人那里,而在代码/环境/依赖里,不看一眼谁也不知道 ——
  * "旧 ORM 的私有 API 到底用在 3 处还是 300 处""瓶颈在 SQL 还是序列化"。
  * 这类问题上 mission_ask 是无效的:你问人,人也不知道。
@@ -51,7 +51,7 @@ export function validateSpikePlan(s: SpikePlanSignals): string[] {
 	if (s.spikeTaskIds.length > 0 && s.alreadyRanSpike) {
 		errors.push(
 			"本 mission 已经跑过一次 spike,不能再排。" +
-				"拿现有结论去规划;如果连问题定义都错了,走 L3 升级回 FRAME,而不是再探一次。",
+				"拿现有结论去规划;如果连问题定义都错了,走 L3 升级回 DEFINE,而不是再探一次。",
 		);
 	}
 	return errors;

@@ -6,9 +6,9 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import type { Evidence, MissionState } from "../core/types.ts";
 import type { RepoLayout } from "./paths.ts";
-import { planPaths, statePaths } from "./paths.ts";
-import { loadStateFile } from "./state.ts";
-import { parseMissionMd, type MissionPlan } from "./mission.ts";
+import { statePaths } from "./paths.ts";
+import type { MissionPlan } from "./mission.ts";
+import { MissionRepository } from "./repository.ts";
 
 /** 证据快照归档:missions/state/<id>/evidence/<task>-attempt<n>.json */
 export function saveEvidence(evidenceDir: string, taskId: string, attempt: number, evidences: Evidence[]): string {
@@ -106,34 +106,31 @@ export function latestEvidenceResults(evidenceDir: string): Record<string, Evide
 export interface ScannedMission {
 	missionId: string;
 	state: MissionState;
-	/** MISSION.md fence 解析出的计划(损坏/缺失时为 null,展示降级) */
-	plan: MissionPlan | null;
+	/** 来自已通过 schema/hash 校验的 v2 snapshot */
+	plan: MissionPlan;
 	stateDir: string;
 }
 
 /** 从 missions/state/ 扫描重建历史列表 —— 不依赖内存(I1)。活跃的排前面。 */
-export function scanMissions(l: RepoLayout): ScannedMission[] {
-	let dirs: fs.Dirent[];
-	try {
-		dirs = fs.readdirSync(l.state, { withFileTypes: true });
-	} catch {
-		return [];
-	}
+export function scanMissions(
+	l: RepoLayout,
+	onError?: (error: { code: "missing" | "corrupt" | "conflict"; message: string }) => void,
+): ScannedMission[] {
 	const out: ScannedMission[] = [];
-	for (const d of dirs) {
-		if (!d.isDirectory()) continue;
-		const sp = statePaths(l, d.name);
-		const state = loadStateFile(sp.stateJson);
-		if (!state) continue;
-		let plan: MissionPlan | null = null;
-		try {
-			plan = parseMissionMd(fs.readFileSync(planPaths(l, d.name).missionMd, "utf8"));
-		} catch {
-			/* 计划缺失时展示降级 */
+	for (const loaded of new MissionRepository(l).list()) {
+		if (!loaded.ok) {
+			onError?.({ code: loaded.code, message: loaded.error });
+			continue;
 		}
-		out.push({ missionId: d.name, state, plan, stateDir: sp.dir });
+		const snapshot = loaded.snapshot;
+		out.push({
+			missionId: snapshot.missionId,
+			state: snapshot.state,
+			plan: snapshot.plan,
+			stateDir: statePaths(l, snapshot.missionId).dir,
+		});
 	}
-	const ACTIVE = new Set(["frame", "plan", "do", "check", "act"]);
+	const ACTIVE = new Set(["define", "plan", "do", "check", "act"]);
 	return out.sort((a, b) => {
 		const aa = ACTIVE.has(a.state.phase) ? 0 : 1;
 		const bb = ACTIVE.has(b.state.phase) ? 0 : 1;

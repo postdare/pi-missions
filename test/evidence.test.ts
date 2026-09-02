@@ -75,3 +75,26 @@ test("readTaskEvidenceHistory: 不存在的目录或空 taskId 返回空数组",
 	assert.deepEqual(readTaskEvidenceHistory("", "T1"), []);
 	assert.deepEqual(readTaskEvidenceHistory("/tmp", ""), []);
 });
+
+test("证据归档完整保留命令、时间、耗时与 stdout/stderr", () => {
+	const dir = fs.mkdtempSync(path.join(os.tmpdir(), "ev-test-"));
+	const evidence: Evidence = {
+		level: "hard",
+		acId: "integration",
+		result: "fail",
+		raw: "尾部摘要",
+		exitCode: 2,
+		command: "npm test -- integration",
+		startedAt: 1_756_737_000_000,
+		durationMs: 1234,
+		stdout: "完整标准输出\n第二行",
+		stderr: "完整错误输出",
+	};
+	saveEvidence(dir, "T1", 3, [evidence]);
+	const loaded = readTaskEvidenceHistory(dir, "T1")[0].evidences[0];
+	assert.equal(loaded.command, evidence.command);
+	assert.equal(loaded.startedAt, evidence.startedAt);
+	assert.equal(loaded.durationMs, evidence.durationMs);
+	assert.equal(loaded.stdout, evidence.stdout);
+	assert.equal(loaded.stderr, evidence.stderr);
+});

@@ -7,7 +7,7 @@
  * 判定优先级(自上而下,命中即返回):
  *   0. 无证据                        → inconclusive  ← 防止"没跑就算过"
  *   1. 环境指纹不符                  → inconclusive  ← I9,不计入熔断
- *   2. 任一证据 inconclusive         → inconclusive
+ *   2. 必需范围内的证据 inconclusive  → inconclusive  ← 范围外 AC 的无结论只是信息
  *   3. 任一 hard fail                → fail
  *   4. 必需 AC 缺少证据              → inconclusive  ← 防止漏跑当通过
  *   5. 任一 semi fail                → fail
@@ -34,6 +34,8 @@ export function judge(evidences: Evidence[], options: JudgeOptions = {}): Verdic
       outcome: "inconclusive",
       failing: [],
       reason: "未采集到任何证据,无法判定",
+      inconclusiveCause: "evidence",
+      missingAcIds: requiredAcIds.length > 0 ? requiredAcIds : undefined,
     };
   }
 
@@ -49,17 +51,28 @@ export function judge(evidences: Evidence[], options: JudgeOptions = {}): Verdic
         reason:
           `环境指纹不符(期望 ${short(expectedFingerprint)},` +
           `实际 ${short(drifted[0].envFingerprint!)}),不计入熔断`,
+        inconclusiveCause: "env",
       };
     }
   }
 
-  // 2. 证据本身无结论
-  const undecided = evidences.filter((e) => e.result === "inconclusive");
+  // 2. 证据本身无结论 —— 只在本次判定的必需范围(requiredAcIds)内阻断。
+  //    CHECK 按任务收集证据:挂在后续任务的 AC(典型:lint/build 回归项)没有
+  //    命令输出可核对,只读的 verifier 永远判不出结论 —— 若让范围外的无结论阻断,
+  //    当前任务无论写得多好都过不了 CHECK,三次空转后熔断(真实事故 ×2)。
+  //    范围外的 semi fail 仍由规则 5 阻断(改坏了别人的回归项当然要拦)。
+  const scope = requiredAcIds.length > 0 ? new Set(requiredAcIds) : null;
+  const undecided = evidences.filter(
+    (e) => e.result === "inconclusive" && (!scope || scope.has(e.acId)),
+  );
   if (undecided.length > 0) {
+    const undecidedAcIds = undecided.map((e) => e.acId);
     return {
       outcome: "inconclusive",
       failing: undecided,
-      reason: `${undecided.map((e) => e.acId).join(", ")} 无结论`,
+      reason: `${undecidedAcIds.join(", ")} 无结论`,
+      inconclusiveCause: "evidence",
+      missingAcIds: undecidedAcIds,
     };
   }
 
@@ -82,6 +95,8 @@ export function judge(evidences: Evidence[], options: JudgeOptions = {}): Verdic
       outcome: "inconclusive",
       failing: [],
       reason: `缺少验收证据:${missing.join(", ")}`,
+      inconclusiveCause: "evidence",
+      missingAcIds: missing,
     };
   }
 
@@ -103,6 +118,8 @@ export function judge(evidences: Evidence[], options: JudgeOptions = {}): Verdic
       outcome: "inconclusive",
       failing: [],
       reason: "仅有执行者自述,缺少客观证据",
+      inconclusiveCause: "evidence",
+      missingAcIds: requiredAcIds.length > 0 ? requiredAcIds : undefined,
     };
   }
 

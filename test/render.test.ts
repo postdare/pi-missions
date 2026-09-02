@@ -20,6 +20,7 @@ import type { ScannedMission } from "../src/store/evidence.ts";
 import type { MissionPlan } from "../src/store/mission.ts";
 import { renderPanel } from "../src/ui/panel.ts";
 import { renderStatus } from "../src/ui/status-view.ts";
+import { renderPlanReview, SECTION_IDS, type ReviewSection } from "../src/ui/plan-review.ts";
 import type { ModelsPageData } from "../src/ui/models-page.ts";
 
 const theme = {
@@ -56,8 +57,8 @@ function mission(id: string, goal: string, phase: string, tier: string, total: n
 		tier: tier as never,
 		goal,
 		acceptanceCriteria: [
-			{ id: "AC1", text: "登录链路集成测试全绿", verify: "auth-integration" },
-			{ id: "AC2", text: "对外接口契约快照不变", verify: "contract-snapshot", baseline: "green" },
+			{ id: "AC1", text: "登录链路集成测试全绿", verify: "auth-integration", covers: ["DW1"] },
+			{ id: "AC2", text: "对外接口契约快照不变", verify: "contract-snapshot", baseline: "green", covers: ["DW2"] },
 		],
 		milestones: [
 			{
@@ -225,9 +226,11 @@ test("renderStatus:双栏与窄屏单栏在各宽度/各焦点/各任务选中�
 });
 
 test("renderStatus:任务详情页在各宽度/滚动偏移下都恰好铺满", () => {
+	const state = structuredClone(MISSIONS[0].state);
+	state.phase = "check";
 	const d = {
 		plan: MISSIONS[0].plan!,
-		state: MISSIONS[0].state,
+		state,
 		evidence: { latest: {} },
 		taskEvidence: {
 			T2: [
@@ -235,7 +238,18 @@ test("renderStatus:任务详情页在各宽度/滚动偏移下都恰好铺满", 
 					taskId: "T2",
 					attempt: 1,
 					at: NOW - 60000,
-					evidences: [{ level: "hard" as const, acId: "auth-integration", result: "fail" as const, raw: "Error on line 10\nStack trace\nMore info", exitCode: 1 }],
+					evidences: [{
+						level: "hard" as const,
+						acId: "auth-integration",
+						result: "fail" as const,
+						raw: "Error on line 10\nStack trace\nMore info",
+						exitCode: 1,
+						command: "bash missions/scripts/verify.sh auth-integration",
+						startedAt: NOW - 60_000,
+						durationMs: 12_345,
+						stdout: "超长完整标准输出 ".repeat(20),
+						stderr: "超长完整错误输出 ".repeat(20),
+					}],
 				},
 				{
 					taskId: "T2",
@@ -244,6 +258,15 @@ test("renderStatus:任务详情页在各宽度/滚动偏移下都恰好铺满", 
 					evidences: [{ level: "hard" as const, acId: "auth-integration", result: "fail" as const, raw: "Second failure on refresh token", exitCode: 1 }],
 				},
 			],
+		},
+		checkState: {
+			taskId: "T2",
+			attempt: 2,
+			startedAt: NOW - 5000,
+			updatedAt: NOW,
+			stage: "running_verifier" as const,
+			completedBranches: [{ acId: "auth-integration", status: "fail" as const, durationMs: 1234 }],
+			verifier: { status: "running" as const, startedAt: NOW - 1000 },
 		},
 		spikeReports: {},
 		logLines: [],
@@ -299,6 +322,168 @@ test("状态页与任务详情页不出现贴边框竖线", () => {
 		for (const line of lines) {
 			const stripped = line.replace(/\x1b\[[0-9;]*m/g, "");
 			assert.ok(!/^.{0,2}[▎▍▌┃]/.test(stripped), `${mode} 模式下仍有贴边竖线: ${JSON.stringify(stripped)}`);
+		}
+	}
+});
+
+test("renderStatus: canSteer 显示补充指令提示,canResume=false 隐藏恢复入口", () => {
+	const d = {
+		plan: MISSIONS[0].plan!,
+		state: { ...MISSIONS[0].state, phase: "check" as const },
+		evidence: { latest: {} },
+		taskEvidence: {},
+		spikeReports: {},
+		checkState: {
+			taskId: "T1",
+			attempt: 1,
+			startedAt: NOW,
+			updatedAt: NOW,
+			stage: "running_verifier" as const,
+			completedBranches: [],
+			verifier: { status: "running" as const, startedAt: NOW, activity: "独立核验中" },
+		},
+		logLines: ["line 1"],
+		dirName: "missions",
+	};
+	const strip = (lines: string[]) => lines.map((l) => l.replace(/\x1b\[[0-9;]*m/g, "")).join("\n");
+
+	const steered = strip(
+		renderStatus({ theme, width: 96, rows: 24, now: NOW, data: d, focus: 0, scroll: [0, 0, 0], canResume: false, canSteer: true }),
+	);
+	assert.ok(steered.includes("补充指令"), "Verifier 运行中应显示 S 补充指令");
+	assert.ok(!steered.includes("Ctrl+R"), "不可恢复的 mission 不显示恢复入口");
+
+	const plain = strip(
+		renderStatus({ theme, width: 96, rows: 24, now: NOW, data: d, focus: 0, scroll: [0, 0, 0], canResume: true, canSteer: false }),
+	);
+	assert.ok(!plain.includes("补充指令"), "Verifier 未运行时不显示补充指令");
+	assert.ok(plain.includes("Ctrl+R"), "可恢复时要显示恢复入口");
+});
+
+const REVIEW_PLAN: MissionPlan = {
+	...MISSIONS[0].plan!,
+	definition: {
+		constraints: ["不改数据库 schema", "必须兼容仍在用旧 cookie 的移动端"],
+		nonGoals: ["刷新令牌轮换", "多端登出"],
+		doneWhen: [
+			{ id: "DW1", text: "旧 session 中间件不再被任何路由引用" },
+			{ id: "DW2", text: "现有登录用例全绿,且不需要改断言 —— 这条完成条件写得特别长是为了逼出折行" },
+		],
+		verifySeam: "已有集成测试 test/auth/*.test.ts",
+		resolved: [{ q: "『快』指首屏还是接口?", a: "接口,p95 口径" }],
+		at: NOW,
+	},
+	approach: {
+		summary: "引入 JwtProvider 收口签发与校验;中间件保留旧路径读旧 cookie,直到移动端跟上再删。",
+		decisions: [
+			{ id: "D1", text: "不动 User 表,令牌里只放 sub+exp", why: "加一张 token 表会把这次改动的爆炸半径扩到迁移脚本", rejected: "建 token 表做服务端吊销", sticky: true },
+			{ id: "D2", text: "沿用现有中间件顺序", why: "改顺序会牵动限流" },
+		],
+	},
+	acceptanceCriteria: [
+		{ id: "AC1", text: "登录链路集成测试全绿", verify: "auth-integration", covers: ["DW1", "DW2"] },
+		{ id: "AC2", text: "对外接口契约快照不变", verify: "contract-snapshot", baseline: "green", covers: ["DW2"] },
+	],
+	verifyScript:
+		'#!/usr/bin/env bash\nset -euo pipefail\ncase "$1" in\n  auth-integration) npm test -- test/auth 这一行故意写得很长很长很长很长很长很长很长很长 ;;\n  contract-snapshot) npm run contract:check ;;\n  *) echo "unknown: $1" >&2; exit 2 ;;\nesac\n',
+};
+
+function reviewState(rejections: number) {
+	const st = structuredClone(MISSIONS[0].state);
+	st.phase = "plan" as never;
+	if (rejections > 0) {
+		st.planReview = {
+			rejections,
+			notes: ["AC2 那条根本不会红,换个能判别的写法", "任务粒度太粗了,T1 一个人做不完一个上下文"],
+		};
+	}
+	return st;
+}
+
+test("renderPlanReview:五段 × 各宽度 × 各滚动位置都恰好铺满", () => {
+	for (const width of WIDTHS) {
+		for (const section of SECTION_IDS as ReviewSection[]) {
+			for (const scroll of [0, 3, 999]) {
+				for (const rejections of [0, 2]) {
+					const r = renderPlanReview({
+						theme,
+						width,
+						rows: 30,
+						data: { plan: REVIEW_PLAN, state: reviewState(rejections) },
+						section,
+						scroll,
+					});
+					assertWidths(r.lines, Math.max(40, width), `review w=${width} sec=${section} scroll=${scroll} rej=${rejections}`);
+				}
+			}
+		}
+	}
+});
+
+test("renderPlanReview:空方案 / 空 AC / 空脚本 / quick 档无 definition 也不撑破", () => {
+	const bare: MissionPlan = {
+		...MISSIONS[0].plan!,
+		definition: undefined,
+		approach: undefined,
+		acceptanceCriteria: [],
+		milestones: [],
+		verifyScript: "",
+	};
+	for (const width of WIDTHS) {
+		for (const section of SECTION_IDS as ReviewSection[]) {
+			const r = renderPlanReview({
+				theme,
+				width,
+				rows: 24,
+				data: { plan: bare, state: reviewState(0) },
+				section,
+				scroll: 0,
+			});
+			assertWidths(r.lines, Math.max(40, width), `bare review w=${width} sec=${section}`);
+		}
+	}
+});
+
+test("renderPlanReview:只读模式不给批准/打回入口,评审模式给", () => {
+	const data = { plan: REVIEW_PLAN, state: reviewState(1) };
+	const ro = renderPlanReview({ theme, width: 96, rows: 24, data, section: "scope", scroll: 0, readOnly: true }).lines.join("\n");
+	assert.ok(!ro.includes("批准冻结"));
+	assert.ok(!ro.includes("打回并写意见"));
+	assert.ok(!ro.includes("上次打回"), "只读查看不是评审现场,不该翻旧账");
+
+	const rw = renderPlanReview({ theme, width: 96, rows: 24, data, section: "scope", scroll: 0 }).lines.join("\n");
+	assert.ok(rw.includes("批准冻结"));
+	assert.ok(rw.includes("打回 1/3"), "打回次数要摆在盒顶");
+	assert.ok(rw.includes("上次打回"), "人最想知道的是'我上次说的改了没有'");
+});
+
+test("renderPlanReview:verify.sh 全文可见 —— 不给看它,评审就是走过场", () => {
+	const r = renderPlanReview({
+		theme,
+		width: 120,
+		rows: 30,
+		data: { plan: REVIEW_PLAN, state: reviewState(0) },
+		section: "script",
+		scroll: 0,
+	});
+	const text = r.lines.join("\n");
+	assert.ok(text.includes("contract:check"));
+	assert.ok(text.includes("auth-integration)"));
+});
+
+test("计划评审页不出现贴边框竖线", () => {
+	for (const section of SECTION_IDS as ReviewSection[]) {
+		for (const line of renderPlanReview({
+			theme,
+			width: 96,
+			rows: 24,
+			data: { plan: REVIEW_PLAN, state: reviewState(2) },
+			section,
+			scroll: 0,
+		}).lines) {
+			const stripped = line.replace(/\x1b\[[0-9;]*m/g, "");
+			if (!/^[│╭╰├]/.test(stripped)) continue;
+			assert.ok(!/^.{0,2}[▎▍▌┃]/.test(stripped), `${section} 段仍有贴边竖线: ${JSON.stringify(stripped)}`);
 		}
 	}
 });

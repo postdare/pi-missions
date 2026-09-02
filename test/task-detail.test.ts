@@ -139,3 +139,58 @@ test("renderTaskDetail: 空状态与缺失字段容错", () => {
 		assert.ok(visibleWidth(l) <= 60, `行 ${i} 超宽: ${l}`);
 	}
 });
+
+test("renderTaskDetail:显示实时 CHECK 与完整分流执行日志", () => {
+	const data: TaskDetailData = {
+		task: { id: "T1", title: "集成验证", verify: ["integration"] },
+		taskState: {
+			id: "T1",
+			status: "running",
+			attempts: 1,
+			sameSignatureCount: 0,
+			inconclusiveStreak: 0,
+		},
+		criteria: [],
+		attempts: [
+			{
+				taskId: "T1",
+				attempt: 1,
+				at: 20_000,
+				evidences: [
+					{
+						level: "hard",
+						acId: "integration",
+						result: "fail",
+						raw: "摘要",
+						exitCode: 1,
+						command: "npm test -- integration",
+						startedAt: 10_000,
+						durationMs: 2500,
+						stdout: "完整 stdout 第一行\n完整 stdout 第二行",
+						stderr: "完整 stderr",
+					},
+				],
+			},
+		],
+		checkState: {
+			taskId: "T1",
+			attempt: 1,
+			startedAt: 10_000,
+			updatedAt: 12_000,
+			stage: "running_verifier",
+			completedBranches: [
+				{ acId: "integration", status: "fail", exitCode: 1, durationMs: 2500 },
+			],
+			verifier: { status: "running", startedAt: 12_000 },
+		},
+		now: 15_000,
+		tier: "standard",
+	};
+	const joined = renderTaskDetail(data, mockTheme, 80).join("\n");
+	assert.ok(joined.includes("实时验证 · Attempt 1"));
+	assert.ok(joined.includes("独立核验"));
+	assert.ok(joined.includes("npm test -- integration"));
+	assert.ok(joined.includes("2.5s"));
+	assert.ok(joined.includes("完整 stdout 第二行"));
+	assert.ok(joined.includes("完整 stderr"));
+});

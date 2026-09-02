@@ -1,0 +1,439 @@
+/**
+ * pi-missions · store/repository
+ *
+ * v2 唯一持久化入口。SNAPSHOT.json 是机器真相源；MISSION.md 与 verify.sh
+ * 是 snapshot 指向的不可变 generation。计划发布顺序固定为 generation → snapshot；
+ * CURRENT 只在 create/activate 时更新，普通 revision 提交不重写定位提示。
+ */
+
+import * as crypto from "node:crypto";
+import * as fs from "node:fs";
+import * as path from "node:path";
+import type { MissionState } from "../core/types.ts";
+import type { MissionPlan } from "./mission.ts";
+import { renderMissionMd } from "./mission.ts";
+import { currentPointer, statePaths, type RepoLayout } from "./paths.ts";
+import { atomicWriteJson } from "./io.ts";
+
+export const SNAPSHOT_SCHEMA_VERSION = 2 as const;
+
+export interface SnapshotArtifacts {
+	generation: number;
+	missionHash: string;
+	verifyHash: string;
+}
+
+export interface MissionSnapshotV2 {
+	schemaVersion: typeof SNAPSHOT_SCHEMA_VERSION;
+	revision: number;
+	missionId: string;
+	plan: MissionPlan;
+	state: MissionState;
+	artifacts: SnapshotArtifacts;
+	handoff: HandoffRecord | null;
+}
+
+export interface HandoffRecord {
+	token: string;
+	parentSession: string;
+	requestedRevision: number;
+	reason: string;
+}
+
+export interface SnapshotContent {
+	plan: MissionPlan;
+	state: MissionState;
+	handoff: HandoffRecord | null;
+}
+
+export interface CurrentRefV2 {
+	schemaVersion: typeof SNAPSHOT_SCHEMA_VERSION;
+	missionId: string;
+	revision: number;
+}
+
+export type SnapshotLoadResult =
+	| { ok: true; snapshot: MissionSnapshotV2 }
+	| { ok: false; code: "missing" | "corrupt" | "conflict"; error: string };
+
+export interface StagedPlan {
+	missionId: string;
+	expectedRevision: number;
+	generation: number;
+	tempDir: string;
+	finalDir: string;
+	missionMd: string;
+	verifySh: string;
+	artifacts: SnapshotArtifacts;
+}
+
+const MISSION_ID_RE = /^[a-z0-9][a-z0-9-]{0,100}$/;
+
+export class MissionRepository {
+	private readonly layout: RepoLayout;
+
+	constructor(layout: RepoLayout) {
+		this.layout = layout;
+	}
+
+	create(plan: MissionPlan, state: MissionState): MissionSnapshotV2 {
+		this.assertIdentity(plan.missionId, plan, state);
+		const sp = statePaths(this.layout, plan.missionId);
+		if (fs.existsSync(sp.snapshotJson)) throw new Error(`mission 已存在:${plan.missionId}`);
+		fs.mkdirSync(sp.generationsDir, { recursive: true });
+		const staged = this.stageFiles(plan.missionId, 0, 1, plan);
+		this.publishGeneration(staged);
+		const snapshot: MissionSnapshotV2 = {
+			schemaVersion: SNAPSHOT_SCHEMA_VERSION,
+			revision: 1,
+			missionId: plan.missionId,
+			plan,
+			state,
+			artifacts: staged.artifacts,
+			handoff: null,
+		};
+		this.writeSnapshot(snapshot);
+		this.setCurrent(snapshot);
+		return snapshot;
+	}
+
+	load(missionId: string): SnapshotLoadResult {
+		try {
+			this.assertMissionId(missionId);
+			const sp = statePaths(this.layout, missionId);
+			if (!fs.existsSync(sp.snapshotJson)) {
+				return { ok: false, code: "missing", error: `找不到 v2 mission "${missionId}"` };
+			}
+			const value: unknown = JSON.parse(fs.readFileSync(sp.snapshotJson, "utf8"));
+			if (!isSnapshot(value) || value.missionId !== missionId) {
+				return { ok: false, code: "corrupt", error: `mission "${missionId}" 的 SNAPSHOT.json 格式无效` };
+			}
+			this.assertIdentity(missionId, value.plan, value.state);
+			if (
+				hashText(renderMissionMd(value.plan)) !== value.artifacts.missionHash ||
+				hashText(value.plan.verifyScript) !== value.artifacts.verifyHash
+			) {
+				return { ok: false, code: "corrupt", error: `mission "${missionId}" 的 plan 与 generation hash 不匹配` };
+			}
+			const missionMd = sp.generationMissionMd(value.artifacts.generation);
+			const verifySh = sp.generationVerifySh(value.artifacts.generation);
+			if (!fs.existsSync(missionMd) || !fs.existsSync(verifySh)) {
+				return { ok: false, code: "corrupt", error: `mission "${missionId}" 的 generation 文件缺失` };
+			}
+			if (hashFile(missionMd) !== value.artifacts.missionHash || hashFile(verifySh) !== value.artifacts.verifyHash) {
+				return { ok: false, code: "corrupt", error: `mission "${missionId}" 的冻结文件 hash 不匹配` };
+			}
+			return { ok: true, snapshot: value };
+		} catch (error) {
+			return { ok: false, code: "corrupt", error: errorMessage(error) };
+		}
+	}
+
+	commit(
+		missionId: string,
+		expectedRevision: number,
+		content: SnapshotContent,
+	): SnapshotLoadResult {
+		const loaded = this.load(missionId);
+		if (!loaded.ok) return loaded;
+		if (loaded.snapshot.revision !== expectedRevision) {
+			return conflict(missionId, expectedRevision, loaded.snapshot.revision);
+		}
+		this.assertIdentity(missionId, content.plan, content.state);
+		const renderedHash = hashText(renderMissionMd(content.plan));
+		const verifyHash = hashText(content.plan.verifyScript);
+		if (
+			renderedHash !== loaded.snapshot.artifacts.missionHash ||
+			verifyHash !== loaded.snapshot.artifacts.verifyHash
+		) {
+			const staged = this.stageFiles(missionId, expectedRevision, expectedRevision + 1, content.plan);
+			return this.commitStaged(staged, content);
+		}
+		const snapshot: MissionSnapshotV2 = {
+			...loaded.snapshot,
+			revision: expectedRevision + 1,
+			plan: content.plan,
+			state: content.state,
+			handoff: content.handoff,
+		};
+		this.writeSnapshot(snapshot);
+		return { ok: true, snapshot };
+	}
+
+	stagePlan(missionId: string, expectedRevision: number, plan: MissionPlan): StagedPlan {
+		const loaded = this.load(missionId);
+		if (!loaded.ok) throw new Error(loaded.error);
+		if (loaded.snapshot.revision !== expectedRevision) {
+			throw new Error(conflictMessage(missionId, expectedRevision, loaded.snapshot.revision));
+		}
+		this.assertIdentity(missionId, plan, loaded.snapshot.state);
+		return this.stageFiles(missionId, expectedRevision, expectedRevision + 1, plan);
+	}
+
+	commitStaged(staged: StagedPlan, content: SnapshotContent): SnapshotLoadResult {
+		const loaded = this.load(staged.missionId);
+		if (!loaded.ok) {
+			this.discardStaged(staged);
+			return loaded;
+		}
+		if (loaded.snapshot.revision !== staged.expectedRevision) {
+			this.discardStaged(staged);
+			return conflict(staged.missionId, staged.expectedRevision, loaded.snapshot.revision);
+		}
+		this.assertIdentity(staged.missionId, content.plan, content.state);
+		if (
+			hashText(renderMissionMd(content.plan)) !== staged.artifacts.missionHash ||
+			hashText(content.plan.verifyScript) !== staged.artifacts.verifyHash
+		) {
+			this.discardStaged(staged);
+			return {
+				ok: false,
+				code: "corrupt",
+				error: `mission "${staged.missionId}" 的 staged generation 与提交 plan 不一致`,
+			};
+		}
+		this.publishGeneration(staged);
+		const snapshot: MissionSnapshotV2 = {
+			schemaVersion: SNAPSHOT_SCHEMA_VERSION,
+			revision: staged.expectedRevision + 1,
+			missionId: staged.missionId,
+			plan: content.plan,
+			state: content.state,
+			artifacts: staged.artifacts,
+			handoff: content.handoff,
+		};
+		this.writeSnapshot(snapshot);
+		return { ok: true, snapshot };
+	}
+
+	discardStaged(staged: StagedPlan): void {
+		try {
+			fs.rmSync(staged.tempDir, { recursive: true, force: true });
+		} catch {
+			/* 临时 generation 留给下次启动清理，不影响已发布 snapshot */
+		}
+	}
+
+	readCurrent(): SnapshotLoadResult {
+		try {
+			const file = currentPointer(this.layout);
+			if (!fs.existsSync(file)) return { ok: false, code: "missing", error: "没有 CURRENT mission" };
+			const value: unknown = JSON.parse(fs.readFileSync(file, "utf8"));
+			if (!isCurrentRef(value)) return { ok: false, code: "corrupt", error: "CURRENT 格式无效" };
+			const loaded = this.load(value.missionId);
+			if (!loaded.ok) return loaded;
+			// CURRENT 只负责定位 mission，snapshot 才是 revision 真相源。
+			// 普通 commit 不重写 CURRENT，因此其 revision 允许落后。
+			return loaded;
+		} catch (error) {
+			return { ok: false, code: "corrupt", error: errorMessage(error) };
+		}
+	}
+
+	/** 显式切换 CURRENT；普通 revision 提交不需要重写定位提示。 */
+	activate(missionId: string): SnapshotLoadResult {
+		const loaded = this.load(missionId);
+		if (!loaded.ok) return loaded;
+		this.setCurrent(loaded.snapshot);
+		return loaded;
+	}
+
+	list(): SnapshotLoadResult[] {
+		let dirs: fs.Dirent[];
+		try {
+			dirs = fs.readdirSync(this.layout.state, { withFileTypes: true });
+		} catch {
+			return [];
+		}
+		return dirs.filter((d) => d.isDirectory() && MISSION_ID_RE.test(d.name)).map((d) => this.load(d.name));
+	}
+
+	generationMissionMd(snapshot: MissionSnapshotV2): string {
+		return statePaths(this.layout, snapshot.missionId).generationMissionMd(snapshot.artifacts.generation);
+	}
+
+	generationVerifySh(snapshot: MissionSnapshotV2): string {
+		return statePaths(this.layout, snapshot.missionId).generationVerifySh(snapshot.artifacts.generation);
+	}
+
+	verifyScriptPath(missionId: string, generation: number): string {
+		this.assertMissionId(missionId);
+		return statePaths(this.layout, missionId).generationVerifySh(generation);
+	}
+
+	private stageFiles(
+		missionId: string,
+		expectedRevision: number,
+		generation: number,
+		plan: MissionPlan,
+	): StagedPlan {
+		this.assertMissionId(missionId);
+		const sp = statePaths(this.layout, missionId);
+		fs.mkdirSync(sp.generationsDir, { recursive: true });
+		const tempDir = path.join(sp.generationsDir, `.tmp-${generation}-${crypto.randomUUID()}`);
+		const finalDir = sp.generationDir(generation);
+		// generation 编号总是 expectedRevision + 1，因此同名目录不可能被当前 snapshot 引用。
+		// 它只能是上次崩溃在“发布 generation → 替换 snapshot”之间留下的孤儿。
+		fs.rmSync(finalDir, { recursive: true, force: true });
+		for (const entry of fs.readdirSync(sp.generationsDir)) {
+			if (entry.startsWith(`.tmp-${generation}-`)) {
+				fs.rmSync(path.join(sp.generationsDir, entry), { recursive: true, force: true });
+			}
+		}
+		fs.mkdirSync(tempDir, { recursive: false });
+		const missionMd = path.join(tempDir, "MISSION.md");
+		const verifySh = path.join(tempDir, "verify.sh");
+		fs.writeFileSync(missionMd, renderMissionMd(plan), "utf8");
+		fs.writeFileSync(verifySh, plan.verifyScript, "utf8");
+		fs.chmodSync(verifySh, 0o755);
+		return {
+			missionId,
+			expectedRevision,
+			generation,
+			tempDir,
+			finalDir,
+			missionMd,
+			verifySh,
+			artifacts: {
+				generation,
+				missionHash: hashFile(missionMd),
+				verifyHash: hashFile(verifySh),
+			},
+		};
+	}
+
+	private publishGeneration(staged: StagedPlan): void {
+		if (fs.existsSync(staged.finalDir)) throw new Error(`generation 已存在:${staged.generation}`);
+		fs.renameSync(staged.tempDir, staged.finalDir);
+		staged.missionMd = path.join(staged.finalDir, "MISSION.md");
+		staged.verifySh = path.join(staged.finalDir, "verify.sh");
+	}
+
+	private writeSnapshot(snapshot: MissionSnapshotV2): void {
+		const file = statePaths(this.layout, snapshot.missionId).snapshotJson;
+		atomicWriteJson(file, snapshot);
+	}
+
+	private setCurrent(snapshot: MissionSnapshotV2): void {
+		const ref: CurrentRefV2 = {
+			schemaVersion: SNAPSHOT_SCHEMA_VERSION,
+			missionId: snapshot.missionId,
+			revision: snapshot.revision,
+		};
+		atomicWriteJson(currentPointer(this.layout), ref);
+	}
+
+	private assertIdentity(missionId: string, plan: MissionPlan, state: MissionState): void {
+		this.assertMissionId(missionId);
+		if (plan.missionId !== missionId || state.missionId !== missionId) {
+			throw new Error(`mission identity 不一致:${missionId}`);
+		}
+	}
+
+	private assertMissionId(missionId: string): void {
+		if (!MISSION_ID_RE.test(missionId)) throw new Error(`非法 mission id:${missionId}`);
+	}
+}
+
+function hashText(text: string): string {
+	return `sha256:${crypto.createHash("sha256").update(text).digest("hex")}`;
+}
+
+function hashFile(file: string): string {
+	return hashText(fs.readFileSync(file, "utf8"));
+}
+
+function conflict(missionId: string, expected: number, actual: number): SnapshotLoadResult {
+	return {
+		ok: false,
+		code: "conflict",
+		error: conflictMessage(missionId, expected, actual),
+	};
+}
+
+function conflictMessage(missionId: string, expected: number, actual: number): string {
+	return `mission "${missionId}" revision 冲突:expected=${expected},actual=${actual}`;
+}
+
+function errorMessage(error: unknown): string {
+	return error instanceof Error ? error.message : String(error);
+}
+
+function isSnapshot(value: unknown): value is MissionSnapshotV2 {
+	if (!value || typeof value !== "object") return false;
+	const v = value as Partial<MissionSnapshotV2>;
+	return (
+		v.schemaVersion === SNAPSHOT_SCHEMA_VERSION &&
+		Number.isInteger(v.revision) &&
+		(v.revision ?? 0) > 0 &&
+		typeof v.missionId === "string" &&
+		isPlan(v.plan) &&
+		isState(v.state) &&
+		!!v.artifacts &&
+		Number.isInteger(v.artifacts.generation) &&
+		typeof v.artifacts.missionHash === "string" &&
+		typeof v.artifacts.verifyHash === "string" &&
+		(v.handoff === null ||
+			(!!v.handoff &&
+				typeof v.handoff.token === "string" &&
+				typeof v.handoff.parentSession === "string" &&
+				Number.isInteger(v.handoff.requestedRevision) &&
+				typeof v.handoff.reason === "string"))
+	);
+}
+
+function isPlan(value: unknown): value is MissionPlan {
+	if (!value || typeof value !== "object") return false;
+	const v = value as Partial<MissionPlan>;
+	return (
+		typeof v.missionId === "string" &&
+		(v.tier === "quick" || v.tier === "standard" || v.tier === "complex") &&
+		typeof v.goal === "string" &&
+		Array.isArray(v.acceptanceCriteria) &&
+		Array.isArray(v.milestones) &&
+		typeof v.verifyScript === "string" &&
+		typeof v.createdAt === "number"
+	);
+}
+
+function isState(value: unknown): value is MissionState {
+	if (!value || typeof value !== "object") return false;
+	const v = value as Partial<MissionState>;
+	return (
+		typeof v.missionId === "string" &&
+		(v.tier === "quick" || v.tier === "standard" || v.tier === "complex") &&
+		["define", "plan", "do", "check", "act", "done", "halted"].includes(String(v.phase)) &&
+		(v.currentTask === null || typeof v.currentTask === "string") &&
+		Array.isArray(v.taskOrder) &&
+		!!v.tasks &&
+		typeof v.tasks === "object" &&
+		!!v.escalation &&
+		typeof v.escalation === "object" &&
+		Array.isArray(v.escalation.history) &&
+		(v.pendingHandoff === null || typeof v.pendingHandoff === "string") &&
+		!!v.sessionMap &&
+		typeof v.sessionMap === "object" &&
+		typeof v.defineAsks === "number" &&
+		Array.isArray(v.defineSettled) &&
+		!!v.planReview &&
+		Array.isArray(v.planReview.notes) &&
+		typeof v.spikesRun === "number" &&
+		!!v.cost &&
+		typeof v.cost === "object" &&
+		!!v.metrics &&
+		Array.isArray(v.metrics.touchedFiles) &&
+		typeof v.metrics.touchedPublicApi === "boolean" &&
+		typeof v.updatedAt === "number"
+	);
+}
+
+function isCurrentRef(value: unknown): value is CurrentRefV2 {
+	if (!value || typeof value !== "object") return false;
+	const v = value as Partial<CurrentRefV2>;
+	return (
+		v.schemaVersion === SNAPSHOT_SCHEMA_VERSION &&
+		typeof v.missionId === "string" &&
+		Number.isInteger(v.revision) &&
+		(v.revision ?? 0) > 0
+	);
+}
