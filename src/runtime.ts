@@ -1082,30 +1082,21 @@ export class Runtime {
 			// ACT = 一轮诊断对话,结束后自动回 DO(L1 改实现)
 			const r = await this.applyEvent({ type: "ADJUST_DONE", at: Date.now() }, ctx);
 			if (r.error || a.state.pendingHandoff) return;
-			this.pi.sendUserMessage(renderDoBrief(a.plan, a.state, this.currentSpikeReport()?.rel), { deliverAs: "followUp" });
-			// 不 return —— 继续往下走升档判据。
+			// 升档判定必须排在 DO 简报**之前**:ADJUST_DONE 刚把 attempts 加了 1,
+			// "quick 第 2 次尝试就升档"正是此刻才成立,而升档会挂起换脑 ——
+			// 先发一句"进入 DO,第 2 次尝试"再换脑,是在骗下一个会话。
 			//
-			// ADJUST_DONE 刚把 attempts 加了 1,"quick 第 2 次尝试就升档"正是此刻才成立。
-			// 这里原本直接 return,而 DO 相位的每一轮都以 mission_submit 结束(相位当场
-			// 变 check),于是"phase=do 且 attempts>=2"的 settled 永远不会出现 ——
-			// tier.ts 里为 quick 写的那条逃生梯从来没接上过,它每次都直接撞熔断。
+			// (这里原本直接 return,而 DO 相位的每一轮都以 mission_submit 结束、相位当场
+			// 变 check,于是"phase=do 且 attempts>=2"的 settled 永远不会出现 ——
+			// tier.ts 里为 quick 写的那条逃生梯从来没接上过。)
+			if (await this.maybePromote(ctx)) return;
+			this.pi.sendUserMessage(renderDoBrief(a.plan, a.state, this.currentSpikeReport()?.rel), { deliverAs: "followUp" });
+			return;
 		}
 
-		// 相位可能已被上面的 ADJUST_DONE 改掉,重新读
 		const phase = a.state.phase;
 		if (phase === "do" || phase === "plan" || phase === "define") {
-			// 机械升档(升档自动,降档手动)
-			const promo = evaluatePromotion({
-				tier: a.state.tier,
-				currentTask: a.state.currentTask ? (a.state.tasks[a.state.currentTask] ?? null) : null,
-				touchedFiles: a.state.metrics.touchedFiles.length,
-				touchedPublicApi: a.state.metrics.touchedPublicApi,
-				escalations: a.state.escalation.history.length,
-			});
-			if (promo) {
-				await this.applyEvent({ type: "PROMOTE_TIER", at: Date.now(), to: promo.to, reason: promo.reason }, ctx);
-				return;
-			}
+			if (await this.maybePromote(ctx)) return;
 			// 上下文水位守卫:压缩是有损的,换脑是无损的(状态在仓库里)
 			if (!a.state.pendingHandoff) {
 				const usage = ctx.getContextUsage();
@@ -1115,6 +1106,21 @@ export class Runtime {
 				}
 			}
 		}
+	}
+
+	/** 机械升档(升档自动,降档手动)。返回 true 表示已升档 —— 调用方到此为止 */
+	private async maybePromote(ctx: any): Promise<boolean> {
+		const a = this.active!;
+		const promo = evaluatePromotion({
+			tier: a.state.tier,
+			currentTask: a.state.currentTask ? (a.state.tasks[a.state.currentTask] ?? null) : null,
+			touchedFiles: a.state.metrics.touchedFiles.length,
+			touchedPublicApi: a.state.metrics.touchedPublicApi,
+			escalations: a.state.escalation.history.length,
+		});
+		if (!promo) return false;
+		await this.applyEvent({ type: "PROMOTE_TIER", at: Date.now(), to: promo.to, reason: promo.reason }, ctx);
+		return true;
 	}
 
 	// ─────────────────────────── tool_result:指标 + 编辑级反馈 ───────────────────────────

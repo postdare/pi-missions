@@ -542,12 +542,22 @@ export function transition(state: MissionState, event: MissionEvent): Transition
 			if (tierRank(event.to) <= tierRank(state.tier)) {
 				return reject(state, `不能从 ${state.tier} 降档/平移到 ${event.to}(降档只能人工重建 mission)`);
 			}
-			const effects: Effect[] = [
+			// 从 quick 升档要和熔断那条路落在同一个地方 —— 理由见 promoteFromQuick
+			if (state.tier === "quick") {
+				const taskId = state.currentTask;
+				return promoteFromQuick({
+					state,
+					at: event.at,
+					to: event.to,
+					reason: event.reason,
+					taskId,
+					tasks: taskId ? setTask(state.tasks, taskId, resetAfterEscalation) : state.tasks,
+				});
+			}
+			return ok({ ...state, tier: event.to }, [
 				log(`TIER ${state.tier} → ${event.to} why=${compact(event.reason)}`),
 				{ type: "NOTIFY", level: "warning", message: `已自动升档 ${state.tier} → ${event.to}:${event.reason}` },
-			];
-			if (state.tier === "quick") effects.push({ type: "PERSIST_PLAN" });
-			return ok({ ...state, tier: event.to }, effects, event.at);
+			], event.at);
 		}
 
 		default: {
@@ -638,25 +648,15 @@ function failTransition(
 	// (runtime 的 LOG effect 对 inMemory 是空操作),而这几行正是换脑之后
 	// 新会话唯一能读到的失败历史。
 	if (action.action === "promote") {
-		const tasks = setTask(state.tasks, taskId, () => resetAfterEscalation(counted));
-		return ok(
-			{
-				...state,
-				tier: action.to,
-				phase: "plan" as const,
-				tasks,
-				pendingHandoff: `promote ${state.tier}→${action.to} on ${taskId}`,
-			},
-			[
-				{ type: "PERSIST_PLAN" },
-				log(`${header} act=PROMOTE ${state.tier}→${action.to} why=${compact(action.reason)}`),
-				log(`升档前的失败原因:${compact(counted.lastFailureReason ?? "-")}`),
-				{ type: "HANDOFF", reason: `promote ${state.tier}→${action.to} on ${taskId}` },
-				...enter("plan"),
-				{ type: "NOTIFY", level: "warning", message: action.reason },
-			],
+		return promoteFromQuick({
+			state,
 			at,
-		);
+			to: action.to,
+			reason: action.reason,
+			taskId,
+			tasks: setTask(state.tasks, taskId, () => resetAfterEscalation(counted)),
+			leadingLog: `${header} act=PROMOTE ${state.tier}→${action.to} why=${compact(action.reason)}`,
+		});
 	}
 
 	if (action.action === "escalate") {
@@ -731,6 +731,51 @@ function enter(phase: Phase): Effect[] {
 
 function log(line: string): Effect {
 	return { type: "LOG", line };
+}
+
+/**
+ * 从 quick 升档:回 PLAN + 挂换脑 + 先落盘。
+ *
+ * 两个入口共用 —— 熔断(failTransition 的 promote 分支)与机械升档(PROMOTE_TIER)。
+ * 曾经各写各的,结果 PROMOTE_TIER 那份只改 tier、不改相位,留下一个
+ * tier=standard / phase=do / 没有任何 AC 的 mission。而 runCheck 按
+ * `state.tier === "quick"` 分流:档位一变它就不再看那条冻结判据,转去跑空的
+ * verify.sh,采不到证据判 inconclusive,回 DO 再来一遍,三次之后停机 ——
+ * 人工终审的那条判据从此再没被问过。实测 quick 只要失败一次就必然走进这条路。
+ *
+ * quick 必须回 PLAN 的理由是结构性的:**它根本没有计划**(acceptanceCriteria 空、
+ * verifyScript 空串)。升档的全部意义就是把那一条判据摊开成冻结 AC + verify.sh,
+ * 而那只能在 PLAN 相位做。
+ */
+function promoteFromQuick(input: {
+	state: MissionState;
+	at: number;
+	to: Tier;
+	reason: string;
+	taskId: string | null;
+	/** 已经做过 resetAfterEscalation 的任务表 */
+	tasks: MissionState["tasks"];
+	/** 熔断入口要在前面补一行 verdict 摘要 */
+	leadingLog?: string;
+}): TransitionResult {
+	const { state, at, to, reason, taskId, tasks } = input;
+	const why = `promote ${state.tier}→${to}${taskId ? ` on ${taskId}` : ""}`;
+	const lastFailure = taskId ? (tasks[taskId]?.lastFailureReason ?? null) : null;
+	return ok(
+		{ ...state, tier: to, phase: "plan" as const, tasks, pendingHandoff: why },
+		[
+			// PERSIST_PLAN 必须排在一切 LOG 之前:换脑靠磁盘重附着,
+			// 目录还没建出来的时候写 LOG 等于把失败原因扔了。
+			{ type: "PERSIST_PLAN" },
+			...(input.leadingLog ? [log(input.leadingLog)] : []),
+			log(`TIER ${state.tier} → ${to} why=${compact(reason)}`),
+			log(`升档前的失败原因:${compact(lastFailure ?? "-")}`),
+			{ type: "HANDOFF", reason: why },
+			...enter("plan"),
+			{ type: "NOTIFY", level: "warning", message: `已自动升档 ${state.tier} → ${to}:${reason}` },
+		],
+		at,
+	);
 }
 
 function ok(state: MissionState, effects: Effect[], at: number): TransitionResult {

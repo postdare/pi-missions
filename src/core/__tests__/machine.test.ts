@@ -403,6 +403,29 @@ test("PROMOTE_TIER 只能升不能降,quick 升档补落盘", () => {
 	assert.ok(down.error);
 });
 
+test("quick 升档必须回 PLAN 并挂换脑 —— 只改 tier 会留下一个没有 AC 的 standard mission", () => {
+	// 事故:原来这里只改 tier、相位停在 do。runCheck 按 state.tier 分流,档位一变
+	// 就不再看那条冻结判据,转去跑空的 verify.sh —— 采不到证据判 inconclusive,
+	// 回 DO 再来,三次之后停机。quick 只要失败一次就必然走进这条路。
+	const up = transition(toDo("quick"), { type: "PROMOTE_TIER", at: AT, to: "standard", reason: "attempts>=2" });
+	assert.equal(up.state.phase, "plan", "升档的意义就是把那条判据摊开成 AC + verify.sh,只能在 PLAN 做");
+	assert.ok(up.state.pendingHandoff, "换脑必须挂起 —— 新会话要从盘上重附着");
+	assert.ok(has(up.effects, "HANDOFF"));
+	// 落盘要排在写 LOG 之前:目录还没建出来时写 LOG 等于把失败原因扔了
+	const persist = up.effects.findIndex((e) => e.type === "PERSIST_PLAN");
+	const firstLog = up.effects.findIndex((e) => e.type === "LOG");
+	assert.ok(persist >= 0 && (firstLog < 0 || persist < firstLog), "PERSIST_PLAN 必须排在一切 LOG 之前");
+});
+
+test("standard → complex 只改档位,不回 PLAN —— 它已经有计划了", () => {
+	const s = { ...toDo("standard"), tier: "standard" as const };
+	const up = transition(s, { type: "PROMOTE_TIER", at: AT, to: "complex", reason: "2 次 L2" });
+	assert.equal(up.state.tier, "complex");
+	assert.equal(up.state.phase, "do", "别把 quick 的特殊处理误伤到这条路");
+	assert.ok(!up.state.pendingHandoff);
+	assert.ok(!has(up.effects, "PERSIST_PLAN"));
+});
+
 test("RECORD_ROLE_COST 只累计角色费用,不改变相位", () => {
 	const s = toDo();
 	const r = transition(s, { type: "RECORD_ROLE_COST", at: AT, role: "verifier", amount: 0.012 });

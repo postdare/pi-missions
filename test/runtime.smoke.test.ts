@@ -1485,6 +1485,54 @@ test("quick 人工终审:人取消不算通过(没做选择 ≠ 放行)", async 
 	assert.notEqual(rt.active!.state.phase, "done", "取消绝不能被当成通过");
 });
 
+test("quick 第一次没过、走真实驱动 onAgentSettled:升档落在 PLAN,不是留在 DO 空转", async () => {
+	// 这条必须走 onAgentSettled 而不是手动发 ADJUST_DONE —— 生产里的驱动是它,
+	// 而 bug 恰好只在它那条路上:ADJUST_DONE 之后紧接着 evaluatePromotion 发
+	// PROMOTE_TIER,当时那个 case 只改 tier 不改相位,于是留下
+	// tier=standard / phase=do / acceptanceCriteria 为空的 mission。
+	// runCheck 按 state.tier 分流:档位一变就不看那条冻结判据了,转去跑空的
+	// verify.sh,采不到证据判 inconclusive,回 DO 再来,三次之后停机 ——
+	// 人工终审的判据从此再没被问过。手动发 ADJUST_DONE 的老测试测不出这条。
+	const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "pi-missions-smoke-"));
+	const pi = mockPi();
+	const ctx = mockCtx(tmp, { select: "不通过", input: "CSP 报错,脚本加载不了" });
+	const rt = new Runtime(pi, tmp);
+
+	await rt.startQuick(ctx, "调整小组件在卡片里的排布", {
+		judge: "human",
+		text: "大档卡片里预览完整可见,不出现内容溢出",
+	});
+
+	await rt.applyEvent({ type: "SUBMIT", at: Date.now() }, ctx);
+	await rt.runCheck(ctx);
+	assert.equal(rt.active!.state.phase, "act", "人说不行 → 先进 ACT 诊断一轮");
+
+	// ★ 真实驱动:ACT 那一轮结束
+	await rt.onAgentSettled(ctx);
+
+	assert.equal(rt.active!.state.tier, "standard");
+	assert.equal(rt.active!.state.phase, "plan", "升档要回 PLAN 把判据摊开成 AC + verify.sh");
+	assert.ok(rt.active!.state.pendingHandoff, "换脑必须挂起");
+	assert.equal(rt.active!.inMemory, false, "换脑靠磁盘重附着,升档那一刻必须已落盘");
+
+	// 挂着换脑就不该再发"进入 DO"的简报 —— 那是在骗下一个会话
+	assert.ok(
+		!pi.calls.followUps.some((m) => m.includes("进入 DO")),
+		`升档挂换脑之后不能再发 DO 简报:\n${pi.calls.followUps.join("\n---\n")}`,
+	);
+
+	// 升档后 PLAN 相位给的是 mission_write_plan,不再是 quick 的 mission_criterion
+	const tools = pi.calls.activeTools.at(-1)!;
+	assert.ok(tools.includes("mission_write_plan"), tools.join(","));
+	assert.ok(!tools.includes("mission_criterion"), tools.join(","));
+
+	// 卡在 PLAN 就不能再提交 —— 原来的 bug 是它留在 DO,可以一直 submit 空转
+	const again = await rt.applyEvent({ type: "SUBMIT", at: Date.now() }, ctx);
+	assert.ok(again.error, "PLAN 相位不接受 SUBMIT");
+
+	fs.rmSync(tmp, { recursive: true, force: true });
+});
+
 test("quick 人工连判两次不行:升档 standard 并落盘,失败历史不再随换脑蒸发", async () => {
 	const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "pi-missions-smoke-"));
 	const pi = mockPi();

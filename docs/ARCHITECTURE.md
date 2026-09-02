@@ -201,16 +201,29 @@ transition(state: MissionState, event: MissionEvent): { state, effects, error? }
 
 升档判据在 `evaluatePromotion()`(`src/core/tier.ts`),全部机械可测:
 触及公开 API / 改动 > 5 文件 / quick 档第 2 次尝试 / standard 档 2 次 L2。
-**刻意不让 LLM 自评"这任务复杂吗"**(I7)。它在 `Runtime.onAgentSettled` 里检查 ——
-注意 ACT 分支处理完 `ADJUST_DONE` 后**不能提前 return**,否则"phase=do 且 attempts>=2"
-的时刻永远不会出现(DO 相位每一轮都以 `mission_submit` 结束,相位当场变 check),
-quick 的这条逃生梯就是空的。
+**刻意不让 LLM 自评"这任务复杂吗"**(I7)。它在 `Runtime.maybePromote()` 里检查,
+由 `onAgentSettled` 的两处调用触发 —— 注意 ACT 分支处理完 `ADJUST_DONE` 后**不能提前
+return**,否则"phase=do 且 attempts>=2"的时刻永远不会出现(DO 相位每一轮都以
+`mission_submit` 结束,相位当场变 check),quick 的这条逃生梯就是空的。升档判定还必须
+排在 DO 简报**之前**:升档会挂起换脑,先发一句"进入 DO"再换脑是在骗下一个会话。
 
-**quick 撞熔断阈值时的出口是升档,不是 L2**(`decide()` 返回 `promote`)。理由是结构性的:
-quick 没有"方案"可改,它只有一条判据 —— L2 回 PLAN 唯一能改的就是判据本身,而那是
-事后修改判定标准(I2/I3 的反面);而且 quick 不落盘,L2 强制换脑会让失败历史在换脑
-那一刻全部蒸发。升档则是往严了走:一条判据展开成冻结 AC + verify.sh,并且先 `PERSIST_PLAN`
-再写 LOG(顺序不能反,`inMemory` 期间 LOG effect 是空操作)。
+**从 quick 升档一律回 PLAN + 挂换脑 + 先落盘**,由 `promoteFromQuick()`
+(`src/core/machine.ts`)统一实现,两个入口共用:熔断(`decide()` 返回 `promote`)
+与机械升档(`PROMOTE_TIER`)。
+
+理由是结构性的 —— **quick 根本没有计划**(`acceptanceCriteria` 空、`verifyScript` 空串),
+升档的全部意义就是把那一条判据摊开成冻结 AC + verify.sh,而那只能在 PLAN 相位做。
+两个入口曾经各写各的,`PROMOTE_TIER` 那份只改 tier 不改相位,留下一个
+tier=standard / phase=do / 没有任何 AC 的 mission;而 `runCheck` 是按
+`state.tier === "quick"` 分流的,档位一变它就不再看那条冻结判据,转去跑空的 `verify.sh` ——
+采不到证据判 inconclusive,回 DO 再来一遍,三次之后停机,人工终审的判据从此再没被问过。
+**quick 只要失败一次就必然走进这条路**,所以 quick 的"重试"一次都不成立。
+
+`PERSIST_PLAN` 必须排在一切 LOG 之前(`inMemory` 期间 LOG effect 是空操作,目录还没建
+出来就写等于把失败原因扔了)。相对地,L2 对 quick 是空的:它没有"方案"可改,回 PLAN
+唯一能改的就是判据本身,而那是事后修改判定标准(I2/I3 的反面)。
+
+standard → complex 不走这条路 —— 它已经有计划了,`PROMOTE_TIER` 只改档位。
 
 ### 入口守卫(quick 的判据闸门)
 
@@ -581,14 +594,16 @@ PREV FAILURE: <上一轮失败原因>
 - 分流点不是 `tier === "quick"`:`evaluatePromotion` 在 ACT 之后发 `PROMOTE_TIER`,
   只改档位、不改相位也不改判据,此刻 tier 已是 standard 而 verify.sh 依然不存在。
   所以 PLAN 相位看档位(两者产出物不同),其余相位看**有没有冻结的 AC**。
+  (`PROMOTE_TIER` 后来被修成从 quick 升档也回 PLAN,见 `promoteFromQuick()`;
+  这条分流规则仍然保留 —— 它防的是"档位与判定装置脱节"这一类,不是那一个 bug。)
 
 ### 4.14 tick(内层循环驱动)
 
 `agent_settled` 是**唯一安全的判定点**(`onAgentSettled()`,`src/runtime.ts`)。按相位分流:
 
 - `check` → 跑 `runCheck()`(采证据 → judge → 发 VERDICT)
-- `act` → 发 `ADJUST_DONE` 回 DO(**ACT 就是一轮,不给第二轮**)
-- `do` / `plan` → 机械升档判定 + 上下文水位换脑
+- `act` → 发 `ADJUST_DONE` 回 DO(**ACT 就是一轮,不给第二轮**),再走一次升档判定
+- `do` / `plan` / `define` → 机械升档判定(`maybePromote()`)+ 上下文水位换脑
 
 对话的推进靠 `sendUserMessage(..., { deliverAs: "followUp" })`:判定完给 LLM 发一条
 DO brief 或 ACT brief,循环自己转起来。

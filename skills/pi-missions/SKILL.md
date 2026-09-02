@@ -34,17 +34,17 @@ description: 判断当前任务该不该用 pi-missions 开一个 mission、开�
 **档位只升不降,而且是自动的**,所以拿不准就往低了选 —— 选低了系统会把你抬上去,
 选高了那些相位就是纯开销。自动升档的机械触发点:
 
-- quick → standard:**第一次没过、走完一轮 ACT 诊断就升**(quick 实际只有一次重试);
+- quick → standard:**第一次没过就升**(走完一轮 ACT 诊断,quick 在本档内不重试);
   改动超过 5 个文件、或触及公开 API,同样立刻升;
 - standard → complex:同一 mission 内 2 次改方案(L2),说明任务边界在漂;
-- 熔断:同一失败签名连续出现(quick 2 次,standard/complex 3 次)就不再改实现 ——
+- 熔断(兜底):同一失败签名连续出现(quick 2 次,standard/complex 3 次)就不再改实现 ——
   quick 走升档,standard/complex 走**升级**(L1 改实现 → L2 改方案 → L3 重定义问题,
   L3 还失败就停机等人);
 - 单任务尝试硬上限 quick 4 次、standard 9 次、complex 12 次,到顶就停,不会无限试。
 
-quick 升档时会强制换脑,并把那条判据摊开成冻结 AC + verify.sh 重来 ——
-**这是 quick 反复失败的出口,不是失败**。所以 quick 选错了成本很低:
-它试一次不成就自己变成 standard,而不是在小档位里死磕。
+quick 升档会强制换脑,回到 PLAN 把那条判据摊开成冻结 AC + verify.sh 重来 ——
+**这是 quick 失败的出口,不是失败**。所以 quick 选错了成本很低:
+它一次不成就自己变成 standard,而不是在小档位里死磕。
 
 ## quick 怎么定判据
 
