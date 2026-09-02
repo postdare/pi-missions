@@ -157,13 +157,9 @@ export function registerCommands(pi: any, getRuntime: GetRuntime): void {
 					if ("error" in r) return notifyUsage(ctx, r.error);
 					rt.pendingTier = null; // quick 不消费待选档位,直接清掉
 					clearTierIndicator(ctx);
-					// 无 --verify 时 startQuick 会升档 standard(判定依据必须先于执行冻结),此处按落点分流
-					pi.sendUserMessage(
-						r.tier === "quick"
-							? quickKickoff(r.id, rest, picked)
-							: kickoff(rt.config.missionsDir, r.id, r.tier, rest, rt.active?.state.phase ?? "define"),
-						{ deliverAs: "followUp" },
-					);
+					// 落点永远是 quick:没给 --verify 只是停在 PLAN 相位等 mission_criterion,
+					// 不再像旧版那样当场升档 standard(startQuick 的返回类型钉着这条)。
+					pi.sendUserMessage(quickKickoff(r.id, rest, picked), { deliverAs: "followUp" });
 					return;
 				}
 

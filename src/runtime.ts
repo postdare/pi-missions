@@ -206,11 +206,16 @@ export class Runtime {
 	 *
 	 * criterion 非空 = 调用方已经给了判据(--verify 加速路径),直接冻结跳过这一步。
 	 */
+	/**
+	 * 返回类型里的 `tier: "quick"` 是字面量而不是 `Tier`,这是有意的:
+	 * 旧版没给 --verify 会当场升档 standard,调用方因此得按落点分流。现在不会了 ——
+	 * 没判据只是停在 PLAN 相位等 mission_criterion。用字面量钉住,免得那个分支再长回来。
+	 */
 	async startQuick(
 		ctx: any,
 		task: string,
 		criterion?: QuickCriterion | null,
-	): Promise<{ id: string; tier: Tier } | { error: string }> {
+	): Promise<{ id: string; tier: "quick" } | { error: string }> {
 		if (this.busy()) return { error: "已有进行中的 mission,先 /mission abort" };
 
 		const id = `quick-${Date.now().toString(36)}`;

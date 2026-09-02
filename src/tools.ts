@@ -294,7 +294,7 @@ export function registerMissionTools(pi: any, getRuntime: GetRuntime): void {
 			const a = rt.active;
 			if (!a) return toolError("无活动 mission");
 			if (a.state.tier === "quick" && !a.quickCriterion) {
-				// 正常不可达:没有判据的 quick 输入在 startQuick 就被升档挡住了
+				// 正常不可达:没冻结判据的 quick 停在 PLAN 相位,拿不到 mission_submit(见 gate.toolsForPhase)
 				return toolError("quick 档缺少判定依据,无法判定。请 /mission abort 后重开");
 			}
 			const r = await rt.applyEvent({ type: "SUBMIT", at: Date.now() }, ctx);
