@@ -47,17 +47,28 @@ function mockPi() {
 	};
 }
 
-function mockCtx(cwd: string) {
+function mockCtx(cwd: string, human?: { select?: string; input?: string }) {
 	const notifications: string[] = [];
+	const prompts: string[] = [];
 	return {
 		notifications,
+		/** 人工终审弹出的问题;用来断言"确实问了人",而不是悄悄放行 */
+		prompts,
 		cwd,
-		hasUI: false,
+		hasUI: !!human,
 		mode: "tui",
 		ui: {
 			notify: (m: string) => void notifications.push(m),
 			setWidget: () => {},
 			confirm: async () => true,
+			select: async (title: string, options: string[]) => {
+				prompts.push(title);
+				return options.find((o) => o.startsWith(human?.select ?? "")) ?? undefined;
+			},
+			input: async (title: string) => {
+				prompts.push(title);
+				return human?.input;
+			},
 		},
 		getContextUsage: () => ({ tokens: 0, contextWindow: 100_000, percent: 0 }),
 		sessionManager: { getSessionFile: () => "/tmp/fake-session.jsonl", getEntries: () => [] },
@@ -464,12 +475,16 @@ test("ensureAttached:内存丢失时驱动命令从磁盘悄悄接上", async ()
 	assert.equal(await rt3.ensureAttached(mockCtx(emptyDir)), false);
 });
 
-test("quick 档:内存态不落盘,--verify 命令驱动判定", async () => {
+test("quick 档:内存态不落盘,命令判据驱动判定", async () => {
 	const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "pi-missions-smoke-"));
 	const pi = mockPi();
 	const ctx = mockCtx(tmp);
 	const rt = new Runtime(pi, tmp);
-	const r = await rt.startQuick(ctx, "create hello.txt", "test -f hello.txt");
+	const r = await rt.startQuick(ctx, "create hello.txt", {
+		judge: "command",
+		text: "test -f hello.txt",
+		command: "test -f hello.txt",
+	});
 	assert.ok("id" in r, JSON.stringify(r));
 	assert.equal(rt.active!.state.phase, "do");
 	assert.ok(rt.active!.inMemory);
@@ -484,18 +499,26 @@ test("quick 档:内存态不落盘,--verify 命令驱动判定", async () => {
 	assert.ok(!fs.existsSync(path.join(tmp, "missions")), "quick 全程零落盘");
 });
 
-test("quick 带 --verify:命令进 DO 前冻结,走完判定闭环", async () => {
+test("quick 命令判据:进 DO 前冻结,走完判定闭环", async () => {
 	const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "pi-missions-smoke-"));
 	const pi = mockPi();
 	const ctx = mockCtx(tmp);
 	const rt = new Runtime(pi, tmp);
 
-	const r = await rt.startQuick(ctx, "create hello.txt", "test -f hello.txt");
+	const r = await rt.startQuick(ctx, "create hello.txt", {
+		judge: "command",
+		text: "test -f hello.txt",
+		command: "test -f hello.txt",
+	});
 	assert.ok("id" in r, JSON.stringify(r));
 	assert.equal(r.tier, "quick");
 	assert.equal(rt.active!.state.tier, "quick");
 	assert.equal(rt.active!.state.phase, "do");
-	assert.equal(rt.active!.quickVerifyCommand, "test -f hello.txt");
+	assert.deepEqual(rt.active!.quickCriterion, {
+		judge: "command",
+		text: "test -f hello.txt",
+		command: "test -f hello.txt",
+	});
 	assert.equal(rt.active!.inMemory, true, "quick 不落盘");
 
 	// 命令不满足 → fail;满足 → pass → done
@@ -510,26 +533,43 @@ test("quick 带 --verify:命令进 DO 前冻结,走完判定闭环", async () =>
 	assert.equal(rt.active!.state.phase, "done");
 });
 
-test("quick 无 --verify:不进 DO,自动升 standard 停在 DEFINE", async () => {
+test("quick 不问人:停在 PLAN 只给只读工具,AI 交判据后才解锁写工具进 DO", async () => {
 	const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "pi-missions-smoke-"));
 	const pi = mockPi();
 	const ctx = mockCtx(tmp);
 	const rt = new Runtime(pi, tmp);
 
-	const r = await rt.startQuick(ctx, "让登录快一点");
+	const r = await rt.startQuick(ctx, "把导航栏在窄屏下改成汉堡菜单");
 	assert.ok("id" in r, JSON.stringify(r));
-	assert.equal(r.tier, "standard", "没有判定依据就不该有快车道");
-	assert.equal(rt.active!.state.tier, "standard");
-	assert.equal(rt.active!.state.phase, "define", "模糊输入先去定义问题,再谈 AC");
-	assert.equal(rt.active!.quickVerifyCommand, undefined);
-	assert.equal(rt.active!.inMemory, false, "升档后走正常落盘路径");
-	assert.ok(ctx.notifications.some((m) => m.includes("--verify")), "要告诉人为什么升档了");
+	assert.equal(r.tier, "quick", "写不出 shell 断言不再被踢去 standard");
+	assert.equal(rt.active!.state.phase, "plan");
 
-	// DEFINE 相位:只读 + 问一轮 + 交定义,连 mission_write_plan 都还没给
-	const tools = pi.calls.activeTools.at(-1)!;
-	assert.ok(tools.includes("mission_ask") && tools.includes("mission_define"));
-	assert.ok(!tools.includes("mission_write_plan"), "问题没定义清楚不给写计划");
-	assert.ok(!tools.includes("write"));
+	// 判据先于写代码冻结 —— 这一步是工具闸门的物理保证,不是提示词约定
+	const planTools = pi.calls.activeTools.at(-1)!;
+	assert.ok(planTools.includes("mission_criterion"));
+	assert.ok(!planTools.includes("write") && !planTools.includes("edit"), "判据没定就不给写工具");
+	assert.ok(!planTools.includes("mission_submit"));
+
+	// 空泛判据被 L0 退回,相位不动
+	const bad = await rt.freezeQuickCriterion(ctx, { judge: "ai", text: "样式正确显示出来" });
+	assert.ok("error" in bad && bad.error.includes("锚点"), JSON.stringify(bad));
+	assert.equal(rt.active!.state.phase, "plan", "判据不合格就不该进 DO");
+
+	// 复读目标同样退回
+	const echo = await rt.freezeQuickCriterion(ctx, { judge: "ai", text: "把导航栏在窄屏下改成汉堡菜单" });
+	assert.ok("error" in echo && echo.error.includes("复读"), JSON.stringify(echo));
+
+	const ok = await rt.freezeQuickCriterion(ctx, {
+		judge: "human",
+		text: "窄屏下导航折叠成汉堡,点开含全部入口,宽屏布局不变",
+	});
+	assert.ok("ok" in ok, JSON.stringify(ok));
+	assert.equal(rt.active!.state.phase, "do");
+	assert.equal(rt.active!.quickCriterion?.judge, "human");
+
+	const doTools = pi.calls.activeTools.at(-1)!;
+	assert.ok(doTools.includes("mission_submit") && doTools.includes("write"), "冻结之后才解锁写工具");
+	assert.equal(ctx.notifications.length, 0, "全程没打断人");
 });
 
 test("PLAN 相位的 State Card 不能把'尚未冻结'说成 quick 档口径", async () => {
@@ -542,6 +582,28 @@ test("PLAN 相位的 State Card 不能把'尚未冻结'说成 quick 档口径", 
 	const card = renderStateCard(rt.active!.plan, rt.active!.state, "missions");
 	assert.ok(!card.includes("quick 档"), "standard mission 的卡片不该出现 quick 档口径");
 	assert.ok(card.includes("尚未冻结"));
+});
+
+test("quick 的 State Card 必须印出真实判据与裁判(印不出来 planner 会以为没冻结)", async () => {
+	const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "pi-missions-smoke-"));
+	const pi = mockPi();
+	const ctx = mockCtx(tmp);
+	const rt = new Runtime(pi, tmp);
+	await rt.startQuick(ctx, "调整小组件在卡片里的排布");
+
+	// 判据未冻结:说清楚下一步是什么,而不是含糊成"没有 AC"
+	const before = renderStateCard(rt.active!.plan, rt.active!.state, "missions", 0, rt.active!.quickCriterion);
+	assert.ok(before.includes("mission_criterion"), before);
+	assert.ok(!before.includes("--verify"), "别再提一个已经不存在的入口");
+
+	await rt.freezeQuickCriterion(ctx, {
+		judge: "human",
+		text: "大档卡片里预览完整可见,不出现内容溢出或被裁切",
+	});
+	const after = renderStateCard(rt.active!.plan, rt.active!.state, "missions", 0, rt.active!.quickCriterion);
+	assert.ok(after.includes("大档卡片里预览完整可见"), "判据正文必须在卡片上,否则模型会自己造一套");
+	assert.ok(after.includes("人工终审"), "谁来判也要写清楚");
+	assert.ok(!after.includes("submit 时提供"), "与 mission_submit 不收参数直接矛盾的旧文案");
 });
 
 test("空壳 AC(冻结时就绿)被基线打回,计划不冻结", async () => {
@@ -1362,4 +1424,105 @@ test("补证据闸门:inconclusive 后原样重交被拦截,修改工作区后�
 	assert.equal(rt.active!.state.phase, "check");
 	assert.equal(rt.active!.state.tasks.T1.awaitingEvidence, null);
 	assert.notEqual(rt.active!.state.tasks.T1.submittedTreeFp, tree1);
+});
+// ─────────────────────────── quick 的三种裁判 ───────────────────────────
+
+test("quick 人工终审:人点通过 → done,证据是 human 级且标记为不可重放", async () => {
+	const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "pi-missions-smoke-"));
+	const pi = mockPi();
+	const ctx = mockCtx(tmp, { select: "通过" });
+	const rt = new Runtime(pi, tmp);
+
+	const r = await rt.startQuick(ctx, "把导航栏在窄屏改成汉堡菜单", {
+		judge: "human",
+		text: "窄屏折叠成汉堡,宽屏不变",
+	});
+	assert.ok("id" in r, JSON.stringify(r));
+	assert.equal(r.tier, "quick", "写不出 shell 断言不该被挡去 standard");
+	assert.equal(rt.active!.state.phase, "do");
+
+	await rt.applyEvent({ type: "SUBMIT", at: Date.now() }, ctx);
+	await rt.runCheck(ctx);
+
+	assert.equal(rt.active!.state.phase, "done");
+	assert.ok(
+		ctx.prompts.some((p) => p.includes("窄屏折叠成汉堡")),
+		"必须把冻结的判据摆在人面前再问,而不是只问一句'过不过'",
+	);
+});
+
+test("quick 人工终审:人说不通过 → 回 ACT,理由进证据", async () => {
+	const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "pi-missions-smoke-"));
+	const pi = mockPi();
+	const ctx = mockCtx(tmp, { select: "不通过", input: "汉堡点开只有 3 个链接" });
+	const rt = new Runtime(pi, tmp);
+
+	await rt.startQuick(ctx, "改导航栏", { judge: "human", text: "窄屏折叠成汉堡" });
+	await rt.applyEvent({ type: "SUBMIT", at: Date.now() }, ctx);
+	await rt.runCheck(ctx);
+
+	assert.equal(rt.active!.state.phase, "act", "人说不行就是 fail,和命令判失败同权");
+	const task = rt.active!.state.tasks.T1;
+	assert.ok(task.lastSignature, "人工 fail 也要有签名,否则熔断记不上账");
+	// 人打的那句话是这一轮唯一的信息源:ACT 相位只有只读工具,escalator 无法自己重现
+	assert.ok(
+		task.lastFailureReason?.includes("汉堡点开只有 3 个链接"),
+		`人补充的原因必须进 State Card / ACT 简报,实际是:${task.lastFailureReason}`,
+	);
+});
+
+test("quick 人工终审:人取消不算通过(没做选择 ≠ 放行)", async () => {
+	const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "pi-missions-smoke-"));
+	const pi = mockPi();
+	// select 返回 undefined = 人按了 Esc
+	const ctx = mockCtx(tmp, { select: "\u0000没有这个选项" });
+	const rt = new Runtime(pi, tmp);
+
+	await rt.startQuick(ctx, "改导航栏", { judge: "human", text: "窄屏折叠成汉堡" });
+	await rt.applyEvent({ type: "SUBMIT", at: Date.now() }, ctx);
+	await rt.runCheck(ctx);
+
+	assert.notEqual(rt.active!.state.phase, "done", "取消绝不能被当成通过");
+});
+
+test("quick 人工连判两次不行:升档 standard 并落盘,失败历史不再随换脑蒸发", async () => {
+	const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "pi-missions-smoke-"));
+	const pi = mockPi();
+	const ctx = mockCtx(tmp, { select: "不通过", input: "CSP 报错,脚本加载不了" });
+	const rt = new Runtime(pi, tmp);
+
+	await rt.startQuick(ctx, "调整小组件在卡片里的排布", {
+		judge: "human",
+		text: "大档卡片里预览完整可见,不出现内容溢出",
+	});
+	assert.equal(rt.active!.inMemory, true, "quick 起步不落盘");
+
+	// 第 1 次:人说不行 → ACT → 回 DO
+	await rt.applyEvent({ type: "SUBMIT", at: Date.now() }, ctx);
+	await rt.runCheck(ctx);
+	assert.equal(rt.active!.state.phase, "act");
+	await rt.applyEvent({ type: "ADJUST_DONE", at: Date.now() }, ctx);
+	assert.equal(rt.active!.state.tier, "quick");
+
+	// 第 2 次:人再说不行 → 同签名撞阈值 → 升档而不是 L2
+	await rt.applyEvent({ type: "SUBMIT", at: Date.now() }, ctx);
+	await rt.runCheck(ctx);
+
+	assert.equal(rt.active!.state.tier, "standard", "quick 的出口是升档,不是回 PLAN 改判据");
+	assert.equal(rt.active!.state.phase, "plan");
+	assert.equal(rt.active!.state.escalation.level, 1, "升档不是升级:阶梯没动,判定标准是往严了走");
+	assert.equal(rt.active!.inMemory, false, "必须落盘 —— 换脑靠磁盘重附着");
+
+	// 换脑之后新会话唯一能读到的东西:LOG 必须已经写下了失败原因
+	const log = fs.readFileSync(
+		path.join(tmp, "missions/state", rt.active!.state.missionId, "LOG.md"),
+		"utf8",
+	);
+	assert.ok(log.includes("PROMOTE"), log);
+	assert.ok(log.includes("CSP 报错"), `失败原因必须落盘,否则换脑那一刻就没了:\n${log}`);
+
+	// 升档后的 PLAN 相位给的是 mission_write_plan(不再是 quick 的 mission_criterion)
+	const tools = pi.calls.activeTools.at(-1)!;
+	assert.ok(tools.includes("mission_write_plan"), tools.join(","));
+	assert.ok(!tools.includes("mission_criterion"), "已经不是 quick 了,别再让它改判据");
 });

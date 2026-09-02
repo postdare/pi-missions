@@ -1,6 +1,12 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { runVerifier, VERIFIER_TOOLS, type VerifierControl, type VerifierProgress } from "../src/roles/verifier.ts";
+import {
+	renderVerifierBrief,
+	runVerifier,
+	VERIFIER_TOOLS,
+	type VerifierControl,
+	type VerifierProgress,
+} from "../src/roles/verifier.ts";
 
 const options = {
 	cwd: "/tmp",
@@ -264,4 +270,73 @@ test("runVerifier:暴露 steer/abort 控制并记录人工指令", async () => {
 	assert.equal(result.status, "completed");
 	assert.ok(progress.some((p) => p.activity.includes("人工 steer")));
 	assert.equal(control, null, "完成后清除控制句柄");
+});
+
+// ─────────────── 简报与校验必须同一个 id 命名空间 ───────────────
+//
+// 真实事故(new-tab 仓库,2026-09-02):简报列的是计划里的 AC1..AC5,
+// expectedAcIds 是 verify 分支名 copy/edit/small/drag/regression。
+// 验证者交了 "AC3" → validateVerdicts 抛「提交了未知 AC」→ 整份核验丢弃 →
+// 降级 hard-only → 三个任务全 PASS,mission done。
+// semi 层从未生效,而 LOG 里只有一行 "verifier AgentSession unavailable"。
+
+const AC_PLAN = [
+	{ id: "AC1", text: "复制为 markdown 任务列表", verify: "copy" },
+	{ id: "AC2", text: "行内编辑支持 Enter 提交", verify: "edit" },
+	{ id: "AC3", text: "small 档形态不变", verify: "small" },
+	{ id: "AC5", text: "yarn lint 与 yarn build 通过", verify: "regression" },
+];
+
+const brief = (expectedAcIds: string[]) =>
+	renderVerifierBrief({
+		goal: "todo 支持行内编辑与复制",
+		taskId: "T3",
+		taskTitle: "small 档与回归",
+		acceptanceCriteria: AC_PLAN,
+		expectedAcIds,
+		hardResults: [],
+		diff: "",
+	});
+
+test("简报里要提交的 id 就是 expectedAcIds,不是计划里的 AC 编号", () => {
+	const text = brief(["small", "regression"]);
+	assert.ok(text.includes("- small"), "列表项以 verify 分支名开头");
+	assert.ok(text.includes("- regression"));
+	assert.ok(!/^- AC\d/m.test(text), "绝不能把 AC3 这种计划编号当成要提交的 id");
+});
+
+test("简报只列本轮范围内的判据 —— 多列出来会导致'提交了未知 AC'", () => {
+	const text = brief(["small", "regression"]);
+	assert.ok(!text.includes("复制为 markdown"), "不该出现别的任务的 AC 正文");
+	assert.ok(!text.includes("行内编辑支持 Enter"));
+	assert.ok(text.includes("small 档形态不变"));
+});
+
+test("简报明确告知本轮要交几条、分别是什么", () => {
+	const text = brief(["small", "regression"]);
+	assert.ok(text.includes("本轮共 2 条"), text.slice(0, 400));
+	assert.ok(text.includes("small、regression"));
+});
+
+test("计划里查不到正文也照样列出该 id —— 宁可正文缺失,也不能让 id 集合对不上", () => {
+	const text = brief(["small", "brand-new-branch"]);
+	assert.ok(text.includes("- brand-new-branch"));
+	assert.ok(text.includes("计划中没有对应正文"));
+});
+
+test("一个分支被多条 AC 覆盖时,正文合并,id 仍只有一个", () => {
+	const text = renderVerifierBrief({
+		goal: "g",
+		taskId: "T1",
+		taskTitle: "t",
+		acceptanceCriteria: [
+			{ id: "AC1", text: "第一条要求", verify: "copy" },
+			{ id: "AC2", text: "第二条要求", verify: "copy" },
+		],
+		expectedAcIds: ["copy"],
+		hardResults: [],
+		diff: "",
+	});
+	assert.ok(text.includes("第一条要求 / 第二条要求"));
+	assert.equal((text.match(/^- copy/gm) ?? []).length, 1);
 });

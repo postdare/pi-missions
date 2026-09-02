@@ -62,37 +62,17 @@ export function evaluatePromotion(s: PromotionSignals): Promotion | null {
 	return null;
 }
 
-// ─────────────────────────── 进入 DO 的准入判定 ───────────────────────────
-
-export interface AdmissionSignals {
-	tier: Tier;
-	/** quick 档:是否已经拿到一条冻结的验证命令(--verify 给的) */
-	hasVerifyCommand: boolean;
-}
-
-export type Admission =
-	| { ok: true }
-	| { ok: false; promoteTo: Tier; reason: string };
-
-/**
- * 纯函数:能否直接进入 DO,还是必须先升档去 PLAN。
- *
- * quick 档不落盘、无 AC、无独立 Verifier,判定的唯一依据就是那条验证命令。
- * 它必须在动手之前就定下来 —— 让执行者干完活再补一条,等于判定标准由被判定方
- * 事后选定,I2(执行期只读)与 I3(证据来自执行者之外)同时失守。
- *
- * 写不出判定命令 = 任务没想清楚。这种输入交给 standard 档的 PLAN 相位去拆,
- * 而不是放进一个没有裁判的快车道。
- *
- * standard/complex 的准入由 validatePlan + PLAN_FROZEN 把关,这里恒放行。
- */
-export function evaluateAdmission(s: AdmissionSignals): Admission {
-	if (s.tier === "quick" && !s.hasVerifyCommand) {
-		return {
-			ok: false,
-			promoteTo: "standard",
-			reason: "quick 档需要一条验证命令作为判定依据(--verify);没有就说明任务还没想清楚,升档 standard 先做 PLAN",
-		};
-	}
-	return { ok: true };
-}
+// ─────────────────────────── 关于准入判定 ───────────────────────────
+//
+// 这里原来有一个 evaluateAdmission():quick 没给 --verify 就升 standard。
+// 它已经被 core/criterion.ts 取代 —— 门槛从"入口要求一条命令"挪到了
+// "PLAN 相位要求一条判据",位置严格更好:
+//
+//   · 判据由 AI **看过代码之后**才提出,不是让人在敲命令时凭空写;
+//   · 闸门是工具集(PLAN 相位只有只读工具),写代码前冻结是物理保证的,
+//     不再依赖入口参数;
+//   · "写不出 shell 断言"不再等同于"任务没想清楚" —— 前者只说明这次判定
+//     该换个裁判(独立 verifier 或人),而 I3 要的是判定权在执行者之外,
+//     从来不是判定必须可执行。
+//
+// 保留这段注释而不是静默删除:准入守卫消失是个显眼的变化,值得留下去向。

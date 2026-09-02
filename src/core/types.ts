@@ -33,11 +33,31 @@ export interface RoleTokenUsage {
 // ─────────────────────────────── 证据 ───────────────────────────────
 
 /**
- * hard —— 编译/测试/lint/类型检查的退出码。由 L0 直接执行 verify.sh 采集,零模型成本。
- * semi —— 逐条核对冻结 AC。由独立 Verifier AgentSession 产出。
- * soft —— 执行者自述。只能触发 ACT,永远不能触发 PASS。
+ * hard  —— 编译/测试/lint/类型检查的退出码。由 L0 直接执行 verify.sh 采集,零模型成本。
+ * semi  —— 逐条核对冻结 AC。由独立 Verifier AgentSession 产出。
+ * human —— 人工终审。人在执行者之外,所以它满足 I3;代价是**不可重放** ——
+ *          mission 结束后这条判据没有留下能重跑的东西,升档时要提示补机械验证。
+ * soft  —— 执行者自述。只能触发 ACT,永远不能触发 PASS。
  */
-export type EvidenceLevel = "hard" | "semi" | "soft";
+export type EvidenceLevel = "hard" | "semi" | "human" | "soft";
+
+/**
+ * 自然语言裁判(semi/human)的失败类别。
+ *
+ * 存在的唯一理由是**熔断**:breaker 的 normalize() 是为编译/测试输出设计的
+ * (抓测试标识、异常类型、断言种类),自然语言理由里它抽不到稳定 token,
+ * 每次措辞一变签名就变 —— sameSignatureCount 恒为 1,I4 的升级阶梯整个失效。
+ *
+ * 只留三类,边界要足够清楚:类别摇摆等于签名摇摆,等于熔断又失效了。
+ * 粒度宁可粗 —— 见 breaker.ts 顶部的取舍。
+ */
+export type FailureCategory =
+	/** 判据要求的东西没做,或只做了一部分 */
+	| "missing"
+	/** 做了,但行为/结果不对 */
+	| "incorrect"
+	/** 把本来正常的东西改坏了 */
+	| "regression";
 
 export type EvidenceResult = "pass" | "fail" | "inconclusive";
 
@@ -46,8 +66,14 @@ export interface Evidence {
 	/** 对应的 verify.sh 分支名(如 "auth-integration"),即验收的可执行 id */
 	acId: string;
 	result: EvidenceResult;
-	/** 原始输出(已截断)。用于生成失败签名与归档 */
+	/** 原始输出(已截断)。hard 证据据此生成失败签名,并用于归档 */
 	raw: string;
+	/**
+	 * 自然语言裁判给出的失败类别。semi 失败时必填 —— 失败签名用它算,
+	 * 而不是用措辞每次都变的 rationale(见 FailureCategory)。
+	 * human 不填:人不该被要求做分类,它的签名固定为"人说不行"。
+	 */
+	failureTag?: FailureCategory;
 	exitCode?: number;
 	/** 采集该证据时的环境指纹。与 mission 记录不符则整份判定 inconclusive */
 	envFingerprint?: string;

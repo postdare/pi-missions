@@ -13,7 +13,8 @@ import { truncateToWidth } from "@earendil-works/pi-tui";
 import type { Effect, MissionEvent, MissionState, Phase, Role, Tier, TransitionResult, Evidence } from "./core/types.ts";
 import { initialState, transition, ROLE_OF } from "./core/machine.ts";
 import { judge } from "./core/verdict.ts";
-import { evaluateAdmission, evaluatePromotion } from "./core/tier.ts";
+import { evaluateCriterion } from "./core/criterion.ts";
+import { evaluatePromotion } from "./core/tier.ts";
 import { evaluateBaseline, shouldProbeBaseline, type BaselineProbe } from "./core/baseline.ts";
 import { evaluateAsk, needsScopeConfirm, roundCapFor, type AskQuestion } from "./core/define.ts";
 import { evaluateCoverage } from "./core/coverage.ts";
@@ -66,6 +67,22 @@ import {
 	type StagedPlan,
 } from "./store/repository.ts";
 
+/**
+ * quick 档的判定依据。必须先于执行冻结(I2/I3),但**不必是一条命令**:
+ * I3 要的是判定权在执行者之外,而独立 verifier 和人都在执行者之外。
+ *
+ *   ai      独立 Verifier AgentSession 核对这句判据。**默认档** ——
+ *           它保住了 quick 最值钱的东西:DO→CHECK→ACT 能无人值守地自转几轮。
+ *   human   人工终审。不可重放(mission 结束后没留下能重跑的东西),
+ *           换来的是真机/视觉这类模型判不了的场景。
+ *   command 机械命令。零成本、可重放,顺带当回归护栏 —— 但它只能覆盖
+ *           "写得出 shell 断言"的那部分任务,所以不再是准入门槛。
+ */
+export type QuickCriterion =
+	| { judge: "ai"; text: string }
+	| { judge: "human"; text: string }
+	| { judge: "command"; text: string; command: string };
+
 export interface ActiveMission {
 	plan: MissionPlan;
 	state: MissionState;
@@ -73,8 +90,8 @@ export interface ActiveMission {
 	inMemory: boolean;
 	/** 目标目录是 git 仓库(降级模式=false 时 AC 冻结有 git 审计链) */
 	git: boolean;
-	/** quick 档判定的唯一依据。必须在进 DO 前定下(--verify),不接受事后补 */
-	quickVerifyCommand?: string;
+	/** quick 档判定的唯一依据。必须在进 DO 前定下,不接受事后补(见 QuickCriterion) */
+	quickCriterion?: QuickCriterion;
 	/** v2 snapshot 的 CAS revision；quick 内存任务固定为 0 */
 	revision: number;
 	/** 当前不可变 generation；quick 内存任务固定为 0 */
@@ -173,7 +190,7 @@ export class Runtime {
 		this.savedProfile = saveProfile(this.pi, ctx);
 		this.persistProfile();
 		const phase = this.active.state.phase; // standard/complex 起于 DEFINE(见 core/machine START_PHASE)
-		this.pi.setActiveTools(toolsForPhase(phase));
+		this.pi.setActiveTools(toolsForPhase(phase, tier));
 		const role = ROLE_OF[phase];
 		if (role) await applyRole(this.pi, ctx, role, this.modelsConfig(), (m) => this.warn(ctx, m));
 		this.refreshWidget(ctx);
@@ -181,27 +198,20 @@ export class Runtime {
 	}
 
 	/**
-	 * /mission quick:单任务,不落盘,直接进 DO(Q18)。
+	 * /mission quick:单任务,不落盘,起于 PLAN 相位(START_PHASE.quick)。
 	 *
-	 * 准入由 core 判定(evaluateAdmission):没有验证命令就没有裁判,
-	 * 这种输入不进快车道,自动升 standard 去 PLAN 相位把标准写清楚。
+	 * **不问人**。开工前多一次交互,小任务就不值得开 mission 了 —— 判据由 AI
+	 * 在 PLAN 相位看过代码之后自己定,过 core/criterion.ts 的闸门后才冻结进 DO。
+	 * 那个相位只有只读工具(见 toolsForPhase),所以"判据先于写代码"是物理保证的。
+	 *
+	 * criterion 非空 = 调用方已经给了判据(--verify 加速路径),直接冻结跳过这一步。
 	 */
 	async startQuick(
 		ctx: any,
 		task: string,
-		verifyCommand?: string,
+		criterion?: QuickCriterion | null,
 	): Promise<{ id: string; tier: Tier } | { error: string }> {
 		if (this.busy()) return { error: "已有进行中的 mission,先 /mission abort" };
-
-		const cmd = verifyCommand?.trim();
-		const admission = evaluateAdmission({ tier: "quick", hasVerifyCommand: !!cmd });
-		if (!admission.ok) {
-			const promoted = admission.promoteTo === "complex" ? "complex" : "standard";
-			const r = await this.startNew(ctx, task, promoted);
-			if ("error" in r) return r;
-			ctx.ui.notify(admission.reason, "warning");
-			return { id: r.id, tier: promoted };
-		}
 
 		const id = `quick-${Date.now().toString(36)}`;
 		const plan: MissionPlan = {
@@ -218,16 +228,49 @@ export class Runtime {
 			state: initialState({ missionId: id, tier: "quick", taskOrder: ["T1"] }),
 			inMemory: true,
 			git: await isGitRepo(this.exec, this.cwd),
-			quickVerifyCommand: cmd,
+			quickCriterion: criterion ?? undefined,
 			revision: 0,
 			generation: 0,
 			handoff: null,
 		};
 		this.liveCheckState = null;
 		this.savedProfile = saveProfile(this.pi, ctx);
+
+		// 已有判据(--verify):直接冻结进 DO。没有:停在 PLAN,只读工具 + mission_criterion,
+		// 等 AI 看过代码再交一条 —— 这一步不打断人。
+		if (!criterion) {
+			this.pi.setActiveTools(toolsForPhase("plan", "quick"));
+			await applyRole(this.pi, ctx, "planner", this.modelsConfig(), (m) => this.warn(ctx, m));
+			this.refreshWidget(ctx);
+			return { id, tier: "quick" };
+		}
 		const r = await this.applyEvent({ type: "PLAN_FROZEN", at: Date.now(), taskOrder: ["T1"] }, ctx);
 		if (r.error) return { error: r.error };
 		return { id, tier: "quick" };
+	}
+
+	/**
+	 * quick 的判据冻结。AI 在 PLAN 相位调 mission_criterion 落到这里:
+	 * 过 L0 闸门 → 写进 active → PLAN_FROZEN 进 DO(工具集随之解锁写工具)。
+	 *
+	 * 判据不合格不抛异常,把理由退回去让它重写 —— 与 mission_ask 拒绝懒问题同形。
+	 */
+	async freezeQuickCriterion(
+		ctx: any,
+		criterion: QuickCriterion,
+	): Promise<{ ok: true } | { error: string }> {
+		const a = this.active;
+		if (!a) return { error: "无活动 mission" };
+		if (a.state.tier !== "quick") return { error: "mission_criterion 只用于 quick 档" };
+		if (a.state.phase !== "plan") return { error: `当前相位是 ${a.state.phase},判据已经冻结过了` };
+
+		const verdict = evaluateCriterion({ goal: a.plan.goal, text: criterion.text });
+		if (!verdict.ok) return { error: verdict.reason };
+
+		a.quickCriterion = { ...criterion, text: verdict.text };
+		const r = await this.applyEvent({ type: "PLAN_FROZEN", at: Date.now(), taskOrder: ["T1"] }, ctx);
+		if (r.error) return { error: r.error };
+		return { ok: true };
 	}
 
 	/** /mission resume:从仓库重附着到当前会话(Q15) */
@@ -278,7 +321,7 @@ export class Runtime {
 			);
 			if (cancelled.error) return { error: cancelled.error };
 		}
-		this.pi.setActiveTools(toolsForPhase(this.active.state.phase));
+		this.pi.setActiveTools(toolsForPhase(this.active.state.phase, this.active.state.tier));
 		const role = ROLE_OF[this.active.state.phase];
 		if (role) await applyRole(this.pi, ctx, role, this.modelsConfig(), (m) => this.warn(ctx, m));
 		this.refreshWidget(ctx);
@@ -301,7 +344,7 @@ export class Runtime {
 	): Promise<void> {
 		if (this.active && !this.active.state.pendingHandoff) {
 			// 同进程会话切换:重挂闸门即可
-			this.pi.setActiveTools(toolsForPhase(this.active.state.phase));
+			this.pi.setActiveTools(toolsForPhase(this.active.state.phase, this.active.state.tier));
 			this.refreshWidget(ctx);
 			return;
 		}
@@ -415,7 +458,7 @@ export class Runtime {
 		for (const e of effects) {
 			switch (e.type) {
 				case "SET_TOOLS":
-					this.pi.setActiveTools(toolsForPhase(e.phase));
+					this.pi.setActiveTools(toolsForPhase(e.phase, this.active?.state.tier));
 					break;
 				case "SET_ROLE":
 					await applyRole(this.pi, ctx, e.role, this.modelsConfig(), (m) => this.warn(ctx, m));
@@ -781,7 +824,17 @@ export class Runtime {
 				});
 				return;
 			}
-			if (!a.inMemory) appendLog(sp.logMd, "verifier AgentSession unavailable → hard-only verdict");
+			// 原因必须进 LOG,不能只进 CHECK.json。真实事故:简报与校验的 id 命名空间
+			// 不一致,每一轮都抛"提交了未知 AC",LOG 里却只有一句"unavailable" ——
+			// 整个 mission 的 semi 层从未生效,而看 LOG 的人完全看不出这是个 bug
+			// 而不是模型不可用。降级本身是设计(模型策略是优化项),降级的**原因**不是。
+			const degradeWhy = (verifierResult.status === "timeout" ? "超时" : verifierResult.message)
+				.replace(/\s+/g, " ")
+				.slice(0, 200);
+			if (!a.inMemory) {
+				appendLog(sp.logMd, `verifier 降级 hard-only:${degradeWhy}`);
+			}
+			this.warn(ctx, `独立核验降级为 hard-only:${degradeWhy}`);
 			persistCheck({
 				verifier: {
 					...checkState.verifier,
@@ -863,15 +916,38 @@ export class Runtime {
 					});
 				}
 			} else if (a.state.tier === "quick") {
-				const command = a.quickVerifyCommand;
-				if (command) {
-					requiredAcIds = ["quick"];
+				// 判据一条,裁判按冻结时选的那种。三种裁判产出的证据级别不同
+				// (hard / semi / human),但都在执行者之外 —— I3 的要求是这个,
+				// 不是"判定必须可执行"。
+				const criterion = a.quickCriterion;
+				requiredAcIds = criterion ? ["quick"] : [];
+				if (criterion?.judge === "command") {
+					const command = criterion.command;
 					await runHard("quick", command, "bash", ["-c", command], 300_000, fp);
 					if (!isCurrent()) return;
+					persistCheck({
+						verifier: { status: "skipped", message: "quick 命令判据:hard 证据已足够" },
+					});
+				} else if (criterion?.judge === "ai") {
+					await runIndependentVerifier(fp, async () =>
+						renderVerifierBrief({
+							goal: a.plan.goal,
+							taskId: task?.id ?? "",
+							taskTitle: a.plan.goal,
+							acceptanceCriteria: [{ id: "quick", text: criterion.text, verify: "quick" }],
+							expectedAcIds: requiredAcIds,
+							hardResults,
+							diff: await this.gitDiff(),
+						}),
+					);
+				} else if (criterion?.judge === "human") {
+					await this.collectHumanVerdict(ctx, criterion.text, evidences, fp, persistCheck);
+					if (!isCurrent()) return;
+				} else {
+					persistCheck({
+						verifier: { status: "skipped", message: "quick 档无判据(不应发生:准入已守)" },
+					});
 				}
-				persistCheck({
-					verifier: { status: "skipped", message: "quick 档跳过独立核验" },
-				});
 			} else {
 				const script = this.repository.verifyScriptPath(a.state.missionId, a.generation);
 				let verifyNames = task?.verify ?? [];
@@ -897,6 +973,9 @@ export class Runtime {
 						taskId: task?.id ?? "",
 						taskTitle: task?.title ?? "",
 						acceptanceCriteria: a.plan.acceptanceCriteria,
+						// 与 runVerifier 的 expectedAcIds 同一个数组:简报和校验必须同源,
+						// 各自取数就会漂,而漂了是静默降级 hard-only(见 renderVerifierBrief)
+						expectedAcIds: requiredAcIds,
 						hardResults,
 						diff: await this.gitDiff(),
 					}),
@@ -988,22 +1067,27 @@ export class Runtime {
 	async onAgentSettled(ctx: any): Promise<void> {
 		const a = this.active;
 		if (!a) return;
-		const phase = a.state.phase;
 
-		if (phase === "check") {
+		if (a.state.phase === "check") {
 			await this.startCheck(ctx);
 			return;
 		}
 
-		if (phase === "act") {
+		if (a.state.phase === "act") {
 			// ACT = 一轮诊断对话,结束后自动回 DO(L1 改实现)
 			const r = await this.applyEvent({ type: "ADJUST_DONE", at: Date.now() }, ctx);
-			if (!r.error && !a.state.pendingHandoff) {
-				this.pi.sendUserMessage(renderDoBrief(a.plan, a.state, this.currentSpikeReport()?.rel), { deliverAs: "followUp" });
-			}
-			return;
+			if (r.error || a.state.pendingHandoff) return;
+			this.pi.sendUserMessage(renderDoBrief(a.plan, a.state, this.currentSpikeReport()?.rel), { deliverAs: "followUp" });
+			// 不 return —— 继续往下走升档判据。
+			//
+			// ADJUST_DONE 刚把 attempts 加了 1,"quick 第 2 次尝试就升档"正是此刻才成立。
+			// 这里原本直接 return,而 DO 相位的每一轮都以 mission_submit 结束(相位当场
+			// 变 check),于是"phase=do 且 attempts>=2"的 settled 永远不会出现 ——
+			// tier.ts 里为 quick 写的那条逃生梯从来没接上过,它每次都直接撞熔断。
 		}
 
+		// 相位可能已被上面的 ADJUST_DONE 改掉,重新读
+		const phase = a.state.phase;
 		if (phase === "do" || phase === "plan" || phase === "define") {
 			// 机械升档(升档自动,降档手动)
 			const promo = evaluatePromotion({
@@ -1138,6 +1222,8 @@ export class Runtime {
 			{ ...a.state, pendingHandoff: null },
 			this.config.missionsDir,
 			a.generation,
+			a.quickCriterion,
+			a.inMemory,
 		);
 		const phase = a.state.phase;
 		let result: { cancelled?: boolean };
@@ -1660,6 +1746,60 @@ export class Runtime {
 		});
 	}
 
+	/**
+	 * 人工终审。三条纪律,少一条 human 证据就退化成 soft(执行者自述)的变体:
+	 *
+	 *  1. **没有默认值**。做成"回车即过"的话,人没看,只是按了键 —— 那不是 I3
+	 *     意义上的外部判定。取消/超时一律不产出证据,由 judge() 的规则 4 判
+	 *     inconclusive,而不是判 pass。
+	 *  2. **fail 必须给理由**,理由进 LOG。签名不用这句话算(措辞每次都变),
+	 *     用固定串,见 breaker.ts 的 canonicalOf。
+	 *  3. **记账为不可重放**。写进证据的 command 字段,面板与 LOG 都能看到
+	 *     这条判据没有留下能重跑的东西。
+	 */
+	private async collectHumanVerdict(
+		ctx: any,
+		criterionText: string,
+		evidences: Evidence[],
+		envFingerprint: string,
+		persistCheck: (patch: any) => void,
+	): Promise<void> {
+		persistCheck({
+			stage: "running_verifier",
+			summary: "等待人工终审...",
+			verifier: { status: "skipped", message: "人工终审(不可重放)" },
+		});
+		this.refreshWidget(ctx);
+		const startedAt = Date.now();
+		const PASS = "通过 —— 收工";
+		const FAIL = "不通过 —— 我来说哪里不对";
+		let choice: string | undefined;
+		if (ctx.hasUI) {
+			choice = await ctx.ui.select(`人工终审:${criterionText}`, [PASS, FAIL]);
+		} else {
+			ctx.ui.notify("当前环境无法弹出人工终审(非 TUI),本轮判为无结论", "warning");
+		}
+		// 没做选择 ≠ 通过。不产出证据,让 judge() 判 inconclusive
+		if (choice !== PASS && choice !== FAIL) return;
+
+		const passed = choice === PASS;
+		let reason = "人工终审通过";
+		if (!passed) {
+			const said = ctx.hasUI ? await ctx.ui.input("哪里不对?", "一句话说明,会写进 LOG") : undefined;
+			reason = said?.trim() || "人工终审未通过(未说明原因)";
+		}
+		evidences.push({
+			level: "human",
+			acId: "quick",
+			result: passed ? "pass" : "fail",
+			raw: reason,
+			envFingerprint,
+			command: "人工终审(不可重放)",
+			startedAt,
+			durationMs: Date.now() - startedAt,
+		});
+	}
+
 	checkStateFor(missionId: string): CheckState | null {
 		if (this.active?.state.missionId === missionId && this.liveCheckState) {
 			return this.liveCheckState;
@@ -1670,11 +1810,18 @@ export class Runtime {
 
 // ─────────────────────────── 渲染(纯函数,UI 层共用) ───────────────────────────
 
+const QUICK_JUDGE_LABEL: Record<QuickCriterion["judge"], string> = {
+	ai: "独立验证者(读 diff 逐条核对)",
+	human: "人工终审(提交后由人判定,不是自动判定)",
+	command: "命令退出码",
+};
+
 export function renderStateCard(
 	plan: MissionPlan,
 	state: MissionState,
 	dirName = "missions",
 	generation?: number,
+	quickCriterion?: QuickCriterion | null,
 ): string {
 	const task = state.currentTask ? findTask(plan, state.currentTask) : undefined;
 	const t = state.currentTask ? state.tasks[state.currentTask] : undefined;
@@ -1687,7 +1834,12 @@ export function renderStateCard(
 					)
 					.join("\n")
 			: plan.tier === "quick"
-				? "  (quick 档:判定依据是 --verify 冻结的那条命令,提交时不可更改)"
+				? // 必须印出**真实的判据和裁判**。曾经这里写死一句"判定依据是 --verify 冻结的
+					// 那条命令",于是 planner 读到的是"没有冻结的 AC",转头就准备自己造一套 ——
+					// 判定标准在卡片上隐形,等于 I2(执行期只读)在模型眼里根本不存在。
+					quickCriterion
+					? `  quick: ${quickCriterion.text}\n  核对方: ${QUICK_JUDGE_LABEL[quickCriterion.judge]}`
+					: "  (quick 档判据尚未冻结:先调用 mission_criterion 定一条,之后才解锁写工具)"
 				: "  (尚未冻结:本相位的产出就是可执行的 AC,由 mission_write_plan 提交)";
 	const lines = [
 		`[MISSION] ${state.missionId} · ${state.tier} · phase=${state.phase}` +
@@ -1711,7 +1863,11 @@ export function renderStateCard(
 			"  一次机会,不重试;提交后系统会带着结论回到 PLAN 重新规划。",
 		);
 	} else if (task) {
-		lines.push(`CURRENT TASK: ${task.id} ${task.title}(verify: ${task.verify.join(", ") || "submit 时提供"})`);
+		// quick 的判据已经完整印在上面的 AC 段里,这里不再重复;standard/complex 印 verify 分支。
+		// 曾经的兜底文案是"verify: submit 时提供" —— 那和 mission_submit 不接受任何参数
+		// 直接矛盾,等于在卡片上告诉执行者"判定标准可以事后补"(I2/I3 的反面)。
+		const verifyNote = task.verify.join(", ");
+		lines.push(`CURRENT TASK: ${task.id} ${task.title}${verifyNote ? `(verify: ${verifyNote})` : ""}`);
 	}
 	if (t?.lastFailureReason) lines.push(`PREV FAILURE: ${t.lastFailureReason}`);
 	if (t?.awaitingEvidence && state.phase === "do") {
@@ -1793,12 +1949,20 @@ function renderHandoffBrief(
 	state: MissionState,
 	dirName = "missions",
 	generation?: number,
+	quickCriterion?: QuickCriterion | null,
+	inMemory = false,
 ): string {
 	return [
-		renderStateCard(plan, state, dirName, generation),
+		renderStateCard(plan, state, dirName, generation, quickCriterion),
 		"",
 		`工作流规则见 ${dirName}/README.md;当前相位规则见 ${dirName}/phases/${state.phase}.md。`,
-		state.phase === "plan" ? `重规划:先读 ${dirName}/state 下该 mission 的 LOG.md 失败记录,再调用 mission_write_plan。` : "",
+		state.phase === "plan"
+			? inMemory
+				? // quick 不落盘:没有 LOG.md 可读。指着一个不存在的文件让人去读,
+					// 换来的是新会话花好几轮 ls/cat 找不到,然后在没有失败历史的情况下瞎猜。
+					"重规划:该 mission 不落盘,没有 LOG.md —— 失败历史只有上面 PREV FAILURE 那一条,别去 missions/state 找。"
+				: `重规划:先读 ${dirName}/state 下该 mission 的 LOG.md 失败记录,再调用 mission_write_plan。`
+			: "",
 		state.phase === "define"
 			? `重新定义问题(L3):先读 ${dirName}/state 下该 mission 的 LOG.md 与 archive/ 里的旧 MISSION.md,` +
 				"弄清原来的问题定义错在哪。提问预算已重置,可以再问一轮,然后调用 mission_define。"

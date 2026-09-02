@@ -18,7 +18,7 @@
  * 这是 DEFINE 的产出第一次有机械化的下游后果 —— 在此之前 Definition 只是给人看的散文。
  *
  * 调用方只在 mission 经过 DEFINE 时才调它(`plan.definition` 存在)。quick 档没有 DEFINE
- * 相位,判定依据是 `--verify` 冻结的那条命令,这里无话可说 —— 那是档位差异,
+ * 相位,判定依据是 PLAN 相位冻结的单条判据(core/criterion.ts),这里无话可说 —— 那是档位差异,
  * 不是可以为空的兼容口子:definition 一旦存在,doneWhen 就必须非空。
  */
 

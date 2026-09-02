@@ -55,7 +55,7 @@ export default function (pi: any) {
 		return {
 			message: {
 				customType: "missions-state",
-				content: renderStateCard(a.plan, a.state, r.config.missionsDir, a.generation),
+				content: renderStateCard(a.plan, a.state, r.config.missionsDir, a.generation, a.quickCriterion),
 				display: true,
 			},
 			systemPrompt: `${event.systemPrompt}\n\n${phasePrompt}`,

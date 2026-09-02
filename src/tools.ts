@@ -124,6 +124,59 @@ export function registerMissionTools(pi: any, getRuntime: GetRuntime): void {
 	});
 
 	pi.registerTool({
+		name: "mission_criterion",
+		description:
+			"[PLAN 相位 · quick 档] 冻结这次任务的判定依据,然后立刻进入 DO 开始写代码。\n" +
+			"**先用只读工具看几眼相关代码再定**——没看过代码的判据只会是「样式正确显示」这种,核对时等于没有判据。\n" +
+			"判据是「做完之后能观察到什么」,不是「要做什么」:把目标那句祈使句转写成可观察的状态," +
+			"照抄目标会被直接拒绝。系统会机械校验(太短 / 复读目标 / 空泛且无具体锚点),不合格会退回让你重写。\n" +
+			"judge 选谁来核对:默认 ai(独立验证者读 diff 核对);真机、视觉、交互这类你自己读 diff 判不了的," +
+			"如实选 human —— 选 human 不丢人,硬判一个自己核实不了的判据才是把判定权还给了执行者。",
+		parameters: Type.Object({
+			text: Type.String({
+				description:
+					"一句能判真假的话。具体到哪个界面/接口/文件上的什么表现," +
+					"能带上数字(断点、状态码、条数)或标识符(函数名、CSS 属性、文件名)就带上。",
+			}),
+			judge: Type.Union([Type.Literal("ai"), Type.Literal("human"), Type.Literal("command")], {
+				description:
+					"ai=独立验证者核对(默认,无人值守);human=做完由人终审(真机/视觉);" +
+					"command=有现成命令能判(退出码即判定,最省也最可重放)。",
+			}),
+			command: Type.Optional(
+				Type.String({ description: "judge=command 时必填:退出码即判定的那条命令" }),
+			),
+		}),
+		async execute(_id: string, params: any, _signal: any, _onUpdate: any, ctx: any) {
+			const rt = getRuntime(ctx);
+			const judge = params.judge === "human" || params.judge === "command" ? params.judge : "ai";
+			const command = String(params.command ?? "").trim();
+			if (judge === "command" && !command) return toolError("judge=command 必须给 command");
+			const criterion =
+				judge === "command"
+					? { judge: "command" as const, text: String(params.text ?? ""), command }
+					: { judge, text: String(params.text ?? "") };
+			const r = await rt.freezeQuickCriterion(ctx, criterion);
+			if ("error" in r) return toolError(r.error);
+			const who =
+				judge === "command"
+					? `命令 \`${command}\` 的退出码`
+					: judge === "human"
+						? "人工终审(做完会弹出来问)"
+						: "独立验证者(它会主动找反证)";
+			return {
+				content: [
+					{
+						type: "text",
+						text: `判据已冻结:${criterion.text}\n核对方:${who}\n现在进入 DO,可以改代码了;改完调用 mission_submit。`,
+					},
+				],
+				details: { ok: true },
+			};
+		},
+	});
+
+	pi.registerTool({
 		name: "mission_define",
 		description:
 			"[DEFINE 相位] 提交问题定义:目标 + **完成条件清单(doneWhen)** + 已确认的约束 + 明确不做的事。" +
@@ -233,16 +286,16 @@ export function registerMissionTools(pi: any, getRuntime: GetRuntime): void {
 		description:
 			"[DO 相位] 声明当前任务已提交,触发系统判定(不等于通过)。" +
 			"提交后写工具会被冻结,不要继续改代码。",
-		// 无参数:判定依据(AC / quick 的验证命令)在进入 DO 之前就已冻结,
+		// 无参数:判定依据(AC / quick 的判据)在进入 DO 之前就已冻结,
 		// 提交时不接受任何"补一条标准"的入口 —— 那等于让被判定方事后选裁判(I2/I3)。
 		parameters: Type.Object({}),
 		async execute(_id: string, _params: any, _signal: any, _onUpdate: any, ctx: any) {
 			const rt = getRuntime(ctx);
 			const a = rt.active;
 			if (!a) return toolError("无活动 mission");
-			if (a.state.tier === "quick" && !a.quickVerifyCommand?.trim()) {
-				// 正常不可达:无验证命令的 quick 输入在 startQuick 就被升档挡住了
-				return toolError("quick 档缺少验证命令(判定的唯一依据),无法判定。请 /mission abort 后带 --verify 重来");
+			if (a.state.tier === "quick" && !a.quickCriterion) {
+				// 正常不可达:没有判据的 quick 输入在 startQuick 就被升档挡住了
+				return toolError("quick 档缺少判定依据,无法判定。请 /mission abort 后重开");
 			}
 			const r = await rt.applyEvent({ type: "SUBMIT", at: Date.now() }, ctx);
 			if (r.error) return toolError(r.error);

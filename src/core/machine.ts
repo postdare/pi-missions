@@ -633,6 +633,32 @@ function failTransition(
 		);
 	}
 
+	// quick 撞阈值:升档而不是 L2。落盘必须排在一切 LOG 之前 ——
+	// PERSIST_PLAN 会把 inMemory 翻成 false,在那之前写的 LOG 全部会被丢掉
+	// (runtime 的 LOG effect 对 inMemory 是空操作),而这几行正是换脑之后
+	// 新会话唯一能读到的失败历史。
+	if (action.action === "promote") {
+		const tasks = setTask(state.tasks, taskId, () => resetAfterEscalation(counted));
+		return ok(
+			{
+				...state,
+				tier: action.to,
+				phase: "plan" as const,
+				tasks,
+				pendingHandoff: `promote ${state.tier}→${action.to} on ${taskId}`,
+			},
+			[
+				{ type: "PERSIST_PLAN" },
+				log(`${header} act=PROMOTE ${state.tier}→${action.to} why=${compact(action.reason)}`),
+				log(`升档前的失败原因:${compact(counted.lastFailureReason ?? "-")}`),
+				{ type: "HANDOFF", reason: `promote ${state.tier}→${action.to} on ${taskId}` },
+				...enter("plan"),
+				{ type: "NOTIFY", level: "warning", message: action.reason },
+			],
+			at,
+		);
+	}
+
 	if (action.action === "escalate") {
 		const withCount = { ...state, tasks: setTask(state.tasks, taskId, () => counted) };
 		return escalateTransition(withCount, at, taskId, action.to, action.reason, header);

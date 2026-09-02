@@ -115,10 +115,29 @@ export function normalize(raw: string): string {
   return [...tokens].sort().join("\n");
 }
 
+/**
+ * 一条证据的规范形。**按裁判类型分流** —— 这是熔断在非机械裁判下还能工作的关键。
+ *
+ * normalize() 是为编译/测试输出设计的(抓测试标识、异常类型、断言种类、诊断码)。
+ * 喂给它一句中文 rationale,它抽不到任何 token,只能退化成"前三行原文";
+ * 而模型每次的措辞都不一样 —— 签名每次都变,sameSignatureCount 恒为 1,
+ * 熔断永不触发,I4 的升级阶梯就等于关掉了。
+ *
+ *   hard  → normalize(raw)          机械输出,现状不变,这套归一化就是为它写的
+ *   semi  → failureTag              受约束的三选一枚举,措辞变了签名不变
+ *   human → 固定串                  人说了两次不行就是同一个信号,不必细分原因,
+ *                                   更不该要求人给自己的判断做分类
+ */
+function canonicalOf(e: Evidence): string {
+  if (e.level === "human") return "human:rejected";
+  if (e.level === "semi") return `tag:${e.failureTag ?? "unspecified"}`;
+  return normalize(e.raw);
+}
+
 /** 由一组失败证据计算稳定签名。acId 参与签名,避免不同 AC 的相同异常被合并。 */
 export function failureSignature(failing: Evidence[]): string {
   const canonical = failing
-    .map((e) => `${e.acId}::${normalize(e.raw)}`)
+    .map((e) => `${e.acId}::${canonicalOf(e)}`)
     .sort()
     .join("\n---\n");
   return createHash("sha256").update(canonical).digest("hex").slice(0, 12);
@@ -128,6 +147,8 @@ export function failureSignature(failing: Evidence[]): string {
 
 export type BreakerAction =
   | { action: "retry"; sameSignatureCount: number; remaining: number }
+  /** quick 专用出口:同一病根撞阈值时升档,而不是走 L2(见 decide 里的注释) */
+  | { action: "promote"; to: Tier; reason: string }
   | { action: "escalate"; to: 2 | 3; reason: string }
   | { action: "halt"; reason: string };
 
@@ -160,6 +181,25 @@ export function decide(input: BreakerInput): BreakerAction {
   }
 
   if (sameCount >= threshold) {
+    // quick 的出口是**升档**,不是 L2。三个理由,都是结构性的:
+    //   1. quick 没有"方案"可改 —— 它只有一条判据。L2 的落点(回 PLAN 改方案)
+    //      对它是空的,唯一能改的就是那条判据本身,而那是**事后修改判定标准**,
+    //      正好是 I2/I3 要禁的事。
+    //   2. quick 不落盘(inMemory)。L2 强制换脑,而换脑靠磁盘重附着 ——
+    //      失败历史会在换脑那一刻全部蒸发(真实事故:人贴的 CSP 报错就是这么没的)。
+    //   3. 升档是往**严**了走:一条判据变成一组冻结 AC + verify.sh,判定强度提高;
+    //      而 L2 对 quick 只能往松了走。
+    // tier.ts 的 evaluatePromotion 早就写着"quick 档进入第 2 次尝试,升档 standard",
+    // 意图一直是对的,只是那条路的检查时机够不着(见 runtime.onAgentSettled)。
+    if (tier === "quick") {
+      return {
+        action: "promote",
+        to: "standard",
+        reason:
+          `连续 ${sameCount} 次同一失败签名 ${signature},quick 档不再重试 —— ` +
+          "升档 standard,把那条判据展开成冻结 AC + verify.sh 重新来",
+      };
+    }
     if (level >= 3) {
       return {
         action: "halt",

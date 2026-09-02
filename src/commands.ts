@@ -6,7 +6,7 @@
  */
 
 import * as fs from "node:fs";
-import type { Runtime } from "./runtime.ts";
+import type { QuickCriterion, Runtime } from "./runtime.ts";
 import { allTasks, type MissionPlan } from "./store/mission.ts";
 import { statePaths, spikeReport } from "./store/paths.ts";
 import { readLog } from "./store/log.ts";
@@ -147,15 +147,20 @@ export function registerCommands(pi: any, getRuntime: GetRuntime): void {
 				}
 
 				case "quick": {
-					if (!rest) return notifyUsage(ctx, "用法:/mission quick <任务> --verify \"<验证命令>\"");
-					const r = await rt.startQuick(ctx, rest, flags.verify);
+					if (!rest) return notifyUsage(ctx, "用法:/mission quick <任务>");
+					// --verify 是加速路径:给了就直接冻结成命令判据,跳过 PLAN 相位的自定判据
+					const cmd = flags.verify?.trim();
+					const picked: QuickCriterion | null = cmd
+						? { judge: "command", text: cmd, command: cmd }
+						: null;
+					const r = await rt.startQuick(ctx, rest, picked);
 					if ("error" in r) return notifyUsage(ctx, r.error);
 					rt.pendingTier = null; // quick 不消费待选档位,直接清掉
 					clearTierIndicator(ctx);
 					// 无 --verify 时 startQuick 会升档 standard(判定依据必须先于执行冻结),此处按落点分流
 					pi.sendUserMessage(
 						r.tier === "quick"
-							? `[pi-missions] quick 任务(${r.id}):${rest}\n验证命令:${flags.verify}。完成后调用 mission_submit。`
+							? quickKickoff(r.id, rest, picked)
 							: kickoff(rt.config.missionsDir, r.id, r.tier, rest, rt.active?.state.phase ?? "define"),
 						{ deliverAs: "followUp" },
 					);
@@ -271,6 +276,30 @@ export function registerCommands(pi: any, getRuntime: GetRuntime): void {
 			}
 		},
 	});
+}
+
+/**
+ * quick 的开场白。两条路:
+ *   带 --verify —— 判据已冻结,直接开写。
+ *   不带      —— 先在 PLAN 相位定判据(只读工具 + mission_criterion),**不问人**。
+ *                开工前多一次交互,小任务就不值得开 mission 了。
+ *
+ * 判据由谁核对写在开场白里 —— 执行者必须知道自己会被谁按什么标准判。
+ */
+function quickKickoff(id: string, goal: string, criterion: QuickCriterion | null): string {
+	if (criterion?.judge === "command") {
+		return (
+			`[pi-missions] quick 任务(${id}):${goal}\n` +
+			`判定依据已冻结:命令 \`${criterion.command}\` 的退出码。\n` +
+			"现在可以改代码,改完调用 mission_submit。"
+		);
+	}
+	return (
+		`[pi-missions] quick 任务(${id}):${goal}\n` +
+		"当前在 PLAN 相位,只有只读工具。第一步:用 read/grep 看几眼相关代码," +
+		"然后调用 mission_criterion 冻结一条判据(「做完之后能观察到什么」,不是「要做什么」)。\n" +
+		"判据冻结后自动进入 DO,写工具才会解锁 —— 这是设计,不是故障。"
+	);
 }
 
 /**

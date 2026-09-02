@@ -189,10 +189,10 @@ transition(state: MissionState, event: MissionEvent): { state, effects, error? }
 
 | | quick | standard | complex |
 |---|---|---|---|
-| 入口 | `/mission quick --verify "<命令>"` | `/mission new` | `/mission new --tier=complex` |
-| 起始相位 | `plan`(建好即冻结进 DO) | `define` | `define` |
+| 入口 | `/mission quick <任务>` | `/mission new` | `/mission new --tier=complex` |
+| 起始相位 | `plan`(定判据后冻结进 DO) | `define` | `define` |
 | 落盘 | 否(`inMemory: true`) | 是 | 是,里程碑分文件 |
-| 判定依据 | 一条裸命令 `quickVerifyCommand`,**进 DO 前冻结** | verify.sh 分支 + 进程内独立 Verifier | 同左 + 里程碑回归 |
+| 判定依据 | 一条 `QuickCriterion`(ai/human/command),**进 DO 前冻结** | verify.sh 分支 + 进程内独立 Verifier | 同左 + 里程碑回归 |
 | 熔断阈值 | 2 | 3 | 3 |
 | 尝试硬上限 | 4 | 9 | 12 |
 | 任务切换换脑 | 否 | 否 | **是** |
@@ -201,18 +201,36 @@ transition(state: MissionState, event: MissionEvent): { state, effects, error? }
 
 升档判据在 `evaluatePromotion()`(`src/core/tier.ts`),全部机械可测:
 触及公开 API / 改动 > 5 文件 / quick 档第 2 次尝试 / standard 档 2 次 L2。
-**刻意不让 LLM 自评"这任务复杂吗"**(I7)。
+**刻意不让 LLM 自评"这任务复杂吗"**(I7)。它在 `Runtime.onAgentSettled` 里检查 ——
+注意 ACT 分支处理完 `ADJUST_DONE` 后**不能提前 return**,否则"phase=do 且 attempts>=2"
+的时刻永远不会出现(DO 相位每一轮都以 `mission_submit` 结束,相位当场变 check),
+quick 的这条逃生梯就是空的。
 
-### 入口守卫(准入判定)
+**quick 撞熔断阈值时的出口是升档,不是 L2**(`decide()` 返回 `promote`)。理由是结构性的:
+quick 没有"方案"可改,它只有一条判据 —— L2 回 PLAN 唯一能改的就是判据本身,而那是
+事后修改判定标准(I2/I3 的反面);而且 quick 不落盘,L2 强制换脑会让失败历史在换脑
+那一刻全部蒸发。升档则是往严了走:一条判据展开成冻结 AC + verify.sh,并且先 `PERSIST_PLAN`
+再写 LOG(顺序不能反,`inMemory` 期间 LOG effect 是空操作)。
 
-`evaluateAdmission()`(`src/core/tier.ts`)决定一个 mission 能否直接进 DO:
+### 入口守卫(quick 的判据闸门)
 
-- quick 档**必须**在进 DO 前拿到一条验证命令(`/mission quick --verify "<命令>"`)
-- 拿不到 → 不进 DO,自动升 standard,由 PLAN 相位写出可执行的 AC
+quick 起于 `plan` 相位,那个相位**只有只读工具 + `mission_criterion`**
+(`toolsForPhase(phase, tier)`)。所以"判据先于写代码冻结"是工具集的物理保证,
+不依赖任何入口参数,也不需要问人 —— 开工前多一次交互,小任务就不值得开 mission。
 
-理由是 I2/I3:判定依据必须先于执行冻结。允许执行者干完活再补一条判定命令,
-等于让被判定方事后挑裁判。`mission_submit` 因此**不接受任何参数**——
-提交路径上没有任何"补一条标准"的入口。
+判据由 AI 看过代码之后自己提出,过 `evaluateCriterion()`(`src/core/criterion.ts`)
+的机械闸门:太短 / 复读目标 / 空泛且无具体锚点,一律退回重写(与 `evaluateAsk()`
+拒绝"没有推荐答案的懒问题"同形)。
+
+判据带一个 `judge`,决定谁来核对:`ai`(独立 Verifier,默认)、`human`(人工终审)、
+`command`(退出码)。三者产出的证据级别不同(semi / human / hard),但都在执行者
+之外 —— **I3 要的是判定权外置,不是判定必须可执行**。
+
+`mission_submit` 因此**不接受任何参数**:提交路径上没有任何"补一条标准"的入口。
+
+> 历史:这里原来是 `evaluateAdmission()`,要求 quick 必须带 `--verify`,
+> 否则升档 standard。那是把 I3 收窄成了"判定必须可执行",把大量
+> "说得清但写不出 shell 断言"的任务(改样式、调交互)挡在了快车道外。
 
 ### 4.3 角色(Role)
 
@@ -728,18 +746,26 @@ git 提供 AC 冻结的审计链。
   这需要先给 scaffold 补一个 verify.sh 骨架(目前脚手架不铺 verify.sh,
   它完全由 planner 起草)。
 
-### 8.2 quick 档仍然没有 AC,只有一条命令
+### 8.2 quick 档仍然没有 AC,只有一条判据
 
 quick 档不落盘、不走 `validatePlan()`,`acceptanceCriteria` 恒为空,
-判定依据是单条 `quickVerifyCommand`,acId 固定为 `"quick"`,也没有独立 Verifier
-交叉核对。**这一档的判定强度天然低于 standard**,是设计取舍(Q18),不是缺陷。
+判定依据是单条 `QuickCriterion`,acId 固定为 `"quick"`。
+**这一档的判定强度天然低于 standard**,是设计取舍(Q18),不是缺陷。
 
-已经收口的部分:那条命令现在必须由 `--verify` 在进 DO 前给出并冻结
-(`evaluateAdmission()`),`mission_submit` 不再接受任何参数,执行者无法事后
-补一条判定标准。给不出命令的输入会被升档到 standard,走完整的 PLAN + AC 流程。
+已经收口的部分:判据必须在进 DO 前冻结(PLAN 相位只有只读工具),
+`evaluateCriterion()` 拦掉复读目标与空泛判据,`mission_submit` 不接受任何参数;
+`judge: "ai"` 时独立 Verifier 也接上了(这一档以前是显式 skip 的)。
 
-仍然成立的限制:那条命令本身的判别力没有任何机械校验 —— `--verify "true"`
-能过。这与 8.1 是同一个洞的两个入口。
+仍然成立的限制:
+
+- **判据的判别力仍没有机械校验**。`evaluateCriterion()` 只拦结构上就判不了真假的
+  (太短/复读/空泛),拦不住"具体但没意义"的判据 —— 就像 `--verify "true"` 能过一样。
+  这与 8.1 是同一个洞。
+- **`judge: "ai"` 的错误与执行者相关**。verifier 与 executor 同源时会系统性偏向 pass。
+  提示词已经反向要求"先找反证,找不到才判 pass",但真正的对策是给 verifier 配
+  不同家族的模型(`missions/models.json`),那是配置项,不是代码能保证的。
+- **`judge: "human"` 不可重放**。mission 结束后这条判据没留下能重跑的东西,
+  回归时是空的。
 
 ### 8.3 DEFINE 的退出没有机械判据(已收口一半)
 

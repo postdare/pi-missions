@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { evaluateAdmission, evaluatePromotion, tierRank } from "../tier.ts";
+import { evaluatePromotion, tierRank } from "../tier.ts";
 import type { TaskState } from "../types.ts";
 
 const task = (attempts: number): TaskState => ({
@@ -65,23 +65,4 @@ test("complex 不再升档", () => {
 test("tierRank 单调", () => {
 	assert.ok(tierRank("quick") < tierRank("standard"));
 	assert.ok(tierRank("standard") < tierRank("complex"));
-});
-
-// ─────────────── 进入 DO 的准入判定(I2/I3 入口守卫) ───────────────
-
-test("quick 有验证命令才放行进 DO", () => {
-	const r = evaluateAdmission({ tier: "quick", hasVerifyCommand: true });
-	assert.equal(r.ok, true);
-});
-
-test("quick 无验证命令不进 DO,升 standard 走 PLAN", () => {
-	const r = evaluateAdmission({ tier: "quick", hasVerifyCommand: false });
-	assert.equal(r.ok, false);
-	assert.equal(r.ok === false && r.promoteTo, "standard");
-	assert.ok(r.ok === false && r.reason.includes("--verify"));
-});
-
-test("standard/complex 的准入由 PLAN 把关,不受此守卫影响", () => {
-	assert.equal(evaluateAdmission({ tier: "standard", hasVerifyCommand: false }).ok, true);
-	assert.equal(evaluateAdmission({ tier: "complex", hasVerifyCommand: false }).ok, true);
 });

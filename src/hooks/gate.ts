@@ -17,14 +17,16 @@ export const MISSION_TOOLS = ["mission_ask", "mission_define", "mission_write_pl
 const READONLY = new Set(["read", "grep", "find", "ls"]);
 
 /** 相位 → 工具集(§3 能力矩阵) */
-export function toolsForPhase(phase: Phase): string[] {
+export function toolsForPhase(phase: Phase, tier: Tier = "standard"): string[] {
 	switch (phase) {
 		case "define":
 			// 只读 + 问一轮 + 交定义。写工具与 mission_write_plan 都不给:
 			// 问题还没定义清楚就动手,正是 DEFINE 要拦住的事。
 			return [...READONLY, "mission_ask", "mission_define"];
 		case "plan":
-			return [...READONLY, "mission_write_plan"];
+			// quick 在这个相位只做一件事:看几眼代码,给出一条判据(见 core/criterion.ts)。
+			// 给的是只读工具 —— 判据必须先于写代码冻结,这道闸门就是 I2 的物理实现。
+			return tier === "quick" ? [...READONLY, "mission_criterion"] : [...READONLY, "mission_write_plan"];
 		case "do":
 			return [...BUILTIN_ALL, "mission_submit"];
 		case "check":

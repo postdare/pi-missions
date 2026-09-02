@@ -10,7 +10,7 @@
  *   2. 必需范围内的证据 inconclusive  → inconclusive  ← 范围外 AC 的无结论只是信息
  *   3. 任一 hard fail                → fail
  *   4. 必需 AC 缺少证据              → inconclusive  ← 防止漏跑当通过
- *   5. 任一 semi fail                → fail
+ *   5. 任一 semi/human fail          → fail
  *   6. 只有 soft 证据                → inconclusive  ← I3,soft 不能触发 pass
  *   7. 其余                          → pass
  */
@@ -100,19 +100,31 @@ export function judge(evidences: Evidence[], options: JudgeOptions = {}): Verdic
     };
   }
 
-  // 5. semi 失败
-  const semiFail = evidences.filter((e) => e.level === "semi" && e.result === "fail");
-  if (semiFail.length > 0) {
+  // 5. semi / human 失败。人工终审与模型核验同级:两者都在执行者之外(I3),
+  //    区别只在可重放性,不在权威性 —— 人说不行就是不行。
+  const judgedFail = evidences.filter(
+    (e) => (e.level === "semi" || e.level === "human") && e.result === "fail",
+  );
+  if (judgedFail.length > 0) {
+    // 理由必须带进 reason,不能只报 acId。reason 会成为 task.lastFailureReason,
+    // 而那是失败信息**进入模型上下文的唯一通道**(verdict 卡片只给 TUI 看,
+    // 见 index.ts 的 registerEntryRenderer 注释)。
+    //
+    // hard 证据丢了理由还能补救 —— 执行者在 DO 相位有 bash,自己重跑一遍就看到了。
+    // semi/human 不行:裁判写的那句话是不可重现的,丢了就等于让 ACT 相位的
+    // escalator 蒙着眼睛想修法(它只有只读工具)。
     return {
       outcome: "fail",
-      signature: failureSignature(semiFail),
-      failing: semiFail,
-      reason: `AC 核对未通过:${semiFail.map((e) => e.acId).join(", ")}`,
+      signature: failureSignature(judgedFail),
+      failing: judgedFail,
+      reason: `AC 核对未通过:${judgedFail
+        .map((e) => `${e.acId} —— ${oneLine(e.raw, 300)}`)
+        .join(";")}`,
     };
   }
 
   // 6. soft 单独不足以判定通过(I3)
-  const hasObjective = evidences.some((e) => e.level === "hard" || e.level === "semi");
+  const hasObjective = evidences.some((e) => e.level !== "soft");
   if (!hasObjective) {
     return {
       outcome: "inconclusive",
@@ -133,4 +145,11 @@ export function judge(evidences: Evidence[], options: JudgeOptions = {}): Verdic
 
 function short(fp: string): string {
   return fp.length > 14 ? `${fp.slice(0, 14)}…` : fp;
+}
+
+/** 裁判理由压成一行带进 reason。截断只发生在超长的 verifier 论述上 */
+function oneLine(raw: string, max: number): string {
+  const s = (raw ?? "").replace(/\s+/g, " ").trim();
+  if (!s) return "(未说明原因)";
+  return s.length > max ? `${s.slice(0, max)}…` : s;
 }

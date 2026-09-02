@@ -90,14 +90,39 @@ test("standard 档同一签名第 3 次触发 L2 升级", () => {
   assert.equal(d.action === "escalate" && d.to, 2);
 });
 
-test("quick 档阈值更低,第 2 次即升级", () => {
+test("quick 档阈值更低,第 2 次即出栈 —— 但出口是升档,不是 L2", () => {
   const d = decide({
     tier: "quick",
     task: task({ lastSignature: "aaa", sameSignatureCount: 1, attempts: 2 }),
     signature: "aaa",
     level: 1,
   });
-  assert.equal(d.action, "escalate");
+  // quick 没有"方案"可改,L2 的落点对它是空的;而且它不落盘,强制换脑会丢掉失败历史
+  assert.equal(d.action, "promote");
+  assert.equal(d.action === "promote" && d.to, "standard");
+});
+
+test("standard/complex 仍然走 L2,升档出口只属于 quick", () => {
+  for (const tier of ["standard", "complex"] as const) {
+    const d = decide({
+      tier,
+      task: task({ lastSignature: "aaa", sameSignatureCount: 2, attempts: 3 }),
+      signature: "aaa",
+      level: 1,
+    });
+    assert.equal(d.action, "escalate", tier);
+    assert.equal(d.action === "escalate" && d.to, 2, tier);
+  }
+});
+
+test("quick 的硬上限优先于升档:签名一直在变也不能无限试", () => {
+  const d = decide({
+    tier: "quick",
+    task: task({ lastSignature: "aaa", sameSignatureCount: 1, attempts: 4 }),
+    signature: "bbb",
+    level: 1,
+  });
+  assert.equal(d.action, "halt");
 });
 
 test("已在 L3 仍连续失败则停机,不会有 L4", () => {
@@ -182,4 +207,73 @@ test("nearThreshold 与 decide 一致:临界的下一次失败必须真的升级
       cur = applyFailure({ ...cur, attempts: cur.attempts + 1 }, sig);
     }
   }
+});
+
+// ─────────────── 自然语言裁判的签名:措辞变了,签名不能变 ───────────────
+
+const semiFail = (tag: any, rationale: string, acId = "AC1"): Evidence => ({
+  level: "semi",
+  acId,
+  result: "fail",
+  raw: rationale,
+  failureTag: tag,
+});
+
+const humanFail = (rationale: string, acId = "AC1"): Evidence => ({
+  level: "human",
+  acId,
+  result: "fail",
+  raw: rationale,
+});
+
+test("semi 证据:同一类别换一种措辞,签名不变(否则熔断永不触发)", () => {
+  const a = semiFail("missing", "导航栏在窄屏下没有折叠成汉堡菜单,media query 缺失");
+  const b = semiFail("missing", "未看到 768px 断点的处理,汉堡菜单没有实现");
+  assert.equal(failureSignature([a]), failureSignature([b]));
+});
+
+test("semi 证据:类别不同则签名不同(换了病根应当重新计数)", () => {
+  const a = semiFail("missing", "没做");
+  const b = semiFail("incorrect", "做了但断点写成了 1024");
+  assert.notEqual(failureSignature([a]), failureSignature([b]));
+});
+
+test("semi 证据:同类别但不同 AC,签名不同(别把两条判据合并)", () => {
+  const a = semiFail("missing", "没做", "AC1");
+  const b = semiFail("missing", "没做", "AC2");
+  assert.notEqual(failureSignature([a]), failureSignature([b]));
+});
+
+test("semi 证据:缺 failureTag 时退化成固定串,仍然稳定", () => {
+  const a: Evidence = { level: "semi", acId: "AC1", result: "fail", raw: "随便写的一段" };
+  const b: Evidence = { level: "semi", acId: "AC1", result: "fail", raw: "完全不同的另一段" };
+  assert.equal(failureSignature([a]), failureSignature([b]));
+});
+
+test("human 证据:人两次说不行就是同一个信号,理由措辞不参与签名", () => {
+  const a = humanFail("汉堡点开只有 3 个链接");
+  const b = humanFail("还是不对,宽屏也跟着变了");
+  assert.equal(failureSignature([a]), failureSignature([b]));
+});
+
+test("human 与 semi 即使同 AC 也是不同签名(裁判换了,病根未必同)", () => {
+  assert.notEqual(failureSignature([humanFail("不行")]), failureSignature([semiFail("missing", "不行")]));
+});
+
+test("自然语言签名接得上熔断:同类别连续两次即达到 quick 阈值", () => {
+  const sig = failureSignature([semiFail("missing", "第一次的说法")]);
+  const t1 = applyFailure(task({ attempts: 1 }), sig);
+  assert.equal(t1.sameSignatureCount, 1);
+  const sig2 = failureSignature([semiFail("missing", "第二次换了个说法")]);
+  const d = decide({ tier: "quick", task: t1, signature: sig2, level: 1 });
+  assert.equal(d.action, "promote", "同一病根第二次必须出栈,而不是继续微调");
+});
+
+test("人工终审签名固定,所以人连说两次不行必然出栈 —— 这是刻意的", () => {
+  const hf = (why: string): Evidence => ({ level: "human", acId: "quick", result: "fail", raw: why });
+  const s1 = failureSignature([hf("CSP 报错,脚本加载不了")]);
+  const t1 = applyFailure(task({ attempts: 1 }), s1);
+  const s2 = failureSignature([hf("还是不行,布局全乱了")]);
+  const d = decide({ tier: "quick", task: t1, signature: s2, level: 1 });
+  assert.equal(d.action, "promote", "人说了两次不行就该换档,不该让人陪着试第三次");
 });

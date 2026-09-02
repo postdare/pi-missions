@@ -118,3 +118,33 @@ test("未传 requiredAcIds 时 inconclusive 一律阻断(quick/spike 原语义)"
   ]);
   assert.equal(v.outcome, "inconclusive");
 });
+
+// ─────────────── 裁判理由必须能到执行者手里 ───────────────
+
+test("human fail:人写的那句话带进 reason(它是失败信息进模型的唯一通道)", () => {
+  const v = judge([
+    { level: "human", acId: "quick", result: "fail", raw: "汉堡点开只有 3 个链接,少了设置和帮助" },
+  ]);
+  assert.equal(v.outcome, "fail");
+  assert.ok(v.reason.includes("汉堡点开只有 3 个链接"), v.reason);
+});
+
+test("semi fail:verifier 的 rationale 同样带进 reason", () => {
+  const v = judge([
+    { level: "semi", acId: "AC1", result: "fail", raw: "media query 写在了 1024px,断点不是 768", failureTag: "incorrect" },
+  ]);
+  assert.ok(v.reason.includes("断点不是 768"), v.reason);
+});
+
+test("理由为空时给出明确占位,不是一个空的冒号", () => {
+  const v = judge([{ level: "human", acId: "quick", result: "fail", raw: "   " }]);
+  assert.ok(v.reason.includes("未说明原因"), v.reason);
+});
+
+test("超长论述截断,但不影响签名(签名走 failureTag,不看措辞)", () => {
+  const long = "不对。".repeat(400);
+  const a = judge([{ level: "semi", acId: "AC1", result: "fail", raw: long, failureTag: "missing" }]);
+  const b = judge([{ level: "semi", acId: "AC1", result: "fail", raw: "换个说法", failureTag: "missing" }]);
+  assert.ok(a.reason.length < 400, "reason 不能把整篇论述灌进 State Card");
+  assert.equal(a.signature, b.signature, "措辞变了签名不能变,否则熔断失效");
+});
