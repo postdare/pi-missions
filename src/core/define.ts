@@ -167,6 +167,23 @@ export function evaluateAsk(input: AskInput): AskVerdict {
 				"你连倾向都没有,说明这个问题你自己还没想过。",
 		};
 	}
+	// 给了选项就必须让 recommend 命中其中一项。
+	// UI 靠 label === recommend 找出推荐行并默认选中它;对不上时旧实现**静默**回落到
+	// 第 0 项 —— 人看到的高亮不是模型推荐的那个,而没有任何地方提示这件事。
+	// 静默回落比报错糟得多,所以在 L0 拦下来让模型自己改。
+	const strayRecommend = questions
+		.filter((q) => q.options?.length && !q.options.some((o) => optionLabel(o) === q.recommend))
+		.map((q) => `${q.id || q.text}(recommend="${q.recommend}")`);
+	if (strayRecommend.length > 0) {
+		return {
+			ok: false,
+			reason:
+				`这些问题的 recommend 不在 options 里:${strayRecommend.join(" / ")}。` +
+				"给了选项时,recommend 必须与其中一项**逐字相同** —— 界面靠它标出推荐并默认选中。" +
+				"另外别在选项文案里写「(推荐)」之类的字样,界面会自己标。",
+		};
+	}
+
 	const noImpact = questions.filter((q) => !q.impact).map((q) => q.id || q.text);
 	if (noImpact.length > 0) {
 		return {

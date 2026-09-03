@@ -10,6 +10,27 @@ function ask(over: Partial<Parameters<typeof evaluateAsk>[0]> = {}) {
 	return evaluateAsk({ tier: "standard", askedRounds: 0, settled: [], prevSettled: [], questions: [q("Q1")], ...over });
 }
 
+test("recommend 必须命中某个选项 —— 对不上时旧实现静默回落到第一项", () => {
+	// 界面靠 label === recommend 找推荐行并默认选中它。对不上时人看到的高亮
+	// 不是模型推荐的那个,而没有任何地方提示 —— 静默回落比报错糟得多。
+	const q = (recommend: string, options?: string[]) => ({
+		id: "Q1", text: "副屏放什么?", impact: "决定完成条件", recommend, options,
+	});
+	const ask = (questions: any[]) =>
+		evaluateAsk({ tier: "standard", askedRounds: 0, settled: [], prevSettled: [], questions });
+
+	// 典型翻车:模型在选项文案里写了"(推荐)",recommend 里没写
+	const bad = ask([q("组件和书签都能放", ["组件和书签都能放(推荐)", "只放组件"])]);
+	assert.equal(bad.ok, false);
+	assert.match((bad as any).reason, /recommend 不在 options 里/);
+	assert.match((bad as any).reason, /别在选项文案里写/);
+
+	// 逐字相同:放行
+	assert.equal(ask([q("只放组件", ["组件和书签都能放", "只放组件"])]).ok, true);
+	// 开放式问题(没给 options)不受这条约束 —— 推荐会被合成成唯一可选行
+	assert.equal(ask([q("按视口宽度自适应")]).ok, true);
+});
+
 test("首轮 1~3 个带推荐答案的问题放行,并做 trim", () => {
 	const r = evaluateAsk({
 		tier: "standard",

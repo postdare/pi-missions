@@ -16,7 +16,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ## 命令
 
 ```bash
-npm test                                           # 全部:core 单测 + runtime/UI 冒烟(362 个)
+npm test                                           # 全部:core 单测 + runtime/UI 冒烟(366 个)
 node --test src/core/__tests__/breaker.test.ts     # 单个文件
 node --test --test-name-pattern="熔断" src/core/__tests__/breaker.test.ts   # 单个用例(名字是中文)
 npx tsc --noEmit                                   # 类型检查(tsconfig 只 include src/)
@@ -31,6 +31,9 @@ npx tsc --noEmit                                   # 类型检查(tsconfig 只 i
 ```bash
 # plan-review 离线预览:COLUMNS 模拟窄终端,第二个参数是段,第三是滚动
 COLUMNS=56 node --experimental-strip-types scripts/preview-plan-review.ts all
+
+# 问答页离线预览:default / open(开放式问题)/ done(已答两题)
+node --experimental-strip-types scripts/preview-ask-review.ts done
 
 # 样式快照:观感变了(标签/间距/缩进)就红;确认是想要的改动后重新冻结
 UPDATE_SNAPSHOTS=1 node --test test/plan-review.snapshot.test.ts

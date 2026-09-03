@@ -675,10 +675,10 @@ test("renderAskReview:选项 preview 区逐行 clip 不折行,字符画列对齐
 		const r = renderAskReview(askBase({ width, sel: [1, 0] }));
 		assertWidths(r.lines, Math.max(40, width), `ask preview w=${width}`);
 		const text = r.lines.join("\n").replace(/\x1b\[[0-9;]*m/g, "");
-		assert.ok(text.includes("选中 preview · 接口 p95"), "选中带 preview 的选项时展示图区");
+		assert.ok(text.includes("选中示意 · 接口 p95"), "选中带 preview 的选项时展示图区");
 	}
 	// 切到无 preview 的选项(首屏加载,纯字符串):不画图区
 	const r2 = renderAskReview(askBase({ width: 96, sel: [0, 0] }));
 	const t2 = r2.lines.join("\n").replace(/\x1b\[[0-9;]*m/g, "");
-	assert.ok(!t2.includes("选中 preview"), "无 preview 的选项不画图区");
+	assert.ok(!t2.includes("选中示意"), "无 preview 的选项不画图区");
 });

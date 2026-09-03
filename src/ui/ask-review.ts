@@ -49,8 +49,41 @@ export interface AskView {
 	draft: string[];
 	/** 当前题是否在自定义输入模式 */
 	editing: boolean;
+	/** 已确认的答案(与 questions 同序;undefined = 还没确认)。盒内下半区据此列账 */
+	answers?: (AskAnswer | undefined)[];
 	/** 滚动偏移,由外壳持有;渲染返回夹取后的值写回 */
 	scroll: number;
+}
+
+/**
+ * 一题的可选行。**行模型必须共享** —— 渲染与提交都按它取,不许各自做索引算术。
+ *
+ * 旧实现两边都写死"`sel === options.length` 就是自定义行",于是开放式问题
+ * (options 省略)整页只剩一个「自定义答案」:推荐语只是上面一行说明文字,
+ * 不是可选项。人直接回车 → 落成 { kind: "none" },一次提问额度就这么没了,
+ * 而人以为自己接受了推荐。
+ */
+export interface AskRow {
+	label: string;
+	preview?: string;
+	/** option = 模型给的选项;recommend = 开放式问题合成出来的推荐行;custom = 自定义输入 */
+	kind: "option" | "recommend" | "custom";
+	recommended: boolean;
+}
+
+export function askRows(q: AskQuestion): AskRow[] {
+	const opts = q.options ?? [];
+	const rows: AskRow[] =
+		opts.length > 0
+			? opts.map((o) => ({
+					label: optionLabel(o),
+					preview: optionPreview(o),
+					kind: "option" as const,
+					recommended: optionLabel(o) === q.recommend,
+				}))
+			: [{ label: q.recommend, kind: "recommend" as const, recommended: true }];
+	rows.push({ label: CUSTOM_LABEL, kind: "custom", recommended: false });
+	return rows;
 }
 
 export interface AskRender {
@@ -68,36 +101,45 @@ function questionLines(view: AskView, qi: number, inner: number): { lines: strin
 
 	for (const l of wrap(q.text, Math.max(12, inner))) lines.push(t.fg("text", l));
 	for (const l of wrap(`它会改变:${q.impact}`, Math.max(12, inner))) lines.push(t.fg("muted", l));
-	for (const l of wrap(`推荐:${q.recommend}`, Math.max(12, inner))) lines.push(t.fg("accent", l));
+	// 这里原来还有一行 `推荐:${q.recommend}`。删掉了 —— 推荐项就在下面的列表里,
+	// 逐字重复一遍是纯开销。推荐这件事由行尾的一个词承载(见下),它跟着行走,
+	// 游标移开也还在;而 core 的闸门保证了 recommend 一定命中某一行。
 	lines.push("");
 
 	const selStart = lines.length;
-	const options = q.options ?? [];
-	// 没有选项的开放式问题:推荐项本身作为唯一可选行
-	const rows: Array<{ label: string; preview?: string; isRecommended?: boolean; isCustom?: boolean }> = options.map((o) => ({
-		label: optionLabel(o),
-		preview: optionPreview(o),
-		isRecommended: optionLabel(o) === q.recommend,
-	}));
-	rows.push({ label: CUSTOM_LABEL, isCustom: true });
-
-	for (const [i, row] of rows.entries()) {
+	for (const [i, row] of askRows(q).entries()) {
 		const selected = !view.editing && view.sel[qi] === i;
+		// 选中态只有两个信号:游标 + 整行高亮。**不再画方框** ——
+		// 旧实现的 ▢ 与 sel 无关、永远勾不上,却让人以为这是可勾选的多选框(实为单选)。
 		const cursor = selected ? "▸" : " ";
-		const mark = row.isCustom ? (view.draft[qi]?.trim() ? "·" : "▢") : row.isRecommended ? "★" : "▢";
-		const text =
-			`${cursor} ${mark} ${row.label}` +
-			(row.isCustom && view.draft[qi]?.trim() ? `:${view.draft[qi]}` : "") +
-			(row.isRecommended && !row.isCustom ? "(推荐)" : "");
-		const painted = row.isCustom ? t.fg("dim", text) : text;
-		lines.push(painted);
+		const draft = view.draft[qi]?.trim();
+		const label = row.kind === "custom" && draft ? `${row.label}:${draft}` : row.label;
+		const body = `${cursor} ${label}`;
+		lines.push(row.kind === "custom" && !draft ? t.fg("dim", body) : body);
+		if (row.recommended) lines[lines.length - 1] += t.fg("dim", "   推荐");
 	}
 	const selEnd = lines.length;
 
-	if (view.editing && view.sel[qi] === options.length) {
+	if (view.editing && askRows(q)[view.sel[qi]]?.kind === "custom") {
 		lines.push(`  ${t.fg("accent", "输入:")}${view.draft[qi]}▁`);
 	}
 	return { lines, selStart, selEnd };
+}
+
+/** 盒内下半区的「已确认」账目:哪题答了什么。没答过的不列 */
+function confirmedLines(view: AskView, inner: number): string[] {
+	const t = view.theme;
+	const answers = view.answers ?? [];
+	const out: string[] = [];
+	for (const [i, a] of answers.entries()) {
+		if (!a) continue;
+		const q = view.questions[i];
+		if (!q) continue;
+		const text =
+			a.kind === "custom" ? (a.value.trim() || "(空)") : a.kind === "none" ? `${q.recommend}(未选,回落推荐)` : a.value;
+		out.push(`${t.fg("accent", `Q${i + 1}`)} ${clip(text, Math.max(8, inner - 4))}`);
+	}
+	return out;
 }
 
 /** 整页渲染。行数随题切换会变,窗口保证选中项完整可见 */
@@ -130,19 +172,24 @@ export function renderAskReview(view: AskView): AskRender {
 	// 选中选项的 ASCII 示意图(可选):盒内下半区,ruleLabel 隔开。
 	// 字符画逐行 clip 不折行 —— 列对齐就是它的语义,折了就碎了。
 	// 没图(选项未带 preview / 自定义行 / 开放式问题)不画这个区,下半区保持空行。
-	const selRow = view.sel[view.qi];
-	const options = view.questions[view.qi].options ?? [];
-	const preview = selRow >= 0 && selRow < options.length ? optionPreview(options[selRow]) : undefined;
-	const previewLabel = preview ? `选中 preview · ${optionLabel(options[selRow])}` : "已确认";
+	const rows = askRows(view.questions[view.qi]);
+	const preview = rows[view.sel[view.qi]]?.preview;
+	const confirmed = confirmedLines(view, inner);
+	// 计数用**真实已答数**,不是当前页签下标 —— 旧实现写的是 view.qi,
+	// Tab 回第一题就显示 0/3,和答没答过毫无关系。
+	const done = (view.answers ?? []).filter(Boolean).length;
 	const body = [
 		...q.lines,
 		"",
 		...(preview
-			? [ruleLabel(t as never, inner, previewLabel),
-				...preview.split("\n").map((l) => t.fg("dim", clip(l, inner)))]
+			? [
+					ruleLabel(t as never, inner, `选中示意 · ${rows[view.sel[view.qi]].label}`),
+					...preview.split("\n").map((l) => t.fg("dim", clip(l, inner))),
+					"",
+				]
 			: []),
-		"",
-		ruleLabel(t as never, inner, `已确认 ${view.qi}/${view.questions.length}`),
+		ruleLabel(t as never, inner, `已确认 ${done}/${view.questions.length}`),
+		...(confirmed.length > 0 ? confirmed : [t.fg("dim", "  (还没确认任何一题)")]),
 	];
 	const height = Math.max(6, contentBudget(view.rows) - (lines.length - 1));
 	const anchorStart = bodyStart + q.selStart;
@@ -192,12 +239,10 @@ export async function openAskReview(ctx: any, questions: AskQuestion[]): Promise
 			done: (r: AskReviewResult) => void,
 		) => {
 			let qi = 0;
-			const sel: number[] = questions.map((q) => {
-				if (!q.options?.length) return 0;
-				const i = q.options.findIndex((o) => optionLabel(o) === q.recommend);
-				// 推荐项不在 options 里时退回第一项 —— 默认不能落在自定义答案上,人没敲字就提交会落成空答案
-				return Math.max(0, i);
-			});
+			// 默认落在推荐行上。开放式问题(无 options)也有推荐行 —— 见 askRows,
+			// 它正是为了不让默认落到"自定义答案"上(人没敲字就回车 = 空答案)。
+			// recommend 一定命中某一行:core 的 evaluateAsk 已经拦过。
+			const sel: number[] = questions.map((q) => Math.max(0, askRows(q).findIndex((r) => r.recommended)));
 			const draft: string[] = questions.map(() => "");
 			let editing = false;
 			let scroll = 0;
@@ -223,18 +268,18 @@ export async function openAskReview(ctx: any, questions: AskQuestion[]): Promise
 				if (editing) {
 					answers[qi] = { kind: "custom", value: draft[qi] ?? "" };
 				} else {
-					const q = questions[qi];
-					const options = q.options ?? [];
-					if (sel[qi] === options.length) {
+					const row = askRows(questions[qi])[sel[qi]];
+					if (!row || row.kind === "custom") {
 						answers[qi] = draft[qi]?.trim() ? { kind: "custom", value: draft[qi] } : { kind: "none" };
 					} else {
-						answers[qi] = { kind: "option", value: options[sel[qi]] !== undefined ? optionLabel(options[sel[qi]]) : q.recommend };
+						// option 与 recommend 两种行都是"选了一个给定答案",落成同一种 AskAnswer
+						answers[qi] = { kind: "option", value: row.label };
 					}
 				}
 				if (qi < questions.length - 1) {
 					qi += 1;
 					scroll = 0;
-					editing = questions[qi].options?.length ? editing : false;
+					editing = false;
 					tui.requestRender();
 				} else {
 					close({ status: "answered", answers: [...answers] });
@@ -254,6 +299,7 @@ export async function openAskReview(ctx: any, questions: AskQuestion[]): Promise
 						sel,
 						draft,
 						editing,
+						answers,
 						scroll,
 					});
 					scroll = r.scroll;
@@ -265,8 +311,7 @@ export async function openAskReview(ctx: any, questions: AskQuestion[]): Promise
 						input.handleInput(data);
 						return tui.requestRender();
 					}
-					const q = questions[qi];
-					const options = q.options ?? [];
+					const rows = askRows(questions[qi]);
 					if (matchesKey(data, Key.escape)) return close({ status: "cancelled" });
 					if (matchesKey(data, Key.tab) || matchesKey(data, Key.right)) {
 						qi = (qi + 1) % questions.length;
@@ -283,12 +328,12 @@ export async function openAskReview(ctx: any, questions: AskQuestion[]): Promise
 						return tui.requestRender();
 					}
 					if (matchesKey(data, Key.down)) {
-						sel[qi] = Math.min(options.length, sel[qi] + 1);
+						sel[qi] = Math.min(rows.length - 1, sel[qi] + 1);
 						return tui.requestRender();
 					}
 					if (data === "e" || data === "E") {
 						editing = true;
-						sel[qi] = options.length;
+						sel[qi] = rows.length - 1; // 自定义行永远是最后一行
 						input.setValue(draft[qi] ?? "");
 						return tui.requestRender();
 					}
