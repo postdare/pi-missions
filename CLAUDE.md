@@ -16,7 +16,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ## 命令
 
 ```bash
-npm test                                           # 全部:core 单测 + runtime/UI 冒烟(373 个)
+npm test                                           # 全部:core 单测 + runtime/UI 冒烟(381 个)
 node --test src/core/__tests__/breaker.test.ts     # 单个文件
 node --test --test-name-pattern="熔断" src/core/__tests__/breaker.test.ts   # 单个用例(名字是中文)
 npx tsc --noEmit                                   # 类型检查(tsconfig 只 include src/)
@@ -37,6 +37,9 @@ node --experimental-strip-types scripts/preview-ask-review.ts done
 
 # 常驻状态卡(输入框上方的 widget):do / check / warn(熔断临界 + 换脑挂起)
 COLUMNS=56 node --experimental-strip-types scripts/preview-widget.ts warn
+
+# 人工终审页(quick 档 judge=human):empty(未选)/ pass / reason
+node --experimental-strip-types scripts/preview-human-review.ts reason
 
 # 样式快照:观感变了(标签/间距/缩进)就红;确认是想要的改动后重新冻结
 UPDATE_SNAPSHOTS=1 node --test test/plan-review.snapshot.test.ts
@@ -75,7 +78,8 @@ src/core/       纯函数,唯一裁判(machine/breaker/verdict/baseline/tier/def
 src/store/      v2 Repository、generation 投影、log/evidence/git/scaffold
 src/roles/      models.json 角色模型 + 进程内 Verifier AgentSession
 src/hooks/      tool_call 闸门 + 编辑级增量反馈
-src/ui/         chrome(圆角盒框架)/ panel(/missions)/ plan-review(冻结前评审)/ ask-review(DEFINE 问答)/ status-view / dashboard / models-page
+src/ui/         chrome(圆角盒框架)/ panel(/missions)/ plan-review(冻结前评审)/ ask-review(DEFINE 问答)/
+                human-review(quick 人工终审)/ status-view / dashboard / models-page
 templates/      scaffold 铺进目标仓库的工作流文件(standard/complex 的相位提示词、脚本)
 skills/         随包分发的 pi skill(入场导览:该不该开 mission、选哪档)
 ```

@@ -91,6 +91,11 @@ UI 层同样保持纯函数设计,所有视图接收不可变数据对象并输�
 - `src/ui/panel.ts`: `/missions` 主面板(任务列表、模型页)。
 - `src/ui/plan-review.ts`: 冻结前的计划评审页(五段:目标与边界 / 方案 / 验收标准 / 任务 /
   verify.sh 全文;`Enter` 批准、`R` 打回并写意见)。`/mission plan` 用 `readOnly` 打开同一页。
+- `src/ui/human-review.ts`: quick 档 `judge: "human"` 的人工终审页(`renderHumanReview` 纯渲染 +
+  `openHumanReview` 外壳)。两态一页:选通过/不通过,选了不通过就在同一页写理由。
+  三条纪律的落点在这里 —— **不预选**任何一项(回车即过等于人没看只是按了键,那不是
+  I3 意义上的外部判定)、Esc 取消产出"无结论"而不是"通过"、不通过必须给理由。
+  这一页原来是 `ctx.ui.select` + `ctx.ui.input` 两次内置弹窗,内置控件三条都表达不出来。
 - `src/ui/status-view.ts`: `/mission status` 状态视图与按键交互(支持 `mode: "mission" | "task-detail"` 切换,任务列表焦点下 `↑↓` 选中任务,`Enter` 展开详情,`Esc`/`Backspace` 返回)。
 - `src/ui/task-detail.ts`: 任务详情视图纯渲染(任务定义、实时 CHECK 进度、验收标准、全部 attempt 的 stdout/stderr 原始证据、spike 结论正文)。
 - `src/ui/dashboard.ts`: 状态卡片与内容分块(`taskBlocks`、`taskLines`、`overviewLines`、`checkProgressLines`、`acLines`、`renderWidgetCard`)。
@@ -235,9 +240,12 @@ quick 起于 `plan` 相位,那个相位**只有只读工具 + `mission_criterion
 的机械闸门:太短 / 复读目标 / 空泛且无具体锚点,一律退回重写(与 `evaluateAsk()`
 拒绝"没有推荐答案的懒问题"同形)。
 
-判据带一个 `judge`,决定谁来核对:`ai`(独立 Verifier,默认)、`human`(人工终审)、
-`command`(退出码)。三者产出的证据级别不同(semi / human / hard),但都在执行者
-之外 —— **I3 要的是判定权外置,不是判定必须可执行**。
+判据带一个 `judge`,决定谁来核对:`ai`(独立 Verifier,默认)、`human`(人工终审,
+交互面见 `src/ui/human-review.ts`)、`command`(退出码)。三者产出的证据级别不同
+(semi / human / hard),但都在执行者之外 —— **I3 要的是判定权外置,不是判定必须可执行**。
+
+`human` 等人期间 `CHECK.json` 的 `stage` 是 `awaiting_human`(不是 `running_verifier`)——
+后者的标签是"独立核验",widget 会把"等你点"显示成"模型在跑",人自然不知道该去点什么。
 
 `mission_submit` 因此**不接受任何参数**:提交路径上没有任何"补一条标准"的入口。
 

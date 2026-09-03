@@ -79,6 +79,9 @@ const STAGE_LABELS: Record<CheckStage, string> = {
 	preparing: "准备环境",
 	running_scripts: "执行脚本",
 	running_verifier: "独立核验",
+	// 人在等你点,不是模型在跑。曾经这里复用 running_verifier,widget 就显示
+	// "独立核验 17m7s" —— 把"等人"说成"等模型",人自然不知道该去点什么。
+	awaiting_human: "等待你终审",
 	judging: "生成判定",
 	completed: "完成",
 	error: "异常",

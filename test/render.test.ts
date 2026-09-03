@@ -22,6 +22,7 @@ import { renderPanel } from "../src/ui/panel.ts";
 import { renderStatus } from "../src/ui/status-view.ts";
 import { renderPlanReview, SECTION_IDS, type ReviewSection } from "../src/ui/plan-review.ts";
 import { renderAskReview } from "../src/ui/ask-review.ts";
+import { renderHumanReview } from "../src/ui/human-review.ts";
 import type { ModelsPageData } from "../src/ui/models-page.ts";
 
 const theme = {
@@ -681,4 +682,35 @@ test("renderAskReview:选项 preview 区逐行 clip 不折行,字符画列对齐
 	const r2 = renderAskReview(askBase({ width: 96, sel: [0, 0] }));
 	const t2 = r2.lines.join("\n").replace(/\x1b\[[0-9;]*m/g, "");
 	assert.ok(!t2.includes("选中示意"), "无 preview 的选项不画图区");
+});
+
+test("renderHumanReview:两态 × 各宽度 × 各选中态都恰好铺满,且不出现贴边竖线", () => {
+	const criterion =
+		"在新标签页实际验证:把一个小组件卡片和一个书签分组移到副屏后,通过指示点(ScreenDots 第二点亮起)切到副屏,副屏上能实际看到该卡片和该书签分组渲染出来,而不是空白。";
+	for (const width of [40, 48, 56, 72, 96, 120, 200]) {
+		for (const stage of ["decide", "reason"] as const) {
+			for (const sel of [-1, 0, 1]) {
+				const { lines } = renderHumanReview({
+					theme,
+					width,
+					rows: 32,
+					missionId: "2026-09-03-mission-mtll5d8t",
+					criterionText: criterion,
+					stage,
+					sel,
+					reason: "副屏切过去还是空的",
+					scroll: 0,
+				});
+				// 末行是盒外提示条,只要求不越界;其余每行都是盒行,必须恰好等于 width
+				for (const l of lines.slice(0, -1)) {
+					assert.equal(visibleWidth(l), width, `w=${width} ${stage} sel=${sel}: ${JSON.stringify(l)}`);
+				}
+				assert.ok(visibleWidth(lines[lines.length - 1]) <= width, "提示条越界");
+				for (const l of lines) {
+					const stripped = l.replace(/\x1b\[[0-9;]*m/g, "").replace(/^[│╭╰]/, "");
+					assert.ok(!/^.{0,2}[▎▍▌┃]/.test(stripped), `仍有贴边竖线: ${JSON.stringify(stripped)}`);
+				}
+			}
+		}
+	}
 });

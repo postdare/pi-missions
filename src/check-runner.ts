@@ -33,6 +33,7 @@ import {
 	type VerifierProgress,
 } from "./roles/verifier.ts";
 import { renderActBrief, renderDoBrief } from "./briefs.ts";
+import { openHumanReview } from "./ui/human-review.ts";
 import type { ActiveMission, Runtime } from "./runtime.ts";
 
 const EVIDENCE_TAIL = 4000;
@@ -559,6 +560,9 @@ export class CheckRunner {
 	 *     用固定串,见 breaker.ts 的 canonicalOf。
 	 *  3. **记账为不可重放**。写进证据的 command 字段,面板与 LOG 都能看到
 	 *     这条判据没有留下能重跑的东西。
+	 *
+	 * 前两条的落点在 `ui/human-review.ts`(不预选 + 同页两态追问理由);这里只负责
+	 * 把结果翻译成证据。用自绘页而不是 ctx.ui.select,原因见那个文件的头注释。
 	 */
 	/** 返回"裁判不可用"的原因;人在场只是没点(可以再来一轮)时返回 null */
 	private async collectHumanVerdict(
@@ -567,38 +571,33 @@ export class CheckRunner {
 		evidences: Evidence[],
 		persistCheck: (patch: any) => void,
 	): Promise<string | null> {
+		if (!ctx.hasUI) {
+			// 非 TUI 下终审页根本开不出来 —— 这是裁判缺席,不是执行者少交了什么。
+			// 让它走 cause=judge 直接停机,别在 DO 里空转三轮等一个永远不会出现的页面。
+			ctx.ui.notify("当前环境无法弹出人工终审(非 TUI),本轮判为无结论", "warning");
+			return "人工终审无法进行:当前不是 TUI 环境";
+		}
+		// stage 必须是 awaiting_human,不能复用 running_verifier:后者的标签是
+		// "独立核验",widget 会显示"独立核验 17m7s"—— 人在等你点,卡片却说模型在跑。
 		persistCheck({
-			stage: "running_verifier",
+			stage: "awaiting_human",
 			summary: "等待人工终审...",
 			verifier: { status: "skipped", message: "人工终审(不可重放)" },
 		});
 		this.rt.refreshWidget(ctx);
 		const startedAt = Date.now();
-		const PASS = "通过 —— 收工";
-		const FAIL = "不通过 —— 我来说哪里不对";
-		let choice: string | undefined;
-		if (ctx.hasUI) {
-			choice = await ctx.ui.select(`人工终审:${criterionText}`, [PASS, FAIL]);
-		} else {
-			// 非 TUI 下终审框根本弹不出来 —— 这是裁判缺席,不是执行者少交了什么。
-			// 让它走 cause=judge 直接停机,别在 DO 里空转三轮等一个永远不会出现的弹窗。
-			ctx.ui.notify("当前环境无法弹出人工终审(非 TUI),本轮判为无结论", "warning");
-			return "人工终审无法进行:当前不是 TUI 环境";
-		}
+		const outcome = await openHumanReview(ctx, {
+			missionId: this.rt.active?.state.missionId ?? "",
+			criterionText,
+		});
 		// 没做选择 ≠ 通过。不产出证据,让 judge() 判 inconclusive
-		if (choice !== PASS && choice !== FAIL) return null;
+		if (outcome.status !== "decided") return null;
 
-		const passed = choice === PASS;
-		let reason = "人工终审通过";
-		if (!passed) {
-			const said = ctx.hasUI ? await ctx.ui.input("哪里不对?", "一句话说明,会写进 LOG") : undefined;
-			reason = said?.trim() || "人工终审未通过(未说明原因)";
-		}
 		evidences.push({
 			level: "human",
 			acId: "quick",
-			result: passed ? "pass" : "fail",
-			raw: reason,
+			result: outcome.passed ? "pass" : "fail",
+			raw: outcome.passed ? "人工终审通过" : outcome.reason,
 			command: "人工终审(不可重放)",
 			startedAt,
 			durationMs: Date.now() - startedAt,

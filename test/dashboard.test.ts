@@ -372,3 +372,23 @@ test("widget:窄终端下卡片高度有上限 —— 常驻 chrome 不许无限
 		assert.ok(lines.length <= 5, `w=${width} 涨到了 ${lines.length} 行:\n${lines.join("\n")}`);
 	}
 });
+
+test("widget:等人终审时说'等待你终审',不许说成'独立核验'", () => {
+	// 真实事故:collectHumanVerdict 落的是 stage=running_verifier(标签「独立核验」),
+	// 于是人在等着点确认,卡片却显示「独立核验 17m7s」—— 人不知道该去点什么。
+	const s = runningState();
+	s.phase = "check";
+	const check = {
+		taskId: "T2",
+		attempt: 1,
+		startedAt: 10_000,
+		updatedAt: 12_000,
+		stage: "awaiting_human" as const,
+		completedBranches: [],
+		verifier: { status: "skipped" as const, message: "人工终审(不可重放)" },
+	};
+	const widget = renderWidgetCard(mockTheme, plan, s, 25_000, 120, check).join("\n");
+	assert.ok(widget.includes("等待你终审"), `实际:${widget}`);
+	assert.ok(!widget.includes("独立核验"), "等人的时候不许说模型在跑");
+	assert.ok(widget.includes("15s"), "计时要走 —— 人得知道自己晾了多久");
+});

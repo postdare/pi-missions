@@ -14,6 +14,7 @@ export type CheckStage =
 	| "preparing" // 准备环境 (计算指纹等)
 	| "running_scripts" // 执行脚本 (跑 verify.sh 分支或 --verify 命令)
 	| "running_verifier" // 独立核验 (Verifier AgentSession)
+	| "awaiting_human" // 等待人工终审 (quick 档 judge=human;人在等,不是模型在跑)
 	| "judging" // 生成判定 (汇总证据调用 judge)
 	| "completed" // 完成
 	| "error"; // 异常
@@ -101,6 +102,7 @@ const CHECK_STAGES = new Set<CheckStage>([
 	"preparing",
 	"running_scripts",
 	"running_verifier",
+	"awaiting_human",
 	"judging",
 	"completed",
 	"error",

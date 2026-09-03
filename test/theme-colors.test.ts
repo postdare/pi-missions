@@ -18,6 +18,7 @@ import { renderTaskDetail } from "../src/ui/task-detail.ts";
 import { renderStatus } from "../src/ui/status-view.ts";
 import { renderPlanReview, SECTION_IDS, type ReviewSection } from "../src/ui/plan-review.ts";
 import { renderAskReview } from "../src/ui/ask-review.ts";
+import { renderHumanReview } from "../src/ui/human-review.ts";
 
 /** docs/themes.md 的前景色名(仅列本项目可能用到的部分) */
 const FG = new Set([
@@ -293,6 +294,30 @@ test("DEFINE 问答页在 strictTheme 下颜色名均合法(含编辑态)", () =
 					}),
 				`renderAskReview qi=${qi} editing=${editing}`,
 			);
+		}
+	}
+});
+
+test("人工终审页在 strictTheme 下颜色名均合法", () => {
+	for (const width of [56, 96]) {
+		for (const stage of ["decide", "reason"] as const) {
+			for (const sel of [-1, 0, 1]) {
+				assert.doesNotThrow(
+					() =>
+						renderHumanReview({
+							theme: strictTheme,
+							width,
+							rows: 32,
+							missionId: "2026-09-03-mission-mtll5d8t",
+							criterionText: "窄屏折叠成汉堡,宽屏不变;并且给出导致副屏空白的具体代码级原因",
+							stage,
+							sel,
+							reason: "还是空白",
+							scroll: 0,
+						}),
+					`human-review @${width} ${stage} sel=${sel}`,
+				);
+			}
 		}
 	}
 });

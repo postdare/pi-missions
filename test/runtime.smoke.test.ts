@@ -83,20 +83,63 @@ function mockCtx(cwd: string, human?: { select?: string; input?: string; custom?
 				prompts.push(title);
 				return human?.input;
 			},
-			/** 问答页 mock:工厂第 4 参 done 收裁决;human.custom 是题目断言 + 答案来源 */
 			custom: async (factory: any) => {
-				let captured: any[] = [];
-				const page = factory({}, plainTheme(), {}, (r: any) => {
-					page.result = r;
-				});
-				captured = human?.custom ? human.custom(page) : [];
-				return captured ?? { status: "cancelled" };
+				// 问答页(ask-review):human.custom 是题目断言 + 答案来源
+				if (human?.custom) {
+					const page = factory({}, plainTheme(), {}, (r: any) => {
+						page.result = r;
+					});
+					return human.custom(page) ?? { status: "cancelled" };
+				}
+				// 人工终审页(human-review):按真实按键驱动真实组件
+				if (human?.select !== undefined) return driveHumanReview(factory, human, prompts);
+				return { status: "cancelled" };
 			},
 		},
 		getContextUsage: () => ({ tokens: 0, contextWindow: 100_000, percent: 0 }),
 		sessionManager: { getSessionFile: () => "/tmp/fake-session.jsonl", getEntries: () => [] },
 		modelRegistry: { find: () => undefined },
 	};
+}
+
+/**
+ * 人工终审页的按键驱动。**刻意驱动真实组件而不是返回一个假裁决** ——
+ * 这一页的价值全在"没有默认值"这条纪律上(回车即过等于人没看只是按了键,
+ * 那不是 I3 意义上的外部判定),而那条纪律只存在于按键处理里。
+ * mock 掉返回值的话,把 sel 的初值从 -1 改成 0 也照样全绿。
+ */
+function driveHumanReview(
+	factory: any,
+	human: { select?: string; input?: string },
+	prompts: string[],
+): any {
+	let result: any;
+	const tui = { requestRender: () => {}, terminal: { rows: 40 } };
+	const page = factory(tui, plainTheme(), {}, (r: any) => {
+		result = r;
+	});
+	// 把摆在人面前的整页收进 prompts:断言"确实把冻结的判据给人看了"
+	prompts.push(page.render(100).join("\n"));
+
+	const wantPass = human.select === "通过";
+	const wantFail = human.select === "不通过";
+	if (!wantPass && !wantFail) {
+		page.handleInput("\x1b"); // Esc = 人取消
+		return result ?? { status: "cancelled" };
+	}
+
+	// 纪律 1:未选任何一项时回车必须无效
+	page.handleInput("\r");
+	assert.equal(result, undefined, "未选任何一项时回车不许生效 —— 那会变成'回车即过'");
+
+	page.handleInput("\x1b[B"); // ↓ → 通过
+	if (wantFail) page.handleInput("\x1b[B"); // 再 ↓ → 不通过
+	page.handleInput("\r");
+	if (wantFail) {
+		for (const ch of human.input ?? "") page.handleInput(ch);
+		page.handleInput("\r");
+	}
+	return result;
 }
 
 /** 与 chrome 一致的恒等着色器,给 mock 的 ui.custom 工厂用 */
