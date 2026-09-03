@@ -46,7 +46,12 @@ export function toolsForPhase(phase: Phase, tier: Tier = "standard"): string[] {
 			// CHECK 由 L0 执行(verify.sh + 进程内 Verifier AgentSession),LLM 无回合
 			return [...READONLY];
 		case "act":
-			return [...READONLY, "mission_escalate"];
+			// quick 不给 mission_escalate:它的 L2/L3 落点是空的。没有"方案"可改,
+			// 回 PLAN 唯一能动的就是那条判据本身 —— 而那是执行者看过判定失败之后
+			// 再改判定标准(I2/I3 的反面,CLAUDE.md 硬约束第 6 条)。
+			// quick 的出口是**自动升档**(evaluatePromotion / breaker 的 promote 分支),
+			// 不是手动升级。这里只是粗粒度,machine 的 ESCALATE handler 是最后一道。
+			return tier === "quick" ? [...READONLY] : [...READONLY, "mission_escalate"];
 		case "done":
 		case "halted":
 			return [...BUILTIN_ALL, ...MISSION_TOOLS];

@@ -358,6 +358,15 @@ function providerErrorOf(event: AgentSessionEvent): string | undefined {
 	return (message.errorMessage ?? "provider 返回错误(无详情)").replace(/\s+/g, " ").trim();
 }
 
+/**
+ * 独立验证者的系统提示词。**这里是它唯一的行为规范来源。**
+ *
+ * 它跑在 emptyResourceLoader 上(不加载扩展、skill、prompt、context file),
+ * 所以 `missions/phases/check.md` 对它完全无效 —— 那是注入**主会话**的。
+ * 迁到进程内 AgentSession 之前,验证者是个独立 pi 进程、确实读得到脚手架;
+ * check.md 里那段"如果你是独立验证者……"就是那个时代的遗留,已经删掉。
+ * 要调验证者的行为,改这里和 renderVerifierBrief(),不要去改 check.md。
+ */
 function verifierSystemPrompt(): string {
 	// 提问方向是刻意反过来的:「找出不满足的理由,找不到才判 pass」。
 	// 正向核对("这条 AC 满足了吗")在同源模型上会系统性偏向 pass ——
@@ -482,9 +491,16 @@ export function renderVerifierBrief(input: {
 			return `- ${acId}${planIds ? ` (计划里的 ${planIds})` : ""}: ${text || "(计划中没有对应正文,按目标与任务标题核对)"}`;
 		})
 		.join("\n");
-	const hard = input.hardResults
-		.map((h) => `- ${h.acId}: ${h.pass ? "PASS" : "FAIL"}\n  输出尾部:\n${indent(h.outputTail)}`)
-		.join("\n");
+	// hardResults 为空是 quick 档的常态(那一档没有 verify.sh)。留一个空标题最糟:
+	// 「自动化验证结果」下面什么都没有,既可能被读成"跑过了没问题",也可能被读成
+	// "系统跳过了验证,我可以松一点"。这一档 semi 是**唯一**证据源,必须说明白。
+	const hard =
+		input.hardResults.length > 0
+			? input.hardResults
+					.map((h) => `- ${h.acId}: ${h.pass ? "PASS" : "FAIL"}\n  输出尾部:\n${indent(h.outputTail)}`)
+					.join("\n")
+			: "(本轮没有可执行的自动化验证 —— 这个 mission 不带 verify.sh。\n" +
+				"你的核对是唯一的判定依据,请按下面的规则逐条查证,不要因为缺少测试结果就放宽标准。)";
 	return `你是独立验证者,正在核对一个 coding mission 的当前改动。你不能写文件(只读工具:read/grep/find/ls),也不能执行命令;自动化验证已由系统跑完并附在下面,核对语义后调用 mission_verdict 提交结论。
 
 # Mission 目标

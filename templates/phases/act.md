@@ -7,8 +7,8 @@
 1. 读 State Card 里的 PREV FAILURE 和 LOG.md 里该任务的失败记录。
 2. 判断失败性质:
    - **实现错了**(思路对,代码错)→ 给出具体修法,结束本轮。系统会自动进入下一次尝试。
-   - **方案错了**(再修实现也不会过)→ 调用 `mission_escalate --level=2` 并附理由,回 PLAN 重新分解。
-   - **问题定义错了**(AC 本身不对)→ 调用 `mission_escalate --level=3`(需人工确认)。
+   - **方案错了**(再修实现也不会过)→ 调用 `mission_escalate`,传 `level: 2` 与 `reason`,回 PLAN 重新分解。
+   - **问题定义错了**(AC 本身不对)→ 调用 `mission_escalate`,传 `level: 3` 与 `reason`(需人工确认)。
 3. 不要含糊。"再试试"不是诊断 —— 同样的失败签名再出现会触发熔断,浪费的是下一轮。
 
 ## 禁止

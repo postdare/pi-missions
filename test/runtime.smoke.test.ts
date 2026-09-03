@@ -648,16 +648,34 @@ test("quick 不问人:停在 PLAN 只给只读工具,AI 交判据后才解锁写
 	assert.equal(ctx.notifications.length, 0, "全程没打断人");
 });
 
-test("PLAN 相位的 State Card 不能把'尚未冻结'说成 quick 档口径", async () => {
+test("DEFINE/PLAN 的 State Card 各说各的口径,都不能串成 quick 档的话", async () => {
 	const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "pi-missions-smoke-"));
 	const pi = mockPi();
 	const ctx = mockCtx(tmp);
 	const rt = new Runtime(pi, tmp);
 	await rt.startNew(ctx, "x", "standard");
 
-	const card = renderStateCard(rt.active!.plan, rt.active!.state, "missions");
-	assert.ok(!card.includes("quick 档"), "standard mission 的卡片不该出现 quick 档口径");
-	assert.ok(card.includes("尚未冻结"));
+	// DEFINE:AC 是**下一相位**的产出,而且这一相位没有 mission_write_plan。
+	// 卡片原来在这里也印"本相位的产出就是 AC,由 mission_write_plan 提交",
+	// 与 define.md 的"在这里写 AC 是 PLAN 的活"每轮对撞一次。
+	assert.equal(rt.active!.state.phase, "define");
+	const defineCard = renderStateCard(rt.active!.plan, rt.active!.state, "missions");
+	assert.ok(!defineCard.includes("quick 档"), "standard mission 的卡片不该出现 quick 档口径");
+	assert.ok(!defineCard.includes("mission_write_plan"), "DEFINE 拿不到这个工具,卡片不能指路它");
+	assert.ok(/下一相位|PLAN 的产出/.test(defineCard), "要说清 AC 是下一相位的事");
+
+	// PLAN:这才是"本相位的产出就是可执行的 AC"成立的地方
+	await rt.define(ctx, {
+		goal: "x",
+		doneWhen: [{ id: "DW1", text: "x 能跑起来" }],
+		constraints: [],
+		nonGoals: [],
+	});
+	assert.equal(rt.active!.state.phase, "plan");
+	const planCard = renderStateCard(rt.active!.plan, rt.active!.state, "missions");
+	assert.ok(!planCard.includes("quick 档"));
+	assert.ok(planCard.includes("尚未冻结"));
+	assert.ok(planCard.includes("mission_write_plan"), "PLAN 拿得到它,该指路");
 });
 
 test("quick 的 State Card 必须印出真实判据与裁判(印不出来 planner 会以为没冻结)", async () => {
@@ -1538,7 +1556,10 @@ test("补证据闸门:inconclusive 后原样重交被拦截,修改工作区后�
 	const card = renderStateCard(rt.active!.plan, rt.active!.state);
 	assert.ok(card.includes("AWAITING EVIDENCE"));
 	const brief = renderDoBrief(rt.active!.plan, rt.active!.state);
-	assert.ok(brief.includes("回到 DO:T1") && brief.includes("缺少验收证据:AC1") && brief.includes("补证据闸门"));
+	assert.ok(brief.includes("回到 DO:T1") && brief.includes("缺少验收证据:AC1"));
+	assert.ok(/原样重交/.test(brief), "要说清没有改动就重交会被拦");
+	// 这里曾经指路 mission_escalate,而 DO 的工具集里没有它 —— 见 test/briefs.test.ts
+	assert.ok(!brief.includes("mission_escalate"), "DO 简报不能指路它拿不到的工具");
 	assert.ok(ctx.notifications.some((m) => m.includes("无法判定") && m.includes("缺少验收证据:AC1")));
 
 	// 未改动工作区原样重交 → 被拦截

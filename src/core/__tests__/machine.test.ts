@@ -316,6 +316,38 @@ test("待补证据闸门不影响 ESCALATE 逃生口", () => {
 	assert.equal(escalated.state.phase, "plan");
 });
 
+test("quick 不能手动升级 —— 那条路的终点是执行者重写判定标准", () => {
+	// 链路(修复前是通的):ACT 调 mission_escalate(L2) → phase=plan
+	//   → quick 的 PLAN 工具集是 [只读 + mission_criterion]
+	//   → freezeQuickCriterion 的守卫是 phase !== "plan",此刻正好放行
+	//   → 刚被这条判据判失败的执行者,把判据换了一条。
+	let s = toDo("quick");
+	s = transition(s, { type: "SUBMIT", at: AT }).state;
+	s = transition(s, { type: "VERDICT", at: AT, verdict: failed("sig-q") }).state;
+	assert.equal(s.phase, "act", "quick 第一次失败先进 ACT 诊断一轮");
+
+	const r = transition(s, { type: "ESCALATE", at: AT, to: 2, reason: "方案不对" });
+	assert.ok(r.error, "quick 的 ESCALATE 必须被拒");
+	assert.equal(r.state.phase, "act", "被拒时状态不动");
+	assert.equal(r.state.escalation.level, 1, "升级级别也不许动");
+	assert.equal(r.effects.length, 0, "拒绝不产生任何 effect —— 别把换脑挂起来");
+
+	// L3 同样不行:它的落点是 DEFINE,而 quick 的提问额度是 0,
+	// 走完 DEFINE 回到的还是那个只有 mission_criterion 的 PLAN。
+	assert.ok(transition(s, { type: "ESCALATE", at: AT, to: 3, reason: "问题定义不对" }).error);
+});
+
+test("standard/complex 的手动升级不受影响 —— 拦的是 quick,不是这条逃生口", () => {
+	for (const tier of ["standard", "complex"] as const) {
+		let s = toDo(tier);
+		s = transition(s, { type: "SUBMIT", at: AT }).state;
+		s = transition(s, { type: "VERDICT", at: AT, verdict: failed("sig-y") }).state;
+		const r = transition(s, { type: "ESCALATE", at: AT, to: 2, reason: "方案错误" });
+		assert.ok(!r.error, tier);
+		assert.equal(r.state.phase, "plan", tier);
+	}
+});
+
 test("裁判不可用首轮即停机 —— 拿同一个坏裁判再空转两轮毫无意义", () => {
 	const s = toCheck();
 	const r = transition(s, {

@@ -429,6 +429,18 @@ export function transition(state: MissionState, event: MissionEvent): Transition
 			if (state.phase !== "act" && state.phase !== "do") {
 				return reject(state, "ESCALATE 只能在 do 或 act 相位");
 			}
+			// quick 没有可升的级。L2 回 PLAN,而 quick 在 PLAN 只有 mission_criterion ——
+			// 于是"升级方案"实际执行成了**重写判据**,由刚刚被这条判据判失败的执行者来写。
+			// (freezeQuickCriterion 的守卫是 phase !== "plan",升级之后正好放行。)
+			// 闸门已经不发这个工具,这里是最后一道:闸门是粗粒度的,状态机才是裁判。
+			// quick 的正确出口是自动升档,不需要任何人调用工具。
+			if (state.tier === "quick") {
+				return reject(
+					state,
+					"quick 档不能手动升级:它没有可改的方案,回 PLAN 只能重写判据,而那是提交后修改判定标准。" +
+						"这一档失败一次就会自动升档 standard(回 PLAN 把判据摊开成冻结 AC + verify.sh),不需要你做任何事。",
+				);
+			}
 			const taskId = state.currentTask;
 			if (!taskId) return reject(state, "无当前任务");
 			if (event.to <= state.escalation.level) {

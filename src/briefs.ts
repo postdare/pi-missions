@@ -18,6 +18,49 @@ export const QUICK_JUDGE_LABEL: Record<QuickCriterion["judge"], string> = {
 	command: "命令退出码",
 };
 
+/**
+ * State Card 的验收标准段。
+ *
+ * 这一段在**每个相位**都渲染,所以每条占位文案都必须对当前相位成立 ——
+ * 尤其不能提该相位拿不到的工具。踩过两次:
+ *   · DEFINE 相位印"本相位的产出就是可执行的 AC,由 mission_write_plan 提交" ——
+ *     两句都错:AC 是下一相位的产出,而 DEFINE 的工具集里没有 mission_write_plan。
+ *     define.md 正好反着写("在这里写 AC 是 PLAN 的活"),卡片每轮打自己一次脸。
+ *   · quick 判据缺失时印"先调用 mission_criterion" —— 只有 PLAN 拿得到那个工具。
+ */
+function renderAcBlock(
+	plan: MissionPlan,
+	state: MissionState,
+	dirName: string,
+	generation: number | undefined,
+	quickCriterion?: QuickCriterion | null,
+): string {
+	if (plan.acceptanceCriteria.length > 0) {
+		return plan.acceptanceCriteria
+			.map(
+				(c) =>
+					`  - ${c.id}: ./${dirName}/state/${state.missionId}/generations/${generation ?? "<generation>"}/verify.sh ${c.verify} 退出码 0 —— ${c.text}`,
+			)
+			.join("\n");
+	}
+	if (plan.tier === "quick") {
+		// 必须印出**真实的判据和裁判**。曾经这里写死一句"判定依据是 --verify 冻结的
+		// 那条命令",于是 planner 读到的是"没有冻结的 AC",转头就准备自己造一套 ——
+		// 判定标准在卡片上隐形,等于 I2(执行期只读)在模型眼里根本不存在。
+		if (quickCriterion) {
+			return `  quick: ${quickCriterion.text}\n  核对方: ${QUICK_JUDGE_LABEL[quickCriterion.judge]}`;
+		}
+		// 判据缺失只在 PLAN 是正常状态(还没定);别处出现是状态坏了,
+		// 这时指路一个模型看不见的工具,只会让它撞几轮闸门然后自己拟一条继续做。
+		return state.phase === "plan"
+			? "  (quick 档判据尚未冻结:先调用 mission_criterion 定一条,之后才解锁写工具)"
+			: "  (quick 档判据缺失 —— 这不该发生。请 /mission abort 后重开,不要自己拟一条继续做)";
+	}
+	return state.phase === "define"
+		? "  (还没有 AC:先把问题定义清楚,AC 是下一相位 PLAN 的产出)"
+		: "  (尚未冻结:本相位的产出就是可执行的 AC,由 mission_write_plan 提交)";
+}
+
 export function renderStateCard(
 	plan: MissionPlan,
 	state: MissionState,
@@ -27,22 +70,7 @@ export function renderStateCard(
 ): string {
 	const task = state.currentTask ? findTask(plan, state.currentTask) : undefined;
 	const t = state.currentTask ? state.tasks[state.currentTask] : undefined;
-	const acs =
-		plan.acceptanceCriteria.length > 0
-			? plan.acceptanceCriteria
-					.map(
-						(c) =>
-							`  - ${c.id}: ./${dirName}/state/${state.missionId}/generations/${generation ?? "<generation>"}/verify.sh ${c.verify} 退出码 0 —— ${c.text}`,
-					)
-					.join("\n")
-			: plan.tier === "quick"
-				? // 必须印出**真实的判据和裁判**。曾经这里写死一句"判定依据是 --verify 冻结的
-					// 那条命令",于是 planner 读到的是"没有冻结的 AC",转头就准备自己造一套 ——
-					// 判定标准在卡片上隐形,等于 I2(执行期只读)在模型眼里根本不存在。
-					quickCriterion
-					? `  quick: ${quickCriterion.text}\n  核对方: ${QUICK_JUDGE_LABEL[quickCriterion.judge]}`
-					: "  (quick 档判据尚未冻结:先调用 mission_criterion 定一条,之后才解锁写工具)"
-				: "  (尚未冻结:本相位的产出就是可执行的 AC,由 mission_write_plan 提交)";
+	const acs = renderAcBlock(plan, state, dirName, generation, quickCriterion);
 	const lines = [
 		`[MISSION] ${state.missionId} · ${state.tier} · phase=${state.phase}` +
 			(state.currentTask ? ` · task=${state.currentTask} · attempt=${t?.attempts ?? 0}` : ""),
@@ -128,14 +156,18 @@ export function renderDoBrief(plan: MissionPlan, state: MissionState, spikeRepor
 	}
 	if (t?.awaitingEvidence) {
 		const acList = t.awaitingEvidence.acIds.length > 0 ? ` (涉及 AC: ${t.awaitingEvidence.acIds.join(", ")})` : "";
+		// 这里**不要**指路 mission_escalate:DO 的工具集是 [内置工具 + mission_submit]
+		// (toolsForPhase("do")),里面没有它。原文案让执行者去调一个它看不见的工具,
+		// 而且恰好是在它最需要出口的时候 —— 无结论不进 ACT,只回 DO。
 		return [
 			`[pi-missions] 回到 DO:${state.currentTask} —— 上一轮判定因「${t.awaitingEvidence.reason}」无结论${acList}。`,
-			"本系统已启用补证据闸门:在工作区有实际改动前,原样重交将被直接拦截。",
-			"请按以下指引补全证据后重试:",
-			"1. 为对应 verify 分支补充能够跑出明确结论的机械断言,或完善实现使只读验证者可核验;",
-			"2. 重交前请在终端自测对应 verify 分支,确认其已能产出确定结果;",
-			"3. 若缺少证据是因计划分解/AC 分配有误(如对应分支应由后续任务负责),请调用 mission_escalate 升级方案,切勿盲目硬改。",
-			"补充证据后调用 mission_submit 重新判定。",
+			"无结论不是失败:不计尝试次数,但也换不来通过 —— 判定拿不到能说话的证据。",
+			"工作区没有实际改动时原样重交会被直接拦下,所以先做下面这件事再提交:",
+			"1. 给对应 verify 分支补一条能跑出明确结论的机械断言;或者把实现补完整,让只读验证者核得动;",
+			"2. 提交前自己先跑一遍那个分支,确认它现在能给出确定的红或绿。",
+			"如果这条判据根本不该由当前任务负责(比如它验的是后续任务的产出),不要硬凑一个绿 ——",
+			"把这个判断明确写出来,连续 3 轮无结论系统会停机等人,那时你写下的理由就是人要看的东西。",
+			"补好证据后调用 mission_submit 重新判定。",
 		].join("\n");
 	}
 	const lines = [`[pi-missions] 进入 DO:${state.currentTask} ${task?.title ?? ""}(第 ${t?.attempts ?? 1} 次尝试)`];
@@ -146,10 +178,17 @@ export function renderDoBrief(plan: MissionPlan, state: MissionState, spikeRepor
 
 export function renderActBrief(plan: MissionPlan, state: MissionState): string {
 	const t = state.currentTask ? state.tasks[state.currentTask] : undefined;
+	// quick 的 ACT 工具集里没有 mission_escalate(toolsForPhase("act", "quick")),
+	// 它的出口是自动升档回 PLAN。对它说"或调用 mission_escalate"是指一个看不见的工具,
+	// 而且把出口说反了 —— 升档是把判定收严,不是换个级别接着修。
+	const exit =
+		state.tier === "quick"
+			? "这一轮之后系统会自动升档 standard 并带着你的诊断回 PLAN 重写计划(判据会摊开成冻结 AC + verify.sh),你不需要调用任何工具。"
+			: "分析失败性质并给出下一轮的修法(实现问题),或调用 mission_escalate 升级(方案/问题定义问题)。";
 	return [
 		`[pi-missions] 进入 ACT:${state.currentTask} 第 ${t?.attempts ?? "?"} 次尝试验证失败。`,
-		`失败:${t?.lastFailureReason ?? "见 LOG.md"}`,
-		"分析失败性质并给出下一轮的修法(实现问题),或调用 mission_escalate 升级(方案/问题定义问题)。你只有这一轮,不能写代码。",
+		`失败:${t?.lastFailureReason ?? (state.tier === "quick" ? "见上一轮判定" : "见 LOG.md")}`,
+		`${exit}你只有这一轮,不能写代码。`,
 	].join("\n");
 }
 
@@ -164,7 +203,12 @@ export function renderHandoffBrief(
 	return [
 		renderStateCard(plan, state, dirName, generation, quickCriterion),
 		"",
-		`工作流规则见 ${dirName}/README.md;当前相位规则见 ${dirName}/phases/${state.phase}.md。`,
+		// 同 LOG.md 那条:quick 不铺脚手架,`missions/README.md` 与 `phases/<phase>.md`
+		// 都不存在。指着不存在的文件让新会话去读,换来的是几轮 ls/cat 白跑 ——
+		// 而这一档的相位规则本来就每轮注入在系统提示里(QUICK_PHASE_RULES),不必去找。
+		inMemory
+			? "当前相位的规则已经在系统提示里,这一档不铺 missions/ 脚手架 —— 没有 README.md,也没有 phases/,别去找。"
+			: `工作流规则见 ${dirName}/README.md;当前相位规则见 ${dirName}/phases/${state.phase}.md。`,
 		state.phase === "plan"
 			? inMemory
 				? // quick 不落盘:没有 LOG.md 可读。指着一个不存在的文件让人去读,

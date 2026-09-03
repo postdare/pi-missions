@@ -86,9 +86,23 @@ test("quick 的 DO 不能让人去跑 verify.sh —— 只允许出现在「没�
 	assert.ok(QUICK_PHASE_RULES.do.includes("mission_submit"));
 });
 
-test("quick 的 ACT 明确劝阻 mission_escalate —— quick 的 L2 落点是空的", () => {
-	assert.ok(/不要调用 `mission_escalate`/.test(QUICK_PHASE_RULES.act));
+test("quick 的 ACT 说清没有 mission_escalate —— 这一档的 L2 落点是空的", () => {
+	// 原来这里写的是"不要调用 mission_escalate …… 系统会拦",而系统当时并不拦
+	// (toolsForPhase("act") 不分档、ESCALATE handler 也没有 tier 判据)。
+	// 现在闸门与状态机双层封死了,提示词只需如实说"没有",不再声称任何拦截。
+	assert.ok(!toolsForPhase("act", "quick").includes("mission_escalate"), "闸门必须先真的不发这个工具");
+	assert.ok(/没有.*`mission_escalate`/.test(QUICK_PHASE_RULES.act), "要明说这一档没有它");
 	assert.ok(!/LOG\.md/.test(QUICK_PHASE_RULES.act), "quick 不落盘,没有 LOG.md 可读");
+});
+
+test("quick 的 ACT 必须说对升档落点 —— 它是回 PLAN 重写计划,不是原地放宽阈值", () => {
+	// promoteFromQuick():phase="plan" + PERSIST_PLAN + HANDOFF。
+	// 旧文案写的是"判据不变、任务不变,变的是重试额度和熔断阈值放宽" ——
+	// 那是这条路被修好之前的行为,而且恰好说反了:升档是把判定收严。
+	const act = QUICK_PHASE_RULES.act;
+	assert.ok(/回到? ?PLAN/.test(act), "要说清落点是 PLAN");
+	assert.ok(!/阈值放宽|判据不变/.test(act), "不能再说成原地放宽阈值");
+	assert.ok(/更严|收严/.test(act), "要说清判定是变严的,否则模型会把升档当成解脱");
 });
 
 // ─────────────────────── 选取 + 读盘(事故现场) ───────────────────────

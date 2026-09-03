@@ -9,7 +9,7 @@
 3. 设计**验收标准(AC)**:每条 AC 必须映射到当前 mission 独立 verify.sh 的一个分支,能跑出退出码;并且必须声明 `covers`(它覆盖哪几条完成条件)。写不成可执行命令的 AC,说明任务没想清楚 —— 继续拆或缩小目标。
 4. 把目标分解为**有依赖顺序的任务列表**,每个任务标注它要通过哪些 verify 分支。
 5. 起草 verify.sh:每个分支一次确定的验证(编译/单测/契约比对/lint)。脚本要幂等、可重复跑。
-6. 调用 `mission_write_plan` 一次性原子提交:MISSION.md 内容 + verify.sh 内容。之后人会在**计划评审页**逐段读它,批准才冻结。
+6. 调用 `mission_write_plan` 一次性原子提交:方案 + 验收标准 + 任务分解 + verify.sh 全文(参数就是 `goal` / `approach` / `acceptanceCriteria` / `milestones` / `verifyScript`,**不要自己写 MISSION.md** —— 那是系统按这些参数生成的投影)。之后人会在**计划评审页**逐段读它,批准才冻结。
 
 ## 方案(approach)—— complex 必填
 
