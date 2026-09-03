@@ -119,10 +119,9 @@ export function renderStateCard(
 				`提问轮次已用完(${asked}/${cap}):根据已有回答调用 mission_define;仍不足以定义就说明缺什么,由人重新描述。`,
 			);
 		} else {
-			lines.push(
-				`先定义问题:读代码,必要时 mission_ask 提问(已用 ${asked}/${cap} 轮,每轮最多 3 个,每个问题必须带推荐答案)。` +
-					"不要写代码或设计方案。",
-			);
+			// 只报**此刻的状态**,不复述闸门规则 —— 那些在 mission_ask 的工具说明里,
+			// 模型决定调用时正好看得到。卡片每轮都注入,复述规则是纯开销。
+			lines.push(`提问轮次:已用 ${asked}/${cap}(闸门细则见 mission_ask 的工具说明)。`);
 			if (asked > 0 && state.defineSettled.length > 0) {
 				lines.push(`已落定:${state.defineSettled.join(" · ")} —— 再问一轮必须让这个清单变长。`);
 			}

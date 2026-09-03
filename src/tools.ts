@@ -281,7 +281,12 @@ export function registerMissionTools(pi: any, getRuntime: GetRuntime): void {
 				minItems: 1,
 				description: "standard 档放单个里程碑即可;complex 档按里程碑拆分",
 			}),
-			verifyScript: Type.String({ description: "当前 mission 独立 verify.sh 的完整内容,含所有 AC 引用的分支" }),
+			verifyScript: Type.String({
+				description:
+					"当前 mission 独立 verify.sh 的完整内容,含所有 AC 引用的分支。" +
+					"每个分支做一次确定的验证(编译/单测/契约比对/lint),要**幂等、可重复跑** —— " +
+					"同一个检出上跑两次必须给同样的退出码,否则红绿本身就不可信。",
+			}),
 		}),
 		async execute(_id: string, params: any, _signal: any, _onUpdate: any, ctx: any) {
 			const r = await getRuntime(ctx).writePlan(ctx, params);
