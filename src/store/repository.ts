@@ -76,7 +76,16 @@ export class MissionRepository {
 		this.layout = layout;
 	}
 
-	create(plan: MissionPlan, state: MissionState): MissionSnapshotV2 {
+	/**
+	 * 首次落盘。
+	 *
+	 * `handoff` 必须由调用方传进来:quick 升档 standard 时,pendingHandoff 与 handoff
+	 * record 是同一次 applyEvent 里生成的,而 record 只在内存。这里若硬写 null,磁盘上
+	 * 就留下一个"pendingHandoff 有值、handoff 为 null"的快照 —— 当场 /mission next
+	 * 还能用(读内存),换个会话重附着就变成"换脑状态损坏:缺少 handoff token",
+	 * 而换脑本身就是开新会话,于是这条路必然卡死(真实事故)。
+	 */
+	create(plan: MissionPlan, state: MissionState, handoff: HandoffRecord | null = null): MissionSnapshotV2 {
 		this.assertIdentity(plan.missionId, plan, state);
 		const sp = statePaths(this.layout, plan.missionId);
 		if (fs.existsSync(sp.snapshotJson)) throw new Error(`mission 已存在:${plan.missionId}`);
@@ -90,7 +99,7 @@ export class MissionRepository {
 			plan,
 			state,
 			artifacts: staged.artifacts,
-			handoff: null,
+			handoff,
 		};
 		this.writeSnapshot(snapshot);
 		this.setCurrent(snapshot);
@@ -245,7 +254,13 @@ export class MissionRepository {
 		} catch {
 			return [];
 		}
-		return dirs.filter((d) => d.isDirectory() && MISSION_ID_RE.test(d.name)).map((d) => this.load(d.name));
+		// 没有 SNAPSHOT.json 的目录不是"损坏的 mission",它根本就不是 mission ——
+		// quick 档(inMemory)留下的日志目录、人手工建的目录都长这样。
+		// 把它们当损坏项报错,只会在每次开面板时弹一条谁也修不了的红字。
+		return dirs
+			.filter((d) => d.isDirectory() && MISSION_ID_RE.test(d.name))
+			.filter((d) => fs.existsSync(statePaths(this.layout, d.name).snapshotJson))
+			.map((d) => this.load(d.name));
 	}
 
 	generationMissionMd(snapshot: MissionSnapshotV2): string {

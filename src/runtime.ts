@@ -160,6 +160,7 @@ export class Runtime {
 		const git = await isGitRepo(this.exec, this.cwd);
 		if (git) this.ensureStateExcludes();
 
+		goal = sanitizeGoal(goal);
 		const id = `${new Date().toISOString().slice(0, 10)}-${slugify(goal)}`;
 		const plan: MissionPlan = {
 			missionId: id,
@@ -213,6 +214,7 @@ export class Runtime {
 	): Promise<{ id: string; tier: "quick" } | { error: string }> {
 		if (this.busy()) return { error: "已有进行中的 mission,先 /mission abort" };
 
+		task = sanitizeGoal(task);
 		const id = `quick-${Date.now().toString(36)}`;
 		const plan: MissionPlan = {
 			missionId: id,
@@ -540,7 +542,9 @@ export class Runtime {
 	private async persistPlanFiles(): Promise<void> {
 		const a = this.active!;
 		ensureScaffold(this.layout);
-		const snapshot = this.repository.create(a.plan, a.state);
+		// handoff 必须一起写:quick 升档时 pendingHandoff 与 record 同一次事件生成,
+		// 而这里是它第一次落盘的机会。丢了就等于把换脑的钥匙锁在内存里(见 repository.create)。
+		const snapshot = this.repository.create(a.plan, a.state, a.handoff);
 		a.inMemory = false;
 		this.applySnapshotMetadata(snapshot);
 		if (a.git) this.ensureStateExcludes();
@@ -762,8 +766,24 @@ export class Runtime {
 				this.suppressHandoffFollowUp = false;
 			}
 		}
+		// record 丢了不是死路:token 只用于新会话落地时的一次握手校验,
+		// 它不需要跨会话保持不变,重新签一张即可。丢失的正常途径就有好几条 ——
+		// pi 重启/reload 重建扩展实例、旧版本写下的 handoff=null 快照。
+		// 在这里报"状态损坏"等于把人钉死在一个只能 abort 的 mission 上(真实事故)。
+		if (!a.handoff) {
+			a.handoff = {
+				token: crypto.randomUUID(),
+				parentSession: safeSessionFile(ctx),
+				requestedRevision: a.revision + 1,
+				reason: a.state.pendingHandoff ?? "人工主动换脑",
+			};
+			const persistError = await this.persist();
+			if (persistError) return { error: `重签 handoff token 失败:${persistError}` };
+			if (!a.inMemory) {
+				appendLog(statePaths(this.layout, a.state.missionId).logMd, "HANDOFF token 缺失,已重签");
+			}
+		}
 		const record = a.handoff;
-		if (!record) return { error: "换脑状态损坏:缺少 handoff token" };
 		const brief = renderHandoffBrief(
 			a.plan,
 			{ ...a.state, pendingHandoff: null },
@@ -1295,7 +1315,10 @@ export class Runtime {
 
 	warn(ctx: any, msg: string): void {
 		ctx.ui.notify(msg, "warning");
-		if (this.active) appendLog(statePaths(this.layout, this.active.state.missionId).logMd, `WARN ${msg}`);
+		// quick 档无盘可落(Q18)。写了反而糟:建出一个只有 LOG.md 的目录,
+		// 之后每次开 /missions 都被当成"损坏的 mission"报一次红字。
+		const a = this.active;
+		if (a && !a.inMemory) appendLog(statePaths(this.layout, a.state.missionId).logMd, `WARN ${msg}`);
 	}
 
 	refreshWidget(ctx: any): void {
@@ -1334,6 +1357,30 @@ export class Runtime {
 
 // renderStateCard / renderDoBrief / renderActBrief / renderHandoffBrief
 // 已提取到 src/briefs.ts —— 纯函数,不依赖 Runtime 实例。
+
+/**
+ * 粘贴进来的图片会在目标里留下一条临时路径。
+ *
+ * pi 处理剪贴板图片的方式是先落一个临时文件,再把**绝对路径**当文本塞进消息头部,
+ * 于是 `/mission quick` 收到的目标长这样:
+ *   `/var/folders/…/T/pi-clipboard-<uuid>.png 如图 在 light 主题下,这个按钮有点扎眼`
+ * 这条路径会一路复制进 mission id、milestone 标题、任务标题和换脑简报,而它指向的
+ * 文件几小时后就被系统清掉了 —— 留下一个谁也看不懂的任务名(真实事故)。
+ *
+ * 只认 pi 自己的剪贴板文件名,不动用户真正提到的路径:换成 `[图片]` 而不是直接删,
+ * 后面那句"如图"才有指代。
+ */
+// 文件名必须是 pi 生成的那种 `pi-clipboard-<uuid>.<图片扩展名>`。
+// 只匹配 `pi-clipboard-*` 会误伤仓库里真实存在的 docs/pi-clipboard-guide.png。
+const CLIPBOARD_IMAGE_PATH =
+	/(?:^|(?<=\s))\S*[/\\]pi-clipboard-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\.(?:png|jpe?g|gif|webp|bmp)(?=\s|$)/gi;
+
+export function sanitizeGoal(goal: string): string {
+	return goal
+		.replace(CLIPBOARD_IMAGE_PATH, "[图片]")
+		.replace(/\s+/g, " ")
+		.trim();
+}
 
 function slugify(goal: string): string {
 	const ascii = goal

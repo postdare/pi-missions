@@ -1649,3 +1649,103 @@ test("quick 人工连判两次不行:升档 standard 并落盘,失败历史不�
 	assert.ok(tools.includes("mission_write_plan"), tools.join(","));
 	assert.ok(!tools.includes("mission_criterion"), "已经不是 quick 了,别再让它改判据");
 });
+
+// ─────────────── 换脑钥匙别锁在内存里(真实事故) ───────────────
+
+test("quick 升档:pendingHandoff 与 handoff record 必须一起落盘", async () => {
+	// 事故:PERSIST_PLAN 首次落盘走 repository.create,它把 handoff 硬写成 null,
+	// 于是磁盘上留下"pendingHandoff 有值、handoff 为 null"。当场 /mission next 还能用
+	// (读的是内存),而换脑本身就是开新会话 —— 新实例从磁盘重附着,钥匙没了,
+	// 报"换脑状态损坏:缺少 handoff token",这个 mission 从此只能 abort。
+	const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "pi-missions-smoke-"));
+	const pi = mockPi();
+	const ctx = mockCtx(tmp, { select: "不通过", input: "没看出变化" });
+	const rt = new Runtime(pi, tmp);
+	await rt.startQuick(ctx, "调整小组件在卡片里的排布", {
+		judge: "human",
+		text: "大档卡片里预览完整可见",
+	});
+	await rt.applyEvent({ type: "SUBMIT", at: Date.now() }, ctx);
+	await rt.runCheck(ctx);
+	await rt.onAgentSettled(ctx);
+
+	const id = rt.active!.state.missionId;
+	assert.ok(rt.active!.state.pendingHandoff, "升档必须挂换脑");
+	const saved = rt.repository.load(id);
+	assert.ok(saved.ok, saved.ok ? "" : saved.error);
+	if (saved.ok) {
+		assert.ok(saved.snapshot.state.pendingHandoff, "pendingHandoff 落盘了");
+		assert.ok(saved.snapshot.handoff, "handoff record 也必须落盘,否则换脑后就找不回来了");
+		assert.equal(saved.snapshot.handoff!.token, rt.active!.handoff!.token);
+	}
+
+	// 模拟换脑后的新实例:从磁盘重附着,/mission next 仍然可用
+	const rt2 = new Runtime(mockPi(), tmp);
+	const ctx2 = mockCtx(tmp) as any;
+	assert.equal(await rt2.ensureAttached(ctx2), true);
+	assert.ok(rt2.active!.handoff, "重附着后钥匙还在");
+
+	fs.rmSync(tmp, { recursive: true, force: true });
+});
+
+test("/mission next:record 丢了就重签一张,而不是把人钉死在'状态损坏'上", async () => {
+	const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "pi-missions-smoke-"));
+	const pi = mockPi();
+	const ctx = mockCtx(tmp) as any;
+	const rt = new Runtime(pi, tmp);
+	await rt.startNew(ctx, "验证换脑自愈", "standard");
+	await rt.applyEvent({ type: "HANDOFF_REQUEST", at: Date.now(), reason: "人工主动换脑" }, ctx);
+
+	// 旧版本写下的快照就长这样:pendingHandoff 有值、handoff 为 null
+	rt.active!.handoff = null;
+	let marker: any = null;
+	ctx.newSession = async (opts: any) => {
+		await opts.setup({
+			appendCustomEntry: (type: string, data: unknown) => {
+				marker = { type, data };
+			},
+			appendMessage: () => {},
+		});
+		return { cancelled: false };
+	};
+
+	assert.deepEqual(await rt.handoff(ctx), { ok: true });
+	assert.ok(rt.active!.handoff, "应当重签而不是报错");
+	assert.equal(marker.data.token, rt.active!.handoff!.token);
+	const saved = rt.repository.load(rt.active!.state.missionId);
+	assert.ok(saved.ok && saved.snapshot.handoff, "重签的 token 要落盘,否则下个会话又对不上");
+
+	fs.rmSync(tmp, { recursive: true, force: true });
+});
+
+test("quick 档的告警不落盘 —— 别留下一个只有 LOG.md 的孤儿目录", async () => {
+	// 那个目录会被 /missions 的列表当成"损坏的 mission",每次开面板报一条谁也修不了的红字
+	const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "pi-missions-smoke-"));
+	const rt = new Runtime(mockPi(), tmp);
+	const ctx = mockCtx(tmp);
+	await rt.startQuick(ctx, "调整小组件排布");
+	rt.warn(ctx, "独立核验降级为 hard-only:provider 400");
+
+	const id = rt.active!.state.missionId;
+	assert.ok(!fs.existsSync(path.join(tmp, "missions", "state", id)), "quick 档无盘可落");
+	assert.equal(rt.repository.list().length, 0);
+
+	fs.rmSync(tmp, { recursive: true, force: true });
+});
+
+test("sanitizeGoal:粘贴图片留下的临时路径不进 mission 目标", async () => {
+	const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "pi-missions-smoke-"));
+	const rt = new Runtime(mockPi(), tmp);
+	const ctx = mockCtx(tmp);
+	const pasted =
+		"/var/folders/md/vm6y702n757/T/pi-clipboard-da324e01-0ec2-49f0-a358-5ae7d55d162a.png " +
+		"如图 在 light 主题下这个按钮有点扎眼";
+	await rt.startQuick(ctx, pasted);
+
+	const plan = rt.active!.plan;
+	assert.ok(!plan.goal.includes("pi-clipboard"), plan.goal);
+	assert.ok(!plan.milestones[0].tasks[0].title.includes("/var/folders"), "任务标题也不能带路径");
+	assert.match(plan.goal, /^\[图片\] 如图/);
+
+	fs.rmSync(tmp, { recursive: true, force: true });
+});

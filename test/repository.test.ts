@@ -186,3 +186,41 @@ test("v2 repository:普通 commit 不重写 CURRENT，activate 才更新定位�
 	assert.ok(activated.ok, activated.error);
 	assert.equal(JSON.parse(fs.readFileSync(pointer, "utf8")).revision, 2);
 });
+
+test("v2 repository:create 保留传入的 handoff —— 硬写 null 会把换脑的钥匙锁在内存里", () => {
+	const { repo, missionId, plan, state, tmp } = fixture();
+	const record = {
+		token: "tok-1",
+		parentSession: "/sessions/a.jsonl",
+		requestedRevision: 2,
+		reason: "promote quick→standard on T1",
+	};
+	repo.create(plan, { ...state, pendingHandoff: record.reason }, record);
+	const onDisk = JSON.parse(
+		fs.readFileSync(path.join(tmp, "missions", "state", missionId, "SNAPSHOT.json"), "utf8"),
+	);
+	assert.equal(onDisk.state.pendingHandoff, record.reason);
+	assert.deepEqual(onDisk.handoff, record, "pendingHandoff 与 handoff record 必须同生共死");
+	const loaded = repo.load(missionId);
+	assert.ok(loaded.ok);
+	if (loaded.ok) assert.equal(loaded.snapshot.handoff?.token, "tok-1");
+});
+
+test("v2 repository:list 跳过没有 SNAPSHOT.json 的目录,而不是报成损坏项", () => {
+	const { repo, missionId, plan, state, tmp } = fixture();
+	repo.create(plan, state);
+	// quick 档(inMemory)曾经在这里留下过只有 LOG.md 的孤儿目录
+	const orphan = path.join(tmp, "missions", "state", "quick-mtkybh0p");
+	fs.mkdirSync(orphan, { recursive: true });
+	fs.writeFileSync(path.join(orphan, "LOG.md"), "WARN 独立核验降级为 hard-only\n");
+
+	const all = repo.list();
+	assert.equal(all.length, 1, "孤儿目录不该出现在列表里");
+	assert.ok(all[0].ok && all[0].snapshot.missionId === missionId);
+
+	// 真正损坏的(有 SNAPSHOT.json 但内容不合法)仍要报出来
+	fs.writeFileSync(path.join(orphan, "SNAPSHOT.json"), "{ not json");
+	const withCorrupt = repo.list();
+	assert.equal(withCorrupt.length, 2);
+	assert.ok(withCorrupt.some((r) => !r.ok));
+});
