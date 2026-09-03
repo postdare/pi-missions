@@ -16,7 +16,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ## 命令
 
 ```bash
-npm test                                           # 全部:core 单测 + runtime/UI 冒烟(365 个)
+npm test                                           # 全部:core 单测 + runtime/UI 冒烟(364 个)
 node --test src/core/__tests__/breaker.test.ts     # 单个文件
 node --test --test-name-pattern="熔断" src/core/__tests__/breaker.test.ts   # 单个用例(名字是中文)
 npx tsc --noEmit                                   # 类型检查(tsconfig 只 include src/)
@@ -53,6 +53,8 @@ PI_TUI_WRITE_LOG=/tmp/tui.log pi -e .          # 捕获写往 stdout 的原始 A
 
 手工跑扩展:在**目标仓库**里 `pi -e /absolute/path/to/pi-missions`(临时装载,不落设置),
 然后 `/missions` / `/mission new "…"`。别在本仓库里跑 mission —— 它会往这里铺 `missions/` 脚手架。
+`missions/` 已进 `.gitignore`(曾经有一份被误提交,导致相位提示词在仓库里有两份拷贝),
+所以真跑了也不会污染版本控制;但那份脚手架仍会盖在工作区里,**提示词的唯一副本在 `templates/`**。
 
 ## 分层与硬约束
 

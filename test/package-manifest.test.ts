@@ -60,32 +60,3 @@ test("skill 能被 pi 的加载器识别:有 SKILL.md,name/description 合法", 
 		"skill 必须对模型可见 —— 它的全部作用就是让模型自己判断该不该开 mission",
 	);
 });
-
-/**
- * 本仓库根目录下的 `missions/` 是**跑过一次 mission 留下的脚手架**(CLAUDE.md 明说别在
- * 这里跑,但它已经进了 git)。于是同一份提示词在仓库里存在两份拷贝:
- * `templates/phases/*.md` 是分发给用户的模板,`missions/phases/*.md` 是那次运行铺下的。
- *
- * 两份逐字节相同,却没有任何东西卡着 —— 改了 templates 忘了同步(或反过来),
- * 不会有人发现,而下一个在这个仓库里读提示词的人可能读的是过期的那份。
- * 在这个目录还留在 git 里的期间,这条测试就是它们唯一的绑带。
- */
-test("templates/ 与仓库里的 missions/ 脚手架不能漂 —— 同一份提示词有两份拷贝", () => {
-	const pairs: Array<[string, string]> = [
-		["templates/missions-README.md", "missions/README.md"],
-		...["define", "plan", "do", "check", "act"].map(
-			(phase) => [`templates/phases/${phase}.md`, `missions/phases/${phase}.md`] as [string, string],
-		),
-	];
-	for (const [template, scaffolded] of pairs) {
-		const a = join(root, template);
-		const b = join(root, scaffolded);
-		// 脚手架不在(干净检出)就不比 —— 这条测试只在两份都存在时才有意义
-		if (!existsSync(a) || !existsSync(b)) continue;
-		assert.equal(
-			readFileSync(b, "utf-8"),
-			readFileSync(a, "utf-8"),
-			`${scaffolded} 与 ${template} 已经漂了。改提示词要两份一起改(或者把 missions/ 从 git 里拿掉)`,
-		);
-	}
-});

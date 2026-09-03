@@ -1,3 +1,8 @@
 node_modules/
 package-lock.json
 files.zip
+
+# 本仓库是 pi-missions 的源码,不是它的使用现场。
+# 在这里跑 mission 会铺出 missions/ 脚手架与状态件(CLAUDE.md 也明说别这么干)——
+# 曾经有一份被误提交进来,导致同一份相位提示词在仓库里有两份拷贝、无人卡着。
+missions/
