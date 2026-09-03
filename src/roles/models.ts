@@ -149,21 +149,66 @@ export interface SavedProfile {
 	provider?: string;
 	modelId?: string;
 	thinking: string;
+	/**
+	 * mission 开始时活跃的工具名。**工具集也是"用户现场"的一部分。**
+	 *
+	 * 相位切换用 setActiveTools 把工具集改写成白名单(toolsForPhase),而白名单里
+	 * 只有 pi 内置工具 + 本扩展的 mission 工具 —— 用户装的第三方扩展(subagent、
+	 * todo、MCP 桥接……)注册的工具会在 mission 开始的那一刻被全部摘掉。
+	 * 不在这里记一份,RESTORE 就还不回去,用户得重开会话才能拿回自己的工具。
+	 *
+	 * `undefined` = 没记到(旧 profile.json、或替身 pi 没有 getActiveTools),
+	 * 此时 RESTORE 回落到内置全集;`[]` 是合法值(`--no-tools`),必须与前者区分。
+	 * 跨会话接力时名字可能已经失效(扩展被卸载),不必自己过滤:
+	 * pi 的 setActiveTools 明确"忽略未知工具名"。
+	 */
+	tools?: string[];
 }
 
 /** mission 开始时记录用户现场,RESTORE 时还原 */
 export function saveProfile(pi: any, ctx: any): SavedProfile {
 	const m = ctx.model as { provider?: string; id?: string } | undefined;
-	return { model: m, provider: m?.provider, modelId: m?.id, thinking: pi.getThinkingLevel() };
+	return {
+		model: m,
+		provider: m?.provider,
+		modelId: m?.id,
+		thinking: pi.getThinkingLevel(),
+		tools: activeToolsOf(pi),
+	};
+}
+
+/** 拿不到就返回 undefined(见 SavedProfile.tools):记不到不是错,还错才是错 */
+function activeToolsOf(pi: any): string[] | undefined {
+	try {
+		const tools = pi.getActiveTools?.();
+		return Array.isArray(tools) ? [...tools] : undefined;
+	} catch {
+		return undefined;
+	}
 }
 
 /** 可持久化形态(进 STATE 同级的 profile.json,Model 对象不可序列化) */
-export function profileToJson(p: SavedProfile): { provider?: string; modelId?: string; thinking: string } {
-	return { provider: p.provider, modelId: p.modelId, thinking: p.thinking };
+export function profileToJson(p: SavedProfile): {
+	provider?: string;
+	modelId?: string;
+	thinking: string;
+	tools?: string[];
+} {
+	return { provider: p.provider, modelId: p.modelId, thinking: p.thinking, tools: p.tools };
 }
 
-export function profileFromJson(j: { provider?: string; modelId?: string; thinking?: string }): SavedProfile {
-	return { provider: j.provider, modelId: j.modelId, thinking: j.thinking ?? "medium" };
+export function profileFromJson(j: {
+	provider?: string;
+	modelId?: string;
+	thinking?: string;
+	tools?: string[];
+}): SavedProfile {
+	return {
+		provider: j.provider,
+		modelId: j.modelId,
+		thinking: j.thinking ?? "medium",
+		tools: Array.isArray(j.tools) ? [...j.tools] : undefined,
+	};
 }
 
 /**

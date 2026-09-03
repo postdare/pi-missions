@@ -368,6 +368,48 @@ LOG.md 失败记录和最后一次失败证据,不带污染对话)。请求先�
 只有在 reason、父 session、token、revision 全部匹配时才发出 HANDOFF_DONE。
 取消 newSession 会显式发 HANDOFF_CANCELLED,不会遗留永久硬阻断。
 
+## 与其它扩展共存(以及为什么不支持 sub-agent)
+
+**mission 期间,其它扩展注册的工具全部不可用。** 相位切换用 `setActiveTools` 把工具集
+改写成白名单,而白名单里只有 pi 的内置工具和本扩展的 `mission_*` —— 你装的 subagent、
+todo、MCP 桥接注册的工具会在 mission 开始的那一刻被摘掉,**所有相位**都是,DO 也不例外。
+mission 结束(done / halted)时按开工那一刻记下的现场还原,包括这些第三方工具;现场随
+`missions/state/<id>/profile.json` 落盘,所以换脑、重启、换机器接力之后也还得回去。
+
+这是刻意的,不是没做完:**相位决定这一刻允许做什么**,而白名单之外的工具本扩展一无所知,
+放行等于在能力矩阵上开一个自己也说不清的口子。
+
+所以如果你要的是"多个 agent 并行铺开干活",那该用 subagent 类扩展,**另开一个会话**,
+不要和 mission 混在一起 —— 两者解决的不是同一个问题:mission 用串行 + 可归因的证据换
+"做完了"这句话的可信度,广泛并行换的是吞吐。
+
+### 为什么不在 mission 里支持 sub-agent
+
+判据不是"支不支持 sub-agent",而是这一条:
+
+> **能写工作区的 sub-agent 一律不做;只读、且结论经结构化工具回到 L0 的 sub-agent 安全。**
+
+理由是物理的:AC 冻结只读(I2)、机械升档(I7)、编辑级增量检查,三条全部挂在**宿主会话
+的 `tool_call` / `tool_result` 钩子**上,而 sub-agent 的工具调用不经过这两个钩子 ——
+无论它是独立 `pi` 进程还是 SDK 起的独立会话。让它写代码,等于:冻结件写保护拦不住它、
+它改的文件不进 `touchedFiles` 这本账(升档判据恒为假)、编辑后的增量检查对它不存在。
+
+只读的 sub-agent 没有这些问题,它退化成一次函数调用 —— **独立 Verifier 就是这么做的**
+(只读工具 + 结构化 `mission_verdict`,判定权仍在 L0 的 `judge()`)。换句话说,
+这套系统已经在用 sub-agent,只是用在唯一站得住的位置上。
+
+另外两件常被当成"缺 sub-agent"的事,各自已有答案,而且答案更强:
+
+| 需求 | 通行做法 | pi-missions | 差别 |
+|---|---|---|---|
+| 上下文隔离 | 委派子任务、只回压缩结论 | **换脑**:整会话替换 + 从 SNAPSHOT 重附着 | 崩溃安全 —— 子 agent 的上下文是易失的 |
+| 调研隔离 | scout agent 返回摘要 | **spike**:只读闸门 + 结论落盘 + 强制回 PLAN | 产物在仓库里,可审计、可续、可回看 |
+
+**任务级并行也不做。** 并行执行者共享同一个工作区,hard 证据不再可归因(T1 的分支红了
+可能是 T2 改坏的),失败签名、冻结基线的红绿、regression 分类会同时失去意义 ——
+而这些正是这套系统敢说"通过"的全部依据。更细的代码落点见
+[docs/ARCHITECTURE.md §8.7](./docs/ARCHITECTURE.md)。
+
 ## 配置
 
 `<repo>/.pi/pi-missions.json`:
@@ -469,8 +511,10 @@ npm test    # core 单测 + runtime/UI 冒烟(node --test,无需构建)
 
 ## 已知限制
 
-- mission 是**前台**的:运行时占用当前会话,一次一个。后台批量编排请直接用 pi-subagents。
-- 相位切换用 `setActiveTools` 改写工具集,plan/act/check 相位会隐藏其它扩展的工具。
+- mission 是**前台**的:运行时占用当前会话,一次一个。后台批量编排另开一个会话用
+  subagent 类扩展 —— 但它与 mission 不能同时用,见「与其它扩展共存」。
+- 相位切换用 `setActiveTools` 改写工具集,**所有相位**都会隐藏其它扩展的工具
+  (白名单语义,DO 也不例外);mission 结束时按开工时记下的现场还原。见「与其它扩展共存」。
 - 并行工具执行下 `tool_call` 不保证看到同批次兄弟工具结果;闸门只依赖 STATE。
 - 失败签名归一化粒度(`core/breaker.ts` 的 `normalize()`)是最需要按实际数据调的参数。
 - 内存态不可信:pi 在 newSession/reload/重启时重建扩展实例。所有关键路径

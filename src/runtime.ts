@@ -323,7 +323,7 @@ export class Runtime {
 			);
 			if (cancelled.error) return { error: cancelled.error };
 		}
-		this.pi.setActiveTools(toolsForPhase(this.active.state.phase, this.active.state.tier));
+		this.pi.setActiveTools(this.toolsForActivePhase());
 		const role = ROLE_OF[this.active.state.phase];
 		if (role) await applyRole(this.pi, ctx, role, this.modelsConfig(), (m) => this.warn(ctx, m));
 		this.refreshWidget(ctx);
@@ -503,7 +503,8 @@ export class Runtime {
 					this.archivePlan(e.reason);
 					break;
 				case "RESTORE":
-					this.pi.setActiveTools([...BUILTIN_ALL, ...MISSION_TOOLS]);
+					// 必须排在 savedProfile 置空之前 —— 工具集是从它里面还原的
+					this.pi.setActiveTools(this.toolsForActivePhase());
 					await restoreProfile(this.pi, ctx, this.savedProfile);
 					this.savedProfile = null;
 					this.diagnostics?.dispose();
@@ -1311,6 +1312,27 @@ export class Runtime {
 		} catch {
 			return null;
 		}
+	}
+
+	/**
+	 * 当前相位该活跃的工具集。
+	 *
+	 * done/halted 不是"一个什么都给的相位",是**没有相位** —— 该还给用户的是他开
+	 * mission 之前的现场(profile.tools),里面包含第三方扩展注册的工具。
+	 * 这里原来一律发 `[...BUILTIN_ALL, ...MISSION_TOOLS]`,于是 mission 一开始被
+	 * setActiveTools 摘掉的第三方工具(subagent、todo、MCP 桥接……)结束后永远回不来,
+	 * 要重开会话才有 —— 那是 bug,不是取舍。
+	 *
+	 * 只有**没记到**现场时(旧 profile.json、或替身 pi 没有 getActiveTools)才回落到
+	 * 内置全集。空数组是记到了的合法现场(`--no-tools`),照原样还回去 ——
+	 * 用 `??` 而不是判真假,就是为了把这两种情况分开。
+	 */
+	private toolsForActivePhase(): string[] {
+		const a = this.active!;
+		if (a.state.phase === "done" || a.state.phase === "halted") {
+			return this.savedProfile?.tools ?? [...BUILTIN_ALL, ...MISSION_TOOLS];
+		}
+		return toolsForPhase(a.state.phase, a.state.tier);
 	}
 
 	warn(ctx: any, msg: string): void {

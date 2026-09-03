@@ -3,18 +3,31 @@
  *
  * 相位 → 能力矩阵的物理实现。两层:
  *   setActiveTools(粗粒度,LLM 看不到的工具不会调)
- *   tool_call 闸门(细粒度,防 bash 绕过、防写冻结件)
+ *   tool_call 闸门(细粒度,防 shell 绕过、防写冻结件)
  *
  * 闸门只依赖 STATE,不依赖"上一个工具的结果"(并行工具执行时序不保证)。
  */
 
 import type { Phase, Tier } from "../core/types.ts";
 
-export const BUILTIN_ALL = ["read", "bash", "edit", "write", "grep", "find", "ls"];
+/**
+ * pi 的内置工具全集(与 pi 的 ToolName 一一对应,八个)。
+ *
+ * powershell 与 bash 同一份 schema、同一种能力,是 Windows 上 bash 的替身
+ * (pi 的 defaultTools 设置里两者并列)。漏掉它有两个后果,都不是掉个工具而已:
+ * Windows 用户一开 mission 就没了 shell,而且下面那道 shell 粗检也管不到它 ——
+ * 少一个名字就等于给冻结件写保护开了一条旁路。
+ *
+ * 名字不存在时 pi 的 setActiveTools 会忽略,所以在非 Windows 上写着它是安全的。
+ */
+export const BUILTIN_ALL = ["read", "bash", "powershell", "edit", "write", "grep", "find", "ls"];
 
 export const MISSION_TOOLS = ["mission_ask", "mission_define", "mission_write_plan", "mission_submit", "mission_escalate"];
 
 const READONLY = new Set(["read", "grep", "find", "ls"]);
+
+/** 能执行任意命令的工具。两者的 input 都是 { command }(pi 的 bashSchema 是共用的) */
+const SHELL = new Set(["bash", "powershell"]);
 
 /** 相位 → 工具集(§3 能力矩阵) */
 export function toolsForPhase(phase: Phase, tier: Tier = "standard"): string[] {
@@ -47,7 +60,7 @@ export interface GateInput {
 	pendingHandoff: string | null;
 	toolName: string;
 	input: Record<string, unknown>;
-	/** missions 目录名(相对仓库根),用于 bash 命令字符串粗检 */
+	/** missions 目录名(相对仓库根),用于 shell 命令字符串粗检 */
 	missionsDirName: string;
 	/**
 	 * 当前任务是 spike 时:它唯一被允许写的结论文件(相对仓库根)。
@@ -83,18 +96,18 @@ export function gateCheck(g: GateInput): string | null {
 		}
 	}
 
-	// 探针任务:bash 只放行只读调查(grep/编译/profile),挡住一切写操作
-	if (g.spikeReportPath && g.toolName === "bash") {
+	// 探针任务:shell 只放行只读调查(grep/编译/profile),挡住一切写操作
+	if (g.spikeReportPath && SHELL.has(g.toolName)) {
 		const cmd = String(g.input.command ?? "");
 		if (/(>>?[^&]|sed\s+-i|\btee\b|\brm\b|\bmv\b|\bcp\b|\bpatch\b|git\s+(checkout|apply|restore|stash))/.test(cmd)) {
 			return (
-				"探针任务(spike)不能用 bash 改动工作区:调查用只读命令(grep/find/编译/profile)," +
+				"探针任务(spike)不能用 shell 改动工作区:调查用只读命令(grep/find/编译/profile)," +
 				`结论用写工具落到 ${g.spikeReportPath}。`
 			);
 		}
 	}
 
-	// 冻结件与状态件的写保护(任何相位;bash 见下)
+	// 冻结件与状态件的写保护(任何相位;shell 见下)
 	if (g.toolName === "edit" || g.toolName === "write") {
 		const p = String(g.input.path ?? "").replace(/\\/g, "/");
 		if (p.includes(`${g.missionsDirName}/state/`)) {
@@ -102,8 +115,8 @@ export function gateCheck(g: GateInput): string | null {
 		}
 	}
 
-	// bash 粗检:防绕开 edit/write 闸门直接改冻结件(尽力而为,社会约束之外的机械兜底)
-	if (g.toolName === "bash" && g.phase !== "plan") {
+	// shell 粗检:防绕开 edit/write 闸门直接改冻结件(尽力而为,社会约束之外的机械兜底)
+	if (SHELL.has(g.toolName) && g.phase !== "plan") {
 		const cmd = String(g.input.command ?? "");
 		const touchesProtected = cmd.includes(`${g.missionsDirName}/state/`);
 		const writeish = /(>>?|sed\s+-i|tee\b|\brm\b|\bmv\b|\bcp\b|chmod|git\s+add.*missions)/.test(cmd);

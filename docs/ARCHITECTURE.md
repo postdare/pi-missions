@@ -563,10 +563,31 @@ parent session、token、revision 全部匹配时才发 `HANDOFF_DONE`。
 两层粗细(`src/hooks/gate.ts`):
 
 1. **`setActiveTools()`** —— 粗粒度,LLM 看不到的工具不会调
-2. **`tool_call` 钩子** —— 细粒度,防 bash 绕过、防写冻结件
+2. **`tool_call` 钩子** —— 细粒度,防 shell 绕过、防写冻结件
 
 `src/hooks/gate.ts` 文件头有一条重要约束:**闸门只依赖 STATE,不依赖"上一个工具的
 结果"** —— 并行工具执行时序不保证。
+
+`BUILTIN_ALL` 必须与 pi 的内置工具全集(`ToolName`,八个)保持一致。`powershell` 与
+`bash` 共用同一份 schema、同一种能力,漏掉它有两个后果:Windows 用户一开 mission 就
+没了 shell,而第 2 层的命令粗检也管不到它 —— 少一个名字等于给冻结件写保护开一条旁路。
+所以第 2 层按 `SHELL` 集合判,不按单个工具名。
+
+#### 4.11.1 工具集是白名单,所以它同时是"用户现场"
+
+`toolsForPhase()` 返回的是**全量白名单**,`setActiveTools()` 按名字设活跃工具、
+忽略未知名字。因此 mission 一开始,用户装的第三方扩展(subagent、todo、MCP 桥接……)
+注册的工具在**所有相位**都被摘掉,不只是只读相位 —— DO 相位返回
+`[...BUILTIN_ALL, "mission_submit"]`,同样是白名单。
+
+这是刻意的(理由见 8.7),但它有一个必须成对出现的义务:**摘掉的要还回去。**
+`saveProfile()`(`src/roles/models.ts`)在 mission 开始时连同模型/thinking 一起记下
+`getActiveTools()`,随 `profile.json` 落盘;`Runtime.toolsForActivePhase()` 在
+done/halted 时还原它,而不是发一套本扩展想象中的内置全集。
+
+> 历史:这里原来一律发 `[...BUILTIN_ALL, ...MISSION_TOOLS]`,而 `SavedProfile` 根本
+> 不存工具集(pi 有 `getActiveTools()`,`src/` 里一次都没调过)。于是被摘掉的第三方
+> 工具在 mission 结束后**永远回不来**,得重开会话。那是 bug,不是取舍。
 
 ### 4.12 环境指纹(Env Fingerprint)
 
@@ -839,11 +860,54 @@ quick 档不落盘、不走 `validatePlan()`,`acceptanceCriteria` 恒为空,
 
 ### 8.6 其他运行时限制
 
-- mission 是**前台**的:占用当前会话,一次一个。后台批量编排用 pi-subagents。
-- 相位切换用 `setActiveTools` 改写工具集,plan/act/check 相位会隐藏其它扩展的工具。
+- mission 是**前台**的:占用当前会话,一次一个。后台批量编排另开会话用 subagent 类扩展 ——
+  但它与 mission **不能同时用**(8.7)。
+- 相位切换用 `setActiveTools` 改写工具集,**所有相位**都会隐藏其它扩展的工具
+  (白名单语义,DO 也不例外);mission 结束时按 `profile.json` 记下的现场还原(4.11.1)。
 - 并行工具执行下 `tool_call` 不保证看到同批次兄弟工具的结果;闸门只依赖已提交 SNAPSHOT。
 - 内存态不可信:pi 在 newSession/reload/重启时重建扩展实例。所有关键路径
   (session_start、驱动类命令)都从 CURRENT 指针 + SNAPSHOT.json 重附着。
 - 独立 Verifier 每次 CHECK 起一个 in-memory AgentSession(pi ≥ 0.84.4);quick 档不用它。
 - `test/` 下的 UI 测试需要 `@earendil-works/pi-tui` 等 peer 依赖装好才能加载;
   core 的 49 个单测无外部依赖,`node --test` 直接跑。
+
+### 8.7 为什么不做通用 sub-agent(以及与 subagent 类扩展互斥)
+
+**mission 期间,第三方扩展注册的工具全部不可用**(4.11.1 的白名单语义)。这不是没做完,
+是**能力矩阵的必然结果**:相位决定这一刻允许做什么,而白名单之外的工具本扩展一无所知,
+放行等于在能力矩阵上开一个自己也说不清的口子。
+
+更根本的一条:**这套系统的三条保证全部挂在宿主会话的 `tool_call` / `tool_result`
+钩子上,而 sub-agent 的工具调用不经过这两个钩子。** 无论 sub-agent 是独立 `pi` 进程
+(pi 官方 `examples/extensions/subagent` 就是 `child_process.spawn`),还是 SDK 起的
+`AgentSession`(本包的 Verifier 用 `emptyResourceLoader` 显式不加载扩展,否则会递归
+自加载),结果一样。于是:
+
+| 保证 | 落点 | 交给能写工作区的 sub-agent 之后 |
+|---|---|---|
+| I2 AC 冻结后只读 | `gateCheck()` 的冻结件分支 | **失效** —— 它可以直接写 `missions/state/` 下的 SNAPSHOT 与 generation |
+| I7 机械升档 | `state.metrics.touchedFiles`,由 `Runtime.onToolResult()` 在 edit/write 上记账 | **失效** —— 它的编辑不进账,"改动 > 5 文件 / 触及公开 API"恒为假 |
+| 编辑级内层循环 | `IncrementalDiagnostics`,同样挂 `tool_result` | **失效** —— 最快的那一环对它不存在 |
+
+说清楚缓解项:Verifier 拿的是 **git diff**(工作区级),sub-agent 改的代码 semi 证据
+照样看得见,所以不会漏判。但"事后判得出 fail"和"当场拦得住写冻结件"是两回事。
+补救办法只有一个 —— 只给 sub-agent 路由过 `gateCheck()` 的 custom tool,那等于把闸门
+实现第二遍,两份 I2 要永远同步,正是 CLAUDE.md 硬约束第 5 条禁的那类"方便入口"。
+
+**判据因此是一条,而不是"支不支持 sub-agent":能写工作区的 sub-agent 一律不做;
+只读、且结论经结构化工具回到 L0 的 sub-agent 安全** —— 它退化成一次函数调用,
+判定权仍在 `judge()`。现行 Verifier(4.7)正是按这个模子做的,新的也必须按它做。
+
+顺带说明另外两件容易被当成"缺 sub-agent"的事,它们已经各有答案:
+
+- **上下文隔离**由**换脑**(4.10)承担,不是由子 agent 承担。换脑是整会话替换 +
+  从 SNAPSHOT 重附着,崩溃安全;sub-agent 的上下文是易失的,进程一死什么都不剩,
+  与 I1(状态是仓库里的文件,不是会话里的对话)相反。
+- **调研隔离**由 **spike**(4.7.1)承担。它就是"scout 子 agent"的形状,只是产物被强制
+  落到 `missions/spikes/`,并接一次换脑与 PLAN 重写 —— 可审计、可续、可回看。
+
+**任务级并行同样不做**:`MissionState.phase` 是 mission 级单值、`currentTask` 是单个
+任务 id、`nextTask()` 就是 `order[i+1]`,并行要把相位降到任务级,那是重写 `machine.ts`。
+更硬的一条是并行执行者共享工作区,hard 证据不再可归因(T1 的分支红了可能是 T2 改坏的),
+失败签名、基线红绿、`regression` 分类同时失去意义。参考 `docs/factory-ai-missions-research.md`:
+Factory 公开表态"串行执行 + 定向并行"实测优于广泛并行,并行化是否必要仍是其开放问题。

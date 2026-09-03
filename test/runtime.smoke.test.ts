@@ -17,7 +17,7 @@ import * as path from "node:path";
 import { Runtime } from "../src/runtime.ts";
 import { renderStateCard, renderDoBrief } from "../src/briefs.ts";
 import { parseMissionMd } from "../src/store/mission.ts";
-import { toolsForPhase } from "../src/hooks/gate.ts";
+import { BUILTIN_ALL, MISSION_TOOLS, toolsForPhase } from "../src/hooks/gate.ts";
 import type { MissionSnapshotV2 } from "../src/store/repository.ts";
 
 function execReal(cmd: string, args: string[], opts?: { cwd?: string; timeout?: number }) {
@@ -33,12 +33,24 @@ function execReal(cmd: string, args: string[], opts?: { cwd?: string; timeout?: 
 	});
 }
 
+/**
+ * 会话现场里的第三方工具。真实场景是用户装了别的 pi 扩展(subagent/todo/MCP 桥接),
+ * 它们注册的工具在 mission 开始时会被相位白名单摘掉 —— mission 结束必须还回去。
+ */
+const THIRD_PARTY_TOOL = "subagent";
+
 function mockPi() {
 	const calls = { activeTools: [] as string[][], followUps: [] as string[], entries: [] as any[], thinking: [] as string[] };
+	// 活跃工具随 setActiveTools 变化,getActiveTools 读得到 —— 否则测不出"现场被记下来了"
+	let active = [...BUILTIN_ALL, ...MISSION_TOOLS, THIRD_PARTY_TOOL];
 	return {
 		calls,
 		exec: execReal,
-		setActiveTools: (t: string[]) => void calls.activeTools.push(t),
+		getActiveTools: () => [...active],
+		setActiveTools: (t: string[]) => {
+			active = [...t];
+			calls.activeTools.push(t);
+		},
 		setThinkingLevel: (l: string) => void calls.thinking.push(l),
 		setModel: async () => true,
 		getThinkingLevel: () => "medium",
@@ -208,6 +220,51 @@ test("完整闭环:fail → act → adjust → pass → done", async () => {
 	assert.ok(log.includes("verdict=PASS"));
 	// 证据归档
 	assert.ok(fs.readdirSync(path.join(tmp, "missions", "state", rt.active!.state.missionId, "evidence")).length >= 2);
+});
+
+test("现场还原:第三方扩展的工具 mission 期间被摘掉,结束后必须还回来", async () => {
+	const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "pi-missions-smoke-"));
+	const { pi, ctx, rt } = await newMission(tmp);
+
+	// mission 期间:相位白名单里没有第三方工具(这是刻意的 —— 见 toolsForPhase)
+	assert.ok(
+		pi.calls.activeTools.every((t) => !t.includes(THIRD_PARTY_TOOL)),
+		"相位工具集不该包含第三方工具",
+	);
+	assert.ok(!pi.getActiveTools().includes(THIRD_PARTY_TOOL), "mission 期间第三方工具应被摘掉");
+
+	// 开 mission 那一刻的现场已落盘,跨会话接力才还得回去
+	const profileFile = path.join(tmp, "missions", "state", rt.active!.state.missionId, "profile.json");
+	const savedTools = JSON.parse(fs.readFileSync(profileFile, "utf8")).tools;
+	assert.ok(Array.isArray(savedTools) && savedTools.includes(THIRD_PARTY_TOOL), "profile.json 应记下现场工具集");
+
+	// 走完闭环 → done → RESTORE
+	fs.writeFileSync(path.join(tmp, "hello.txt"), "hello\n");
+	await rt.applyEvent({ type: "SUBMIT", at: Date.now() }, ctx);
+	await rt.runCheck(ctx);
+	assert.equal(rt.active!.state.phase, "done");
+
+	// 还回来的是用户自己的现场,不是本扩展想象中的内置全集
+	const restored = pi.getActiveTools();
+	assert.ok(restored.includes(THIRD_PARTY_TOOL), "mission 结束后第三方工具必须回来");
+	assert.ok(restored.includes("mission_submit"), "mission 工具仍在,否则开不了下一个 mission");
+});
+
+test("现场还原:跨会话接上一个已停机的 mission,同样还现场", async () => {
+	const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "pi-missions-smoke-"));
+	const { ctx, rt } = await newMission(tmp);
+	await rt.applyEvent({ type: "ABORT", at: Date.now(), reason: "人工中止" }, ctx);
+	assert.equal(rt.active!.state.phase, "halted");
+
+	// 新会话(新 Runtime + 新 pi):现场只能从 profile.json 读回来,内存里没有
+	const pi2 = mockPi();
+	const rt2 = new Runtime(pi2, tmp);
+	assert.equal(await rt2.ensureAttached(mockCtx(tmp)), true);
+	assert.equal(rt2.active!.state.phase, "halted");
+	assert.ok(
+		pi2.getActiveTools().includes(THIRD_PARTY_TOOL),
+		"halted 不是'什么都给的相位',是没有相位 —— 该还的是现场",
+	);
 });
 
 test("CHECK 执行异常转为 INCONCLUSIVE 并回到 DO,不会卡死在 check", async () => {
