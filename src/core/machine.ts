@@ -33,6 +33,7 @@
 import type {
 	Effect,
 	EscalationLevel,
+	InconclusiveCause,
 	MissionEvent,
 	MissionState,
 	Phase,
@@ -60,6 +61,16 @@ export const ROLE_OF: Record<Phase, Role | null> = {
 
 /** 连续 INCONCLUSIVE 上限:环境漂移不修复,重试无意义,停机等人 */
 export const INCONCLUSIVE_STREAK_CAP = 3;
+
+/**
+ * 停机时该把人指向哪儿。成因说错等于把人支到错误的方向 ——
+ * 真实事故:核验模型 400,连着三轮判无结论,提示写的却是"环境可能漂移"。
+ */
+const HALT_HINT: Record<InconclusiveCause, string> = {
+	env: "停机等待人工检查环境",
+	evidence: "停机等待人工检查证据采集(verify 分支是否真的跑出了输出)",
+	judge: "停机等待修复核验裁判",
+};
 
 /**
  * 换脑策略。I5 要求"每次升级必须换干净上下文",这条无条件成立。
@@ -280,7 +291,8 @@ export function transition(state: MissionState, event: MissionEvent): Transition
 			// 但连续无结论说明环境问题没人修,达到上限停机等人(I9 的防死循环)。
 			if (verdict.outcome === "inconclusive") {
 				const streak = (task?.inconclusiveStreak ?? 0) + 1;
-				const isEvidence = verdict.inconclusiveCause === "evidence";
+				const cause = verdict.inconclusiveCause;
+				const isEvidence = cause === "evidence";
 				const awaitingEvidence = isEvidence
 					? {
 							reason: verdict.reason,
@@ -288,7 +300,14 @@ export function transition(state: MissionState, event: MissionEvent): Transition
 							treeFp: task?.submittedTreeFp ?? null,
 						}
 					: null;
-				if (streak >= INCONCLUSIVE_STREAK_CAP) {
+				// 裁判本身坏了(核验模型报错、人工终审弹不出来):回 DO 是纯浪费 ——
+				// 执行者改什么都换不来一个能用的裁判,下一轮还是同一个错。首轮即停机。
+				const halt = cause === "judge" || streak >= INCONCLUSIVE_STREAK_CAP;
+				const haltMessage =
+					cause === "judge"
+						? `${verdict.reason},停机等待修复核验裁判(检查 missions/models.json 的 verifier 配置)`
+						: `连续 ${streak} 次无法判定(${verdict.reason}),${HALT_HINT[cause ?? "evidence"]}`;
+				if (halt) {
 					return ok(
 						{
 							...state,
@@ -296,17 +315,16 @@ export function transition(state: MissionState, event: MissionEvent): Transition
 							tasks: setTask(state.tasks, taskId, (t) => ({
 								...t,
 								inconclusiveStreak: streak,
+								lastInconclusiveCause: cause,
 								awaitingEvidence,
 							})),
 						},
 						[
-							log(`${taskId} a=${attempt} verdict=INCONCLUSIVE×${streak} → HALTED`),
+							log(
+								`${taskId} a=${attempt} verdict=INCONCLUSIVE×${streak} cause=${cause ?? "evidence"} why=${compact(verdict.reason)} → HALTED`,
+							),
 							{ type: "RESTORE" },
-							{
-								type: "NOTIFY",
-								level: "error",
-								message: `连续 ${streak} 次无法判定(${verdict.reason}),停机等待人工检查环境`,
-							},
+							{ type: "NOTIFY", level: "error", message: haltMessage },
 						],
 						event.at,
 					);
@@ -318,12 +336,15 @@ export function transition(state: MissionState, event: MissionEvent): Transition
 						tasks: setTask(state.tasks, taskId, (t) => ({
 							...t,
 							inconclusiveStreak: streak,
+							lastInconclusiveCause: cause,
 							awaitingEvidence,
 						})),
 					},
 					[
 						...enter("do"),
-						log(`${taskId} a=${attempt} verdict=INCONCLUSIVE why=${compact(verdict.reason)}`),
+						log(
+							`${taskId} a=${attempt} verdict=INCONCLUSIVE cause=${cause ?? "evidence"} why=${compact(verdict.reason)}`,
+						),
 						{
 							type: "NOTIFY",
 							level: "warning",

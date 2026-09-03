@@ -56,7 +56,9 @@ test("档位选择期间按 Esc:取消选择、恢复默认编辑器、保留已
 	});
 	assert.ok(editorFactory, "档位生效时编辑器被替换");
 
-	const editor = editorFactory!({} as any, {} as any);
+	// CustomEditor 需要键位管理器(Ctrl+V 图片粘贴拦截在 handleInput 里);mock 只要 matches 返回 false
+	const keybindings = { matches: () => false };
+	const editor = editorFactory!({} as any, {} as any, keybindings);
 	editor.handleInput("a"); // 普通按键照常下发,不抛错
 	editor.handleInput("\x1b"); // Esc
 

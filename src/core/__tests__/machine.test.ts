@@ -316,6 +316,48 @@ test("待补证据闸门不影响 ESCALATE 逃生口", () => {
 	assert.equal(escalated.state.phase, "plan");
 });
 
+test("裁判不可用首轮即停机 —— 拿同一个坏裁判再空转两轮毫无意义", () => {
+	const s = toCheck();
+	const r = transition(s, {
+		type: "VERDICT",
+		at: AT,
+		verdict: {
+			outcome: "inconclusive",
+			inconclusiveCause: "judge",
+			failing: [],
+			reason: "裁判不可用:独立核验不可用(provider 400)",
+		},
+	});
+	assert.equal(r.state.phase, "halted");
+	assert.equal(r.state.tasks.T1.inconclusiveStreak, 1);
+	assert.equal(r.state.tasks.T1.lastInconclusiveCause, "judge");
+	// 裁判坏了不是执行者少交证据,别挂 awaitingEvidence 去卡它的下一次 SUBMIT
+	assert.equal(r.state.tasks.T1.awaitingEvidence, null);
+	const notify = r.effects.find((e) => e.type === "NOTIFY") as any;
+	assert.match(notify.message, /核验裁判|verifier/);
+	assert.doesNotMatch(notify.message, /环境/);
+});
+
+test("停机文案按成因分流 —— 证据缺口不该说成环境漂移", () => {
+	let s = toCheck();
+	const missing: Verdict = {
+		outcome: "inconclusive",
+		inconclusiveCause: "evidence",
+		failing: [],
+		reason: "缺少验收证据:AC1",
+	};
+	for (let i = 1; i < INCONCLUSIVE_STREAK_CAP; i++) {
+		s = transition(s, { type: "VERDICT", at: AT, verdict: missing }).state;
+		s = transition(s, { type: "SUBMIT", at: AT, treeFp: `sha256:${i}` }).state;
+	}
+	const r = transition(s, { type: "VERDICT", at: AT, verdict: missing });
+	assert.equal(r.state.phase, "halted");
+	assert.equal(r.state.tasks.T1.lastInconclusiveCause, "evidence");
+	const notify = r.effects.find((e) => e.type === "NOTIFY") as any;
+	assert.match(notify.message, /证据采集/);
+	assert.doesNotMatch(notify.message, /环境/);
+});
+
 test("连续 INCONCLUSIVE 达上限停机(环境漂移防死循环)", () => {
 	let s = toCheck();
 	for (let i = 1; i < INCONCLUSIVE_STREAK_CAP; i++) {

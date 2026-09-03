@@ -8,13 +8,23 @@
  */
 
 import { visibleWidth } from "@earendil-works/pi-tui";
-import type { MissionState } from "../core/types.ts";
+import type { InconclusiveCause, MissionState } from "../core/types.ts";
 import { ROLE_OF } from "../core/machine.ts";
 import { nearThreshold, thresholdFor } from "../core/breaker.ts";
 import type { EvidenceRecord } from "../store/evidence.ts";
 import type { CheckStage, CheckState } from "../store/check.ts";
 import { findTask, type MissionPlan } from "../store/mission.ts";
 import { clip, miniBar, pad, wrap } from "./chrome.ts";
+
+/**
+ * 无结论成因 → 给人看的一句话。别退回"环境可能漂移"这个万能兜底:
+ * 核验模型 400 时说环境漂移,人就会去查 git 状态而不是去查 models.json(真实事故)。
+ */
+const INCONCLUSIVE_HINT: Record<InconclusiveCause, string> = {
+	env: "环境可能漂移",
+	evidence: "证据没采到",
+	judge: "核验裁判不可用",
+};
 
 export interface EvidenceSummary {
 	/** acId/verify 分支 → 最近一次判定 */
@@ -248,7 +258,12 @@ export function renderWidgetCard(
 		lines.push(theme.fg("warning", `  ${nearBreakerWarn(t)}`));
 	}
 	if (t && t.inconclusiveStreak > 0) {
-		lines.push(theme.fg("warning", `  ⚠ 连续 ${t.inconclusiveStreak} 次无法判定(环境可能漂移)`));
+		lines.push(
+			theme.fg(
+				"warning",
+				`  ⚠ 连续 ${t.inconclusiveStreak} 次无法判定(${INCONCLUSIVE_HINT[t.lastInconclusiveCause ?? "env"]})`,
+			),
+		);
 	}
 	if (state.pendingHandoff) {
 		lines.push(theme.fg("warning", `  ⏸ 等待换脑:${clip(state.pendingHandoff, 40)} —— 执行 /mission next`));

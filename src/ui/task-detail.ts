@@ -144,13 +144,10 @@ export function renderTaskDetail(
 		);
 	}
 	if (state?.inconclusiveStreak && state.inconclusiveStreak > 0) {
-		lines.push(
-			field(
-				t,
-				"环境漂移",
-				t.fg("warning", `连续 ${state.inconclusiveStreak} 次无法判定`),
-			),
-		);
+		// 标签就是结论:说"环境漂移"人就去查环境。核验模型报错时这么写等于指错方向。
+		const cause = state.lastInconclusiveCause ?? "env";
+		const label = cause === "judge" ? "裁判不可用" : cause === "evidence" ? "证据缺口" : "环境漂移";
+		lines.push(field(t, label, t.fg("warning", `连续 ${state.inconclusiveStreak} 次无法判定`)));
 	}
 	if (state?.lastFailureReason) {
 		lines.push(...fieldWrapped(t, "上次失败", state.lastFailureReason, width, "error"));

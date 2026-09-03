@@ -13,6 +13,9 @@
  *   5. 任一 semi/human fail          → fail
  *   6. 只有 soft 证据                → inconclusive  ← I3,soft 不能触发 pass
  *   7. 其余                          → pass
+ *
+ * 最后再过一道 judgeUnavailable:裁判本身坏掉时,把"缺证据"改判成"裁判不可用"
+ * (cause=judge)。成因不同,处置也不同 —— 见 types.ts 的 InconclusiveCause。
  */
 
 import type { Evidence, Verdict } from "./types.ts";
@@ -23,9 +26,30 @@ export interface JudgeOptions {
   expectedFingerprint?: string | null;
   /** 本次必须被覆盖的 AC id 列表。缺一条即 inconclusive */
   requiredAcIds?: string[];
+  /**
+   * 裁判本身不可用时的原因(核验模型报错、人工终审弹不出来)。
+   * 传了也不会让判定变严:hard 证据够判 pass 就照样 pass —— 降级 hard-only 是设计。
+   * 它只改写"因为缺证据而无结论"那一类的成因,让停机文案指向真正该修的东西。
+   */
+  judgeUnavailable?: string | null;
 }
 
 export function judge(evidences: Evidence[], options: JudgeOptions = {}): Verdict {
+  const verdict = judgeEvidences(evidences, options);
+  const unavailable = options.judgeUnavailable?.trim();
+  // 裁判坏了却还判"缺证据",会把执行者支去补一份它永远补不出来的证据
+  // (真实事故:verifier 模型 400,连着三轮判 evidence 无结论,提示写的是"环境可能漂移")。
+  if (unavailable && verdict.outcome === "inconclusive" && verdict.inconclusiveCause === "evidence") {
+    return {
+      ...verdict,
+      inconclusiveCause: "judge",
+      reason: `裁判不可用:${unavailable}(本轮证据:${verdict.reason})`,
+    };
+  }
+  return verdict;
+}
+
+function judgeEvidences(evidences: Evidence[], options: JudgeOptions): Verdict {
   const { expectedFingerprint = null, requiredAcIds = [] } = options;
 
   // 0. 无证据不等于通过

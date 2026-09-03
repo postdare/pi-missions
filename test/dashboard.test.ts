@@ -235,3 +235,17 @@ test("概览:非 TUI 扁平卡片仍要带上身份与进度(没有盒标题兜�
 	assert.ok(lines.some((l) => l.includes("auth-refactor")), "扁平形态必须自带 mission id");
 	assert.ok(lines.some((l) => l.includes("任务")), "扁平形态必须自带进度");
 });
+
+test("widget:无结论预警的括号内容跟着成因走 —— 核验模型 400 时别把人指去查环境", () => {
+	const warnOf = (cause?: "env" | "evidence" | "judge") => {
+		const s = runningState();
+		s.tasks.T2 = { ...s.tasks.T2, inconclusiveStreak: 2, lastInconclusiveCause: cause };
+		return renderWidgetCard(mockTheme, plan, s, Date.now(), 120).join("\n");
+	};
+	assert.match(warnOf("judge"), /核验裁判不可用/);
+	assert.doesNotMatch(warnOf("judge"), /环境可能漂移/);
+	assert.match(warnOf("evidence"), /证据没采到/);
+	assert.match(warnOf("env"), /环境可能漂移/);
+	// 老快照里没有这个字段,退回原措辞
+	assert.match(warnOf(undefined), /环境可能漂移/);
+});

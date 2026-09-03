@@ -14,13 +14,20 @@
  *   3. 不预填命令:用户直接输入目标,提交时 onSubmit 被 Proxy 包裹,自动拼成
  *      /mission quick <目标> 或 /mission new <目标>;以 / 开头的输入原样放行。
  *   4. Esc 取消选择:Proxy 拦 handleInput,清掉指示与 pendingTier,保留已输入文字。
+ *   5. 底座必须是 pi 主包的 CustomEditor,不是 pi-tui 的裸 Editor ——
+ *      Ctrl+V 图片粘贴(app.clipboard.pasteImage)拦截在 CustomEditor.handleInput 里,
+ *      pi 接线自定义编辑器时也只对带 actionHandlers 的组件回接 onPasteImage;
+ *      裸 Editor 会让 tier 模式下粘贴图片失效(文字的 bracketed paste 不受影响,
+ *      所以这个 bug 之前只露出一半)。换上之后 onEscape/onCtrlD/模型切换等
+ *      app 级键位也被正确接回。
  *
  * 边框本身**不染档位色**:整框染色太吵,还要跟 pi 每帧重设 borderColor 打架;
  * 档位色只上标题,信号更准(它就贴在输入框上)。
  * mission 启动后自动清除(状态条接管显示)。
  */
 
-import { Editor, Key, matchesKey, stripTerminalSequences, visibleWidth } from "@earendil-works/pi-tui";
+import { CustomEditor } from "@earendil-works/pi-coding-agent";
+import { Key, matchesKey, stripTerminalSequences, visibleWidth } from "@earendil-works/pi-tui";
 import type { Tier } from "../core/types.ts";
 import { actualModelOf, type RoleModelView } from "../roles/models.ts";
 
@@ -182,8 +189,9 @@ export function applyTierIndicator(ctx: any, tier: Tier, onCancel?: () => void, 
 
 	// 编辑器:顶边框标题(档位+模型) + 空态 placeholder + onSubmit 自动包命令 + Esc 取消。
 	// 全部长在编辑器自己身上,不再额外占一行。
-	ctx.ui.setEditorComponent((tui: any, editorTheme: any) => {
-		const base = new Editor(tui, editorTheme);
+	ctx.ui.setEditorComponent((tui: any, editorTheme: any, keybindings: any) => {
+		// CustomEditor(不是 pi-tui 裸 Editor):否则 Ctrl+V 图片粘贴失效,见文件头第 5 条
+		const base = new CustomEditor(tui, editorTheme, keybindings);
 		const theme = ctx.ui.theme; // 边框着色用主题 accent 或 ANSI 高亮
 		const proxied = new Proxy(base, {
 			get(target: any, prop: string | symbol, receiver: any): unknown {

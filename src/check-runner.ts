@@ -113,6 +113,10 @@ export class CheckRunner {
 		};
 		const evidences: Evidence[] = [];
 		let requiredAcIds: string[] = [];
+		// 裁判(独立 Verifier / 人工终审)本身没跑起来的原因。判定时交给 judge():
+		// 只有"证据不够所以无结论"那一类会被改判成 cause=judge,hard 够判 pass 的照旧
+		// —— 降级 hard-only 是设计,裁判坏掉却说成"环境漂移"才是 bug。
+		let judgeUnavailable: string | null = null;
 		const hardResults: Array<{ acId: string; pass: boolean; outputTail: string }> = [];
 
 		const runHard = async (
@@ -169,6 +173,7 @@ export class CheckRunner {
 		): Promise<void> => {
 			if (!isCurrent()) return;
 			if (!a.git) {
+				judgeUnavailable = "独立 Verifier 未启动:目标目录不是 git 仓库";
 				persistCheck({
 					verifier: { status: "skipped", message: "目标目录不是 git 仓库" },
 				});
@@ -190,6 +195,7 @@ export class CheckRunner {
 			// 配了模型但解析不到 → 显式降级 hard-only,绝不静默退回会话模型(semi 证据的来源必须可审计)
 			if (hasConfiguredModel && !configuredModel) {
 				const message = `配置的 verifier 模型 ${verifierConfig!.provider}/${verifierConfig!.model} 不可用,降级为 hard-only`;
+				judgeUnavailable = message;
 				if (!a.inMemory) appendLog(sp.logMd, message);
 				persistCheck({
 					verifier: { status: "degraded", startedAt, durationMs: Date.now() - startedAt, activity: "核验不可用", message },
@@ -298,6 +304,7 @@ export class CheckRunner {
 			const degradeWhy = (verifierResult.status === "timeout" ? "超时" : verifierResult.message)
 				.replace(/\s+/g, " ")
 				.slice(0, 200);
+			judgeUnavailable = `独立核验${verifierResult.status === "timeout" ? "超时" : "不可用"}(${degradeWhy})`;
 			if (!a.inMemory) {
 				appendLog(sp.logMd, `verifier 降级 hard-only:${degradeWhy}`);
 			}
@@ -408,9 +415,16 @@ export class CheckRunner {
 						}),
 					);
 				} else if (criterion?.judge === "human") {
-					await this.collectHumanVerdict(ctx, criterion.text, evidences, fp, persistCheck);
+					judgeUnavailable = await this.collectHumanVerdict(
+						ctx,
+						criterion.text,
+						evidences,
+						fp,
+						persistCheck,
+					);
 					if (!isCurrent()) return;
 				} else {
+					judgeUnavailable = "quick 档没有判据,无人可判(不应发生:准入已守)";
 					persistCheck({
 						verifier: { status: "skipped", message: "quick 档无判据(不应发生:准入已守)" },
 					});
@@ -454,6 +468,7 @@ export class CheckRunner {
 			const verdict = judge(evidences, {
 				expectedFingerprint: a.state.envFingerprint,
 				requiredAcIds,
+				judgeUnavailable,
 			});
 			if (!a.inMemory) saveEvidence(sp.evidenceDir, taskId, attempt, evidences);
 			persistCheck({
@@ -516,6 +531,7 @@ export class CheckRunner {
 				const verdict = judge(evidences, {
 					expectedFingerprint: a.state.envFingerprint,
 					requiredAcIds,
+					judgeUnavailable,
 				});
 				const result = await rt.applyEvent({ type: "VERDICT", at: Date.now(), verdict }, ctx);
 				if (!result.error && result.state.phase === "do") {
@@ -559,13 +575,14 @@ export class CheckRunner {
 	 *  3. **记账为不可重放**。写进证据的 command 字段,面板与 LOG 都能看到
 	 *     这条判据没有留下能重跑的东西。
 	 */
+	/** 返回"裁判不可用"的原因;人在场只是没点(可以再来一轮)时返回 null */
 	private async collectHumanVerdict(
 		ctx: any,
 		criterionText: string,
 		evidences: Evidence[],
 		envFingerprint: string,
 		persistCheck: (patch: any) => void,
-	): Promise<void> {
+	): Promise<string | null> {
 		persistCheck({
 			stage: "running_verifier",
 			summary: "等待人工终审...",
@@ -579,10 +596,13 @@ export class CheckRunner {
 		if (ctx.hasUI) {
 			choice = await ctx.ui.select(`人工终审:${criterionText}`, [PASS, FAIL]);
 		} else {
+			// 非 TUI 下终审框根本弹不出来 —— 这是裁判缺席,不是执行者少交了什么。
+			// 让它走 cause=judge 直接停机,别在 DO 里空转三轮等一个永远不会出现的弹窗。
 			ctx.ui.notify("当前环境无法弹出人工终审(非 TUI),本轮判为无结论", "warning");
+			return "人工终审无法进行:当前不是 TUI 环境";
 		}
 		// 没做选择 ≠ 通过。不产出证据,让 judge() 判 inconclusive
-		if (choice !== PASS && choice !== FAIL) return;
+		if (choice !== PASS && choice !== FAIL) return null;
 
 		const passed = choice === PASS;
 		let reason = "人工终审通过";
@@ -600,5 +620,6 @@ export class CheckRunner {
 			startedAt,
 			durationMs: Date.now() - startedAt,
 		});
+		return null;
 	}
 }

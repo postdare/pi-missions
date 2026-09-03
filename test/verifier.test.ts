@@ -340,3 +340,98 @@ test("一个分支被多条 AC 覆盖时,正文合并,id 仍只有一个", () =>
 	assert.ok(text.includes("第一条要求 / 第二条要求"));
 	assert.equal((text.match(/^- copy/gm) ?? []).length, 1);
 });
+
+// ─────────────── provider 报错(真实事故:400 伪装成"没提交 verdict") ───────────────
+
+/** provider 拒绝这一轮:pi 不抛异常,只发一条 stopReason=error 的空 assistant 消息 */
+function providerRejects(errorMessage: string) {
+	return async () => {
+		let listener: ((event: any) => void) | null = null;
+		return {
+			subscribe: (fn: (event: any) => void) => {
+				listener = fn;
+				return () => {};
+			},
+			prompt: async () => {
+				listener?.({
+					type: "message_end",
+					message: { role: "assistant", content: [], stopReason: "error", errorMessage },
+				});
+			},
+			steer: async () => {},
+			abort: async () => {},
+			dispose: () => {},
+		};
+	};
+}
+
+test("runVerifier:provider 报错的原文必须进 message —— 报'未提交 verdict'是报后果不是报原因", async () => {
+	const r = await runVerifier(
+		{ ...options, thinkingLevel: "medium" },
+		providerRejects('400 invalid_request_error: model xyz is not available'),
+	);
+	assert.equal(r.status, "failed");
+	if (r.status === "failed") {
+		assert.match(r.message, /400 invalid_request_error/);
+		assert.match(r.message, /not available/);
+	}
+});
+
+test("runVerifier:模型强制开思考时,thinking=off 自动降档重试一次", async () => {
+	const levels: string[] = [];
+	const r = await runVerifier(options, async (input) => {
+		levels.push(input.options.thinkingLevel);
+		if (input.options.thinkingLevel === "off") {
+			return providerRejects('400 (glm-5.3-flash always reasons; thinking.type must be "enabled")')();
+		}
+		return submitVerdicts([{ acId: "AC1", result: "pass", rationale: "ok" }])(input);
+	});
+	assert.deepEqual(levels, ["off", "low"]);
+	assert.equal(r.status, "completed");
+	assert.ok(r.trace.some((line) => line.includes("thinking=off 被 provider 拒绝")));
+});
+
+test("runVerifier:与 thinking 无关的 provider 报错不重试 —— 重试只是白烧一遍钱", async () => {
+	const levels: string[] = [];
+	const r = await runVerifier(options, async (input) => {
+		levels.push(input.options.thinkingLevel);
+		return providerRejects("429 rate limit exceeded")();
+	});
+	assert.deepEqual(levels, ["off"]);
+	assert.equal(r.status, "failed");
+	if (r.status === "failed") assert.match(r.message, /429/);
+});
+
+test("runVerifier:降档重试后仍失败时,两轮的 usage 都要记账", async () => {
+	const usageEvent = (output: number) => ({
+		type: "message_end",
+		message: { role: "assistant", content: [], usage: { input: 10, output } },
+	});
+	const r = await runVerifier(options, async (input) => {
+		let listener: ((event: any) => void) | null = null;
+		return {
+			subscribe: (fn: (event: any) => void) => {
+				listener = fn;
+				return () => {};
+			},
+			prompt: async () => {
+				listener?.(usageEvent(input.options.thinkingLevel === "off" ? 5 : 7));
+				listener?.({
+					type: "message_end",
+					message: {
+						role: "assistant",
+						content: [],
+						stopReason: "error",
+						errorMessage: 'thinking.type must be "enabled"',
+					},
+				});
+			},
+			steer: async () => {},
+			abort: async () => {},
+			dispose: () => {},
+		};
+	});
+	assert.equal(r.status, "failed");
+	assert.equal(r.usage.input, 20);
+	assert.equal(r.usage.output, 12);
+});

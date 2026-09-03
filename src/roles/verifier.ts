@@ -41,7 +41,19 @@ export interface VerifierOptions {
 
 export type VerifierRunResult =
 	| { status: "completed"; evidences: Evidence[]; usage: VerifierUsage; trace: string[] }
-	| { status: "timeout" | "failed"; evidences: null; message: string; usage: VerifierUsage; trace: string[] };
+	| {
+			status: "timeout" | "failed";
+			evidences: null;
+			message: string;
+			usage: VerifierUsage;
+			trace: string[];
+			/**
+			 * provider/网关直接把这一轮打回来了(HTTP 4xx/5xx),模型根本没开口。
+			 * 与"模型跑完了但没调 mission_verdict"是两码事:前者是配置或服务问题,
+			 * 后者才是模型不听话。混成一句话就等于把真正的病根丢掉(见 runVerifier)。
+			 */
+			providerError?: string;
+	  };
 
 export interface VerifierUsage {
 	turns: number;
@@ -154,17 +166,72 @@ const createSdkVerifierSession: CreateVerifierSession = async ({ options, system
 };
 
 /**
- * 跑独立 AgentSession 并保留明确的结束原因。
- * 初始化失败/超时/未提交 verdict 时由 Runtime 降级为 hard-only。
+ * 跑一次独立核验,失败时按 provider 报错的内容决定要不要换个 thinking 档再来一次。
+ *
+ * 为什么要重试:verifier 的默认 thinking 是 off(便宜),而有些推理模型**强制**开思考,
+ * 关掉就是一个 400。这类模型在 pi 里不抛异常,只回一条空的 assistant 消息 ——
+ * 于是"模型报错"一路伪装成"没提交 verdict" → 降级 hard-only → quick 档没了唯一证据源
+ * → 判无结论 → 三轮空转后停机,提示还写着"环境可能漂移"(真实事故)。
+ * 便宜是优化项,核验能不能跑是正确性项,冲突时让前者让路。
  */
 export async function runVerifier(
 	opts: VerifierOptions,
 	createSession: CreateVerifierSession = createSdkVerifierSession,
 ): Promise<VerifierRunResult> {
+	const first = await runVerifierOnce(opts, createSession);
+	if (first.status === "completed") return first;
+	const retryThinking = thinkingRetryLevel(opts.thinkingLevel, first.providerError);
+	if (!retryThinking) return first;
+	const second = await runVerifierOnce({ ...opts, thinkingLevel: retryThinking }, createSession);
+	const usage = mergeUsage(first.usage, second.usage);
+	const trace = [`thinking=${opts.thinkingLevel} 被 provider 拒绝,改用 ${retryThinking} 重试`, ...second.trace];
+	if (second.status === "completed") return { ...second, usage, trace };
+	return {
+		...second,
+		usage,
+		trace,
+		message: `${second.message}(已用 thinking=${retryThinking} 重试过一次;首轮:${first.message})`,
+	};
+}
+
+/**
+ * provider 明说了"这个模型必须开思考"时,把 off 换成一个最省的可用档位。
+ * 只认这一种错 —— 别的 400(模型不存在、没额度、上下文超限)重试都是白烧钱。
+ */
+function thinkingRetryLevel(current: string, providerError?: string): string | null {
+	if (current !== "off" || !providerError) return null;
+	const text = providerError.toLowerCase();
+	const mustThink =
+		(text.includes("thinking") || text.includes("reasoning")) &&
+		(text.includes("enabled") || text.includes("always") || text.includes("must") || text.includes("required"));
+	return mustThink ? "low" : null;
+}
+
+function mergeUsage(a: VerifierUsage, b: VerifierUsage): VerifierUsage {
+	return {
+		turns: a.turns + b.turns,
+		toolCalls: a.toolCalls + b.toolCalls,
+		input: a.input + b.input,
+		output: a.output + b.output,
+		cacheRead: a.cacheRead + b.cacheRead,
+		cacheWrite: a.cacheWrite + b.cacheWrite,
+		cost: a.cost + b.cost,
+	};
+}
+
+/**
+ * 跑独立 AgentSession 并保留明确的结束原因。
+ * 初始化失败/超时/未提交 verdict 时由 Runtime 降级为 hard-only。
+ */
+async function runVerifierOnce(
+	opts: VerifierOptions,
+	createSession: CreateVerifierSession,
+): Promise<VerifierRunResult> {
 	let submitted: unknown = null;
 	let session: AgentSessionLike | null = null;
 	let unsubscribe: (() => void) | null = null;
 	let timedOut = false;
+	let providerError: string | undefined;
 	const usage: VerifierUsage = { ...ZERO_USAGE };
 	const trace: string[] = [];
 	const emit = (activity: string) => {
@@ -207,6 +274,11 @@ export async function runVerifier(
 			abort,
 		});
 		unsubscribe = session.subscribe((event) => {
+			const failed = providerErrorOf(event);
+			if (failed) {
+				providerError = failed;
+				emit(`provider 拒绝了请求:${failed.replace(/\s+/g, " ").slice(0, 120)}`);
+			}
 			updateProgress(event, usage, emit);
 		});
 		if (timedOut || opts.signal?.aborted) {
@@ -222,6 +294,7 @@ export async function runVerifier(
 			message: error instanceof Error ? error.message : String(error),
 			usage,
 			trace,
+			providerError,
 		};
 	} finally {
 		clearTimeout(timer);
@@ -238,6 +311,7 @@ export async function runVerifier(
 			message: `超过 ${opts.timeoutMs}ms 或被中止`,
 			usage,
 			trace,
+			providerError,
 		};
 	}
 	try {
@@ -256,14 +330,32 @@ export async function runVerifier(
 			trace,
 		};
 	} catch (error) {
+		// provider 报错时,"未提交 verdict" 只是它的**后果**,不是原因。
+		// 报后果会让看 LOG 的人以为是模型不听话,而真正要改的是 models.json 里的配置
+		// (真实事故:glm 强制 reasoning,thinking=off 直接 400,LOG 里只有"未提交 verdict")。
+		const fallback = error instanceof Error ? error.message : "verdict 校验失败";
 		return {
 			status: "failed",
 			evidences: null,
-			message: error instanceof Error ? error.message : "verdict 校验失败",
+			message: providerError ? `${providerError}(因此 ${fallback})` : fallback,
 			usage,
 			trace,
+			providerError,
 		};
 	}
+}
+
+/**
+ * 从会话事件里捞出 provider 拒绝请求的原文。
+ *
+ * pi 在 provider 报错时**不抛异常**:它产出一条 stopReason==="error"、content 为空的
+ * assistant 消息,prompt() 照常 resolve。不看这个字段,错误就彻底消失了。
+ */
+function providerErrorOf(event: AgentSessionEvent): string | undefined {
+	if (event.type !== "message_end") return undefined;
+	const message = event.message as { stopReason?: string; errorMessage?: string };
+	if (message.stopReason !== "error") return undefined;
+	return (message.errorMessage ?? "provider 返回错误(无详情)").replace(/\s+/g, " ").trim();
 }
 
 function verifierSystemPrompt(): string {

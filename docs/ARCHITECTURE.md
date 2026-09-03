@@ -503,9 +503,11 @@ mission 一旦会话重建就永久失联。
 (`src/core/machine.ts`)直接停机等人 —— 环境没人修,重试没有意义。
 
 **防空转与补证据闸门**:
-`verdict.ts` 对 `inconclusive` 进行双因分类(`inconclusiveCause`):
+`verdict.ts` 对 `inconclusive` 进行三因分类(`inconclusiveCause`,见 `core/types.ts` 的
+`InconclusiveCause`)。成因决定处置与文案 —— 说错成因等于把人指到错误的方向:
 - `env`:环境指纹漂移。无需改代码,不受补证据闸门限制(仅受连续 3 次停机兜底)。
 - `evidence`:缺机械断言、范围内核验无结论或仅有 soft 证据。此时状态机在当前任务挂起 `awaitingEvidence`,记录提交时的工作区树指纹(`treeFp`)及缺失的 `missingAcIds`。
+- `judge`:**裁判本身不可用** —— 独立 Verifier 被 provider 打回、模型解析不到、非 TUI 下人工终审弹不出来。由 `check-runner.ts` 把原因经 `judge()` 的 `judgeUnavailable` 传入,只改写"因缺证据而无结论"那一类(hard 证据够判 pass 的照旧 pass,降级 hard-only 是设计)。**首轮即停机**:执行者改什么都换不来一个能用的裁判,回 DO 只是拿同一个坏裁判再空转一轮。也不挂 `awaitingEvidence` —— 它补不出这份证据。
 - **重交拦截**:在工作区未发生任何改动(git tree 指纹一致)时,执行者原样再次调用 `mission_submit` 会被状态机直接拦截并拒绝迁移,促使其补充有效机械断言或修改代码;当工作区产生修改(`treeFp` 变化)后放行,或通过 `mission_escalate` 升级方案。非 git 仓库自动退化放行。
 
 ### 4.9 失败签名(Signature)与熔断(Breaker)

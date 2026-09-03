@@ -194,3 +194,33 @@ test("renderTaskDetail:显示实时 CHECK 与完整分流执行日志", () => {
 	assert.ok(joined.includes("完整 stdout 第二行"));
 	assert.ok(joined.includes("完整 stderr"));
 });
+
+test("renderTaskDetail: 无结论的标签跟着成因走 —— 裁判坏了不能写'环境漂移'", () => {
+	const base: TaskDetailData = {
+		task: { id: "T1", title: "任务", verify: ["quick"] },
+		taskState: {
+			id: "T1",
+			status: "running",
+			attempts: 1,
+			sameSignatureCount: 0,
+			inconclusiveStreak: 2,
+		},
+		milestone: { id: "M1", title: "里程碑", tasks: [] },
+		criteria: [{ id: "AC1", text: "判据", verify: "quick", baseline: "red" }],
+		attempts: [],
+		tier: "quick",
+	};
+	const textOf = (cause?: "env" | "evidence" | "judge") =>
+		renderTaskDetail(
+			{ ...base, taskState: { ...base.taskState!, lastInconclusiveCause: cause } },
+			mockTheme,
+			80,
+		).join("\n");
+
+	assert.match(textOf("judge"), /裁判不可用/);
+	assert.doesNotMatch(textOf("judge"), /环境漂移/);
+	assert.match(textOf("evidence"), /证据缺口/);
+	assert.match(textOf("env"), /环境漂移/);
+	// 老状态没有这个字段(v2 快照里读出来的),退回原来的措辞而不是崩掉
+	assert.match(textOf(undefined), /环境漂移/);
+});

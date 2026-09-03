@@ -148,3 +148,41 @@ test("超长论述截断,但不影响签名(签名走 failureTag,不看措辞)",
   assert.ok(a.reason.length < 400, "reason 不能把整篇论述灌进 State Card");
   assert.equal(a.signature, b.signature, "措辞变了签名不能变,否则熔断失效");
 });
+
+// ─────────────── 裁判本身不可用(cause=judge) ───────────────
+
+test("裁判不可用时,'缺证据'改判成 cause=judge —— 别让人去查环境", () => {
+  const v = judge([], {
+    requiredAcIds: ["quick"],
+    judgeUnavailable: "独立核验不可用(provider 400: thinking must be enabled)",
+  });
+  assert.equal(v.outcome, "inconclusive");
+  assert.equal(v.inconclusiveCause, "judge");
+  assert.match(v.reason, /thinking must be enabled/);
+  assert.deepEqual(v.missingAcIds, ["quick"]);
+});
+
+test("裁判不可用但 hard 证据够判通过时,照旧 pass —— 降级 hard-only 是设计", () => {
+  const v = judge([ev({ acId: "AC1", level: "hard", result: "pass" })], {
+    requiredAcIds: ["AC1"],
+    judgeUnavailable: "独立核验不可用(模型解析失败)",
+  });
+  assert.equal(v.outcome, "pass");
+});
+
+test("裁判不可用不掩盖 hard 失败", () => {
+  const v = judge([ev({ acId: "AC1", level: "hard", result: "fail", raw: "boom" })], {
+    requiredAcIds: ["AC1"],
+    judgeUnavailable: "独立核验不可用",
+  });
+  assert.equal(v.outcome, "fail");
+  assert.ok(v.signature);
+});
+
+test("环境漂移优先于裁判不可用 —— 环境不对时先修环境", () => {
+  const v = judge([ev({ result: "pass", envFingerprint: "sha256:bbb" })], {
+    expectedFingerprint: "sha256:aaa",
+    judgeUnavailable: "独立核验不可用",
+  });
+  assert.equal(v.inconclusiveCause, "env");
+});

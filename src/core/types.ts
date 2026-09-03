@@ -91,6 +91,15 @@ export interface Evidence {
 
 export type VerdictOutcome = "pass" | "fail" | "inconclusive";
 
+/**
+ * 无结论的成因。三者的处置完全不同,别合并:
+ * - env      环境指纹不符 —— 病根在环境,人去修环境,重试有意义
+ * - evidence 该采的证据没采到 —— 执行者补机械证据后重试有意义
+ * - judge    裁判本身不可用(核验模型报错、人工终审弹不出来)—— 执行者做什么都没用,
+ *            重试只是拿同一个坏裁判再空转一轮,直接停机等人
+ */
+export type InconclusiveCause = "env" | "evidence" | "judge";
+
 export interface Verdict {
 	outcome: VerdictOutcome;
 	/** 失败签名。仅 outcome==="fail" 时有值,用于熔断计数 */
@@ -98,8 +107,8 @@ export interface Verdict {
 	failing: Evidence[];
 	/** 人类可读的判定理由,直接写入 LOG.md */
 	reason: string;
-	/** 无结论的具体成因: env=环境指纹不符; evidence=缺少或未采到机械/半客观证据 */
-	inconclusiveCause?: "env" | "evidence";
+	/** 无结论的具体成因,决定停机文案与是否值得重试。见 InconclusiveCause */
+	inconclusiveCause?: InconclusiveCause;
 	/** 缺证据的 AC 列表(用于缺失验收证据时明确提示) */
 	missingAcIds?: string[];
 }
@@ -123,6 +132,8 @@ export interface TaskState {
 	sameSignatureCount: number;
 	/** 连续 INCONCLUSIVE 次数。环境漂移时防死循环,达到上限直接停机 */
 	inconclusiveStreak: number;
+	/** 最近一次 INCONCLUSIVE 的成因。UI 的措辞按它分流 —— 说错成因会把人指到错误的方向 */
+	lastInconclusiveCause?: InconclusiveCause;
 	/** 最近一次提交时的工作区树指纹(用于判定原样重交) */
 	submittedTreeFp?: string | null;
 	/** 上一轮因缺证据判 inconclusive 时挂上的待补证据要求 */
