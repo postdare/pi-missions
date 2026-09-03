@@ -16,13 +16,40 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ## 命令
 
 ```bash
-npm test                                           # 全部:core 单测 + runtime/UI 冒烟(226 个)
+npm test                                           # 全部:core 单测 + runtime/UI 冒烟(328 个)
 node --test src/core/__tests__/breaker.test.ts     # 单个文件
 node --test --test-name-pattern="熔断" src/core/__tests__/breaker.test.ts   # 单个用例(名字是中文)
 npx tsc --noEmit                                   # 类型检查(tsconfig 只 include src/)
 ```
 
 无构建、无 lint 配置。Node ≥ 22.6(`node --test` 直接跑 `.ts` 靠 type stripping)。
+
+## 调试
+
+**UI/渲染优先离线调,不起 pi** —— UI 全是纯函数,渲染问题不需要真机:
+
+```bash
+# plan-review 离线预览:COLUMNS 模拟窄终端,第二个参数是段,第三是滚动
+COLUMNS=56 node --experimental-strip-types scripts/preview-plan-review.ts all
+
+# 样式快照:观感变了(标签/间距/缩进)就红;确认是想要的改动后重新冻结
+UPDATE_SNAPSHOTS=1 node --test test/plan-review.snapshot.test.ts
+```
+
+渲染的分层防线与分工:
+- `test/render.test.ts` → 宽度不变式(盒不裂、行不越界)
+- `test/plan-review.snapshot.test.ts` → 版面观感(快照,剥离 ANSI 的纯文本)
+- `test/theme-colors.test.ts` → 主题色名合法性(写错会炸整个 pi 进程)
+
+新渲染路径三项都要过,快照口径变更要同步重生成。
+
+**真机调试**(交互输入、按键处理这类离线测不了的):
+
+```bash
+pi -e .                                        # 在目标仓库里临时装载本扩展
+/debug                                         # pi 内置:写 ~/.pi/agent/pi-debug.log(含渲染后的 TUI 行)
+PI_TUI_WRITE_LOG=/tmp/tui.log pi -e .          # 捕获写往 stdout 的原始 ANSI 流
+```
 
 手工跑扩展:在**目标仓库**里 `pi -e /absolute/path/to/pi-missions`(临时装载,不落设置),
 然后 `/missions` / `/mission new "…"`。别在本仓库里跑 mission —— 它会往这里铺 `missions/` 脚手架。
