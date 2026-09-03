@@ -58,12 +58,29 @@ export async function computeEnvFingerprint(exec: Exec, cwd: string, scriptPath:
 /**
  * 计算工作区树指纹(HEAD + status + diff)。用于补证据闸门判定「工作区是否有任何实际改动」。
  * 非 git 仓库或执行异常时返回 null(降级放行)。
+ *
+ * `excludePaths` 是必须的,不是优化项。这个指纹想问的是「**产出**变了吗」,
+ * 而 status/diff 回答的是「工作区变了吗」—— 两者只在系统自己的状态件对 git 不可见时
+ * 才碰巧相等。一旦有人把 `missions/state/` 强行加进版本控制(换机器搬 mission 时
+ * 最自然的动作),SNAPSHOT.json 每次状态迁移都会重写并出现在 diff 里,树指纹于是
+ * 每轮都不同 —— 「没改动就不许原样重交」这条判据永远不成立,补证据闸门无声失效。
+ * 实测过:跟踪状态件的仓库里,原样重交直接放行。
+ *
+ * 排的只有 `missions/state/`(系统写的),不含 `missions/spikes/` ——
+ * 探针结论是**执行者**的产出,而且探针任务同样可能挂 awaitingEvidence,
+ * 把它一起排掉会反过来锁死一次合法的重交。
  */
-export async function computeGitTreeFingerprint(exec: Exec, cwd: string): Promise<string | null> {
+export async function computeGitTreeFingerprint(
+	exec: Exec,
+	cwd: string,
+	excludePaths: string[] = [],
+): Promise<string | null> {
+	// pathspec magic 需要一个正向项垫底,否则 git 报 "nothing to exclude from"
+	const pathspec = excludePaths.length > 0 ? ["--", ".", ...excludePaths.map((p) => `:(exclude)${p}`)] : [];
 	try {
 		const head = await exec("git", ["rev-parse", "HEAD"], { cwd, timeout: 10_000 });
-		const status = await exec("git", ["status", "--porcelain"], { cwd, timeout: 10_000 });
-		const diff = await exec("git", ["-c", "core.pager=cat", "diff", "HEAD"], { cwd, timeout: 30_000 });
+		const status = await exec("git", ["status", "--porcelain", ...pathspec], { cwd, timeout: 10_000 });
+		const diff = await exec("git", ["-c", "core.pager=cat", "diff", "HEAD", ...pathspec], { cwd, timeout: 30_000 });
 		if (head.code !== 0 && status.code !== 0) return null;
 		const headStr = head.code === 0 ? head.stdout.trim() : "NO_HEAD";
 		const statusStr = status.code === 0 ? status.stdout : "";

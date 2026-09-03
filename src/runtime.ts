@@ -339,6 +339,46 @@ export class Runtime {
 		return "ok" in r;
 	}
 
+	/**
+	 * 磁盘上有冻结计划、却没有运行态的 mission。
+	 *
+	 * 这是**换机器接力做了一半**的样子:generations/ 随 git 走过来了,
+	 * SNAPSHOT.json 与 CURRENT 没有(它们不进版本控制,见 ensureStateExcludes)。
+	 * 这个情形完全可判定,却曾经只表现为 ensureAttached 返回 false、命令回一句
+	 * "无活动 mission" —— 对一个以"失败要机械且响亮"为纲的系统,这处失败太安静了:
+	 * 人看到的是"这儿什么都没有",而实际是"东西在,只是进度没跟过来"。
+	 */
+	detachedMissions(): string[] {
+		try {
+			if (!fs.existsSync(this.layout.state)) return [];
+			return fs
+				.readdirSync(this.layout.state, { withFileTypes: true })
+				.filter((e) => e.isDirectory())
+				.map((e) => e.name)
+				.filter((id) => {
+					const sp = statePaths(this.layout, id);
+					return !fs.existsSync(sp.snapshotJson) && fs.existsSync(sp.generationsDir);
+				});
+		} catch {
+			return [];
+		}
+	}
+
+	/** 上面那种情形的一句人话提示;没有就返回 null。命令层把它接在"无活动 mission"后面 */
+	detachedHint(): string | null {
+		const ids = this.detachedMissions();
+		if (ids.length === 0) return null;
+		const dir = this.config.missionsDir;
+		return (
+			`\n注意:磁盘上有 ${ids.length} 个 mission 只剩冻结计划、没有运行态(${ids.slice(0, 3).join("、")}` +
+			`${ids.length > 3 ? " 等" : ""})。\n` +
+			`SNAPSHOT.json 与 CURRENT 不进版本控制(状态机用 CAS revision 推进,没有合并语义),` +
+			`所以 git clone/pull 带不过来进度。\n` +
+			`要接着干,把原机器的 ${dir}/state/CURRENT 与 ${dir}/state/<id>/SNAPSHOT.json 带外拷过来` +
+			`(rsync/scp,别 git add -f),再执行 /mission resume <id>。`
+		);
+	}
+
 	/** session_start:只允许带正确 token 的 new session 消费换脑请求 */
 	async onSessionStart(
 		event: { reason?: string; previousSessionFile?: string },
@@ -407,7 +447,10 @@ export class Runtime {
 		if (!this.active) return { state: null as never, effects: [], error: "无活动 mission" };
 		if (ev.type === "ABORT") void this.activeVerifierControl?.abort();
 		if (ev.type === "SUBMIT" && ev.treeFp === undefined) {
-			const treeFp = this.active.git ? await computeGitTreeFingerprint(this.exec, this.cwd) : null;
+			// 排掉自家状态件:指纹判的是产出变没变,不是工作区变没变(见 computeGitTreeFingerprint)
+			const treeFp = this.active.git
+				? await computeGitTreeFingerprint(this.exec, this.cwd, [`${this.config.missionsDir}/state`])
+				: null;
 			ev = { ...ev, treeFp };
 		}
 		const r = transition(this.active.state, ev);
@@ -1244,16 +1287,33 @@ export class Runtime {
 		return !!this.active && this.active.state.phase !== "done" && this.active.state.phase !== "halted";
 	}
 
+	/**
+	 * 哪些运行态不进版本控制。**按属性划,不按目录划。**
+	 *
+	 * 排除侧的共同点是「高频重写 + 无合并语义 + 本机私有」:
+	 * SNAPSHOT.json 是 CAS revision 保护的状态机快照,两个 clone 各自推进到同一个
+	 * revision 号再合并,熔断计数就成了随机数 —— 它**不能**进版本控制,这是在保护
+	 * 一条不变量,不是嫌它吵。CURRENT/CHECK/profile 同理(定位提示、瞬时运行态、本机现场)。
+	 *
+	 * 反过来,LOG.md 与 archive/ 曾经也在这张单子上,理由只是"它们躺在 state/ 目录下"——
+	 * 那是目录布局的副产品,不是一个决定。两者都是 append-only / 写完不改,天生可合并,
+	 * 而且是重规划真正要读的东西:plan.md 与换脑简报都写着"先读 LOG.md 失败记录",
+	 * L3 的简报还要读 archive/ 里的旧 MISSION.md。把它们排掉,等于让接手的人
+	 * (或换脑后的新会话)去读一份不存在的失败史。
+	 *
+	 * evidence/ 留在排除侧是量的考虑:每条证据带完整 stdout/stderr,不适合进历史。
+	 *
+	 * 注意:ensureInfoExclude 只追加。老仓库的 .git/info/exclude 里已经写下的
+	 * LOG.md / archive 行不会被自动删除 —— 要让它们进版本控制得手工去掉那两行。
+	 */
 	private ensureStateExcludes(): void {
 		const base = `${this.config.missionsDir}/state`;
 		for (const pattern of [
 			`${base}/CURRENT`,
 			`${base}/*/SNAPSHOT.json`,
 			`${base}/*/CHECK.json`,
-			`${base}/*/LOG.md`,
 			`${base}/*/profile.json`,
 			`${base}/*/evidence/`,
-			`${base}/*/archive/`,
 		]) {
 			ensureInfoExclude(this.cwd, pattern);
 		}

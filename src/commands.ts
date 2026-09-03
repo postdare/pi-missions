@@ -166,7 +166,7 @@ export function registerCommands(pi: any, getRuntime: GetRuntime): void {
 				case "status": {
 					// 无 id = 当前活动 mission;带 id = 查看任意 mission(不接管会话)
 					const id = rest.trim() || rt.active?.state.missionId || null;
-					if (!id) return notifyUsage(ctx, "无活动 mission。/missions 查看历史,/mission resume <id> 恢复");
+					if (!id) return notifyUsage(ctx, `无活动 mission。/missions 查看历史,/mission resume <id> 恢复${rt.detachedHint() ?? ""}`);
 					const d = statusDataFor(rt, id);
 					if (!d) return notifyUsage(ctx, missionLoadError(rt, id));
 					if (ctx.hasUI) {
@@ -211,7 +211,7 @@ export function registerCommands(pi: any, getRuntime: GetRuntime): void {
 					// 任何相位都能只读查看:MISSION.md 从 define 起就落盘(goal/definition 是
 					// 换脑后的恢复锚点),冻结之后只是内容变全 —— 这个命令不再有可用窗口问题。
 					const id = rest.trim() || rt.active?.state.missionId || null;
-					if (!id) return notifyUsage(ctx, "无活动 mission。/missions 查看历史");
+					if (!id) return notifyUsage(ctx, `无活动 mission。/missions 查看历史${rt.detachedHint() ?? ""}`);
 					const d = statusDataFor(rt, id);
 					if (!d) return notifyUsage(ctx, missionLoadError(rt, id));
 					if (!ctx.hasUI) {

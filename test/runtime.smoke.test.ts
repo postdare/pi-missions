@@ -18,6 +18,7 @@ import { Runtime } from "../src/runtime.ts";
 import { renderStateCard, renderDoBrief } from "../src/briefs.ts";
 import { parseMissionMd } from "../src/store/mission.ts";
 import { BUILTIN_ALL, MISSION_TOOLS, toolsForPhase } from "../src/hooks/gate.ts";
+import { computeGitTreeFingerprint } from "../src/store/git.ts";
 import type { MissionSnapshotV2 } from "../src/store/repository.ts";
 
 function execReal(cmd: string, args: string[], opts?: { cwd?: string; timeout?: number }) {
@@ -1579,6 +1580,103 @@ test("补证据闸门:inconclusive 后原样重交被拦截,修改工作区后�
 	assert.notEqual(rt.active!.state.tasks.T1.submittedTreeFp, tree1);
 });
 // ─────────────────────────── quick 的三种裁判 ───────────────────────────
+
+test("状态件被强行加进 git 也不影响补证据闸门 —— 换机器搬 mission 时最自然的动作", async () => {
+	// 树指纹拿 status + diff 当"执行者动没动工作区"的代理,而这个代理原来只在
+	// missions/state/ 对 git 不可见时才成立。用户为了把 mission 搬到另一台机器
+	// 做 `git add -f missions/state`,SNAPSHOT.json 就开始每次状态迁移都进 diff ——
+	// 树指纹每轮都变,「没改动就不许原样重交」永远不成立,闸门无声失效。
+	for (const trackState of [false, true]) {
+		const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "pi-missions-smoke-"));
+		// treeFp 只在 git 仓库里才算得出来(非 git 仓库降级放行)
+		await execReal("git", ["init", "-q"], { cwd: tmp });
+		await execReal("git", ["config", "user.name", "test"], { cwd: tmp });
+		await execReal("git", ["config", "user.email", "test@example.com"], { cwd: tmp });
+		await execReal("git", ["commit", "--allow-empty", "-qm", "init"], { cwd: tmp });
+
+		const { ctx, rt } = await newMission(tmp);
+		if (trackState) {
+			await execReal("git", ["add", "-f", "missions/state"], { cwd: tmp });
+			await execReal("git", ["commit", "-qm", "force-add state"], { cwd: tmp });
+			const tracked = await execReal("git", ["ls-files", "missions/state"], { cwd: tmp });
+			assert.ok(tracked.stdout.includes("SNAPSHOT.json"), "前提:状态件确实进了版本控制");
+		}
+
+		await rt.applyEvent({ type: "SUBMIT", at: Date.now() }, ctx);
+		await rt.applyEvent(
+			{
+				type: "VERDICT",
+				at: Date.now(),
+				verdict: {
+					outcome: "inconclusive",
+					inconclusiveCause: "evidence",
+					missingAcIds: ["hello-exists"],
+					failing: [],
+					reason: "缺少验收证据:hello-exists",
+				},
+			},
+			ctx,
+		);
+		assert.ok(rt.active!.state.tasks.T1.awaitingEvidence, `trackState=${trackState}`);
+
+		// 工作区一个字都没改,原样重交
+		const again = await rt.applyEvent({ type: "SUBMIT", at: Date.now() }, ctx);
+		assert.ok(again.error, `trackState=${trackState}:原样重交必须被拦,不管状态件进不进 git`);
+		assert.match(again.error!, /未检测到任何改动/);
+	}
+});
+
+test("探针的结论文件仍然算改动 —— 排除范围不能扩到整个 missions/", async () => {
+	// missions/spikes/ 是**执行者**的产出,而 spike 任务同样可能挂 awaitingEvidence。
+	// 把它一起排掉会反过来锁死一次合法的重交。
+	const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "pi-missions-smoke-"));
+	await execReal("git", ["init", "-q"], { cwd: tmp });
+	await execReal("git", ["config", "user.email", "a@b.c"], { cwd: tmp });
+	await execReal("git", ["config", "user.name", "t"], { cwd: tmp });
+	fs.writeFileSync(path.join(tmp, "seed.txt"), "seed\n");
+	await execReal("git", ["add", "-A"], { cwd: tmp });
+	await execReal("git", ["commit", "-qm", "seed"], { cwd: tmp });
+
+	const exclude = ["missions/state"];
+	const before = await computeGitTreeFingerprint(execReal, tmp, exclude);
+	fs.mkdirSync(path.join(tmp, "missions", "spikes", "m1"), { recursive: true });
+	fs.writeFileSync(path.join(tmp, "missions", "spikes", "m1", "T1.md"), "旧 API 用在 37 处\n");
+	const after = await computeGitTreeFingerprint(execReal, tmp, exclude);
+	assert.notEqual(before, after, "写结论文件必须让树指纹变化");
+
+	// 反过来:系统自己写状态件不该让它变
+	fs.mkdirSync(path.join(tmp, "missions", "state", "m1"), { recursive: true });
+	fs.writeFileSync(path.join(tmp, "missions", "state", "m1", "SNAPSHOT.json"), "{\"revision\":1}\n");
+	assert.equal(await computeGitTreeFingerprint(execReal, tmp, exclude), after, "状态件变化不该动树指纹");
+});
+
+test("换机器接力做了一半:有冻结计划没有运行态,要说清楚而不是回一句'无活动 mission'", async () => {
+	// 模拟 B 机 git clone 之后的样子:generations/ 跟着版本控制过来了,
+	// SNAPSHOT.json 与 CURRENT 没有(它们不进 git)。
+	const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "pi-missions-smoke-"));
+	const { rt } = await newMission(tmp);
+	const id = rt.active!.state.missionId;
+	const sp = path.join(tmp, "missions", "state");
+	fs.rmSync(path.join(sp, id, "SNAPSHOT.json"));
+	fs.rmSync(path.join(sp, "CURRENT"));
+
+	const rt2 = new Runtime(mockPi(), tmp);
+	assert.equal(await rt2.ensureAttached(mockCtx(tmp)), false, "确实接不上");
+
+	assert.deepEqual(rt2.detachedMissions(), [id], "但这个情形是可判定的");
+	const hint = rt2.detachedHint()!;
+	assert.ok(hint.includes(id), "要点名是哪个 mission");
+	assert.ok(/CAS|合并语义/.test(hint), "要说清为什么不进版本控制,否则人下一步就是 git add -f");
+	assert.ok(/SNAPSHOT\.json/.test(hint) && /CURRENT/.test(hint), "要说清该搬哪两个文件");
+	assert.ok(/resume/.test(hint), "要给出接上之后的命令");
+	assert.ok(/别 git add -f|rsync|scp/.test(hint), "要指明带外搬,不要提交进 git");
+
+	// 正常仓库不该误报
+	const clean = fs.mkdtempSync(path.join(os.tmpdir(), "pi-missions-clean-"));
+	assert.equal(new Runtime(mockPi(), clean).detachedHint(), null);
+	const { rt: rt3 } = await newMission(fs.mkdtempSync(path.join(os.tmpdir(), "pi-missions-ok-")));
+	assert.deepEqual(rt3.detachedMissions(), [], "状态健全的 mission 不算 detached");
+});
 
 test("quick 人工终审:人点通过 → done,证据是 human 级且标记为不可重放", async () => {
 	const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "pi-missions-smoke-"));

@@ -24,7 +24,7 @@ LLM 永远不能自己宣布"我做完了"——它只能提交,由 L0 依据证
 
 | # | 不变量 | 违反后果 |
 |---|---|---|
-| I1 | 状态是仓库里的文件,不是会话里的对话 | 会话一断,进度全丢 |
+| I1 | 状态是**磁盘上**的文件,不是会话里的对话 | 会话一断,进度全丢 |
 | I2 | 验收标准在 Plan 阶段冻结,执行期只读 | agent 做不出来就悄悄放宽标准 |
 | I3 | 判定的证据必须来自执行者之外 | Check 变成自我表扬 |
 | I4 | 熔断优先于重试:同一问题连续失败必须升级 | 在错误方案上无限打磨 |
@@ -198,7 +198,8 @@ LLM 可调用的工具五个,按相位分发:`mission_ask` / `mission_define`(DE
 │           ├── generations/<n>/ # 不可变 MISSION.md + verify.sh
 │           └── CHECK.json · LOG.md · evidence/ · archive/
 ```
-- `generations/` 建议提交;CURRENT、SNAPSHOT、CHECK、LOG、evidence 等运行态默认写入 `.git/info/exclude`。
+- `generations/`、`LOG.md`、`archive/` 建议提交(不可变或 append-only,可合并,重规划要读);
+  CURRENT、SNAPSHOT、CHECK、profile、evidence 默认写入 `.git/info/exclude` —— 见「换机器接力」。
 - `CHECK.json` 是 L0 独占写入的瞬时运行账本,验证完成后保留最终阶段,恢复或中止 mission 时清理。
 - 非 git 仓库降级运行:AC 冻结只剩 L0 闸门,无 git 审计链,TUI 会提示。
 - 目录名冲突时在 `.pi/pi-missions.json` 里改 `missionsDir`。
@@ -368,13 +369,63 @@ LOG.md 失败记录和最后一次失败证据,不带污染对话)。请求先�
 只有在 reason、父 session、token、revision 全部匹配时才发出 HANDOFF_DONE。
 取消 newSession 会显式发 HANDOFF_CANCELLED,不会遗留永久硬阻断。
 
+## 换机器接力
+
+**状态在磁盘上(I1),但不跟着 git 走。** 换脑、重启、reload 都不丢进度;
+换机器要**手动把状态搬过去**,`git clone` 带不过来。
+
+这不是没做,是刻意的:`SNAPSHOT.json` 是 CAS revision 保护的状态机快照,**没有合并语义**。
+两台机器各自 clone 到 revision 5、各自推进到 6,内容不同而编号相同,谁也不知道该信哪份;
+`attempts` / 失败签名计数一旦被三方合并,熔断(I4)就成了随机数。所以 mission 只能
+**串行交接**:文件搬过去,原机不再动它。
+
+搬这几样到新机器的同一路径:
+
+```bash
+# 带外拷贝,不要 git add -f(理由见下)
+rsync -a missions/state/CURRENT              新机器:<repo>/missions/state/
+rsync -a missions/state/<id>/SNAPSHOT.json   新机器:<repo>/missions/state/<id>/
+# LOG.md / archive/ / generations/ 建议本来就提交进 git,那就不用单独搬
+```
+
+然后在新机器上:
+
+```
+/mission resume <id>
+```
+
+**用 `resume`,不要指望自动附着** —— 原机若中断在换脑挂起中,自动附着会把你接进一个
+"闸门硬阻断一切写操作"的状态,而 `/mission next` 的握手要比对原机的 session 文件,
+永远对不上。`resume` 显式清挂起,这是设计好的出口。中断在 CHECK/ACT 的会退回 DO,
+尝试次数不变(那一轮诊断白跑,是刻意的)。
+
+**别用 `git add -f missions/state` 搬。** 除了上面的合并问题,状态件一旦被 git 跟踪,
+SNAPSHOT 的每次重写都会出现在 `git diff` 里 —— 补证据闸门("工作区没改动就不许原样
+重交")靠工作区树指纹判定,而那个指纹会因此每轮都变。这条已经修了(指纹显式排掉
+`missions/state`),但提交状态件仍然会给你一堆无意义的 diff 噪音和随时可能的冲突。
+
+### 一个前提:环境指纹要对得上
+
+状态搬对了还有一关。`state.envFingerprint` 是原机在冻结时记的,新机每次判定都会重算 ——
+不一致就整份判 `inconclusive`(I9:病根在环境,判 fail 会让 agent 去改代码),
+连 3 次停机。
+
+- **同 OS、同工具链版本 → 一致**,接力顺畅。
+- **跨 OS 基本必然漂**:`missions/scripts/env-fingerprint.sh` 里 `go version` 的输出带
+  `darwin/arm64` 这类平台串,而 `sha256sum` 在原生 macOS 上不存在(锁文件那几行会
+  退化成空 hash)。
+
+这个脚本随脚手架落盘,**仓库里的才是规范**(I6)—— 要跨 OS 接力,自己改成归一化的版本
+(比如只取语义版本号、用 `shasum -a 256` 兜底)。当前模板没有替你做这件事。
+
 ## 与其它扩展共存(以及为什么不支持 sub-agent)
 
 **mission 期间,其它扩展注册的工具全部不可用。** 相位切换用 `setActiveTools` 把工具集
 改写成白名单,而白名单里只有 pi 的内置工具和本扩展的 `mission_*` —— 你装的 subagent、
 todo、MCP 桥接注册的工具会在 mission 开始的那一刻被摘掉,**所有相位**都是,DO 也不例外。
 mission 结束(done / halted)时按开工那一刻记下的现场还原,包括这些第三方工具;现场随
-`missions/state/<id>/profile.json` 落盘,所以换脑、重启、换机器接力之后也还得回去。
+`missions/state/<id>/profile.json` 落盘,所以换脑与重启之后也还得回去。
+(`profile.json` 不进版本控制,换机器时它不跟着走 —— 那种情况下恢复的是新机器上的当前现场。)
 
 这是刻意的,不是没做完:**相位决定这一刻允许做什么**,而白名单之外的工具本扩展一无所知,
 放行等于在能力矩阵上开一个自己也说不清的口子。

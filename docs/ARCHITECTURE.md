@@ -769,7 +769,7 @@ git 提供 AC 冻结的审计链。
 
 | # | 不变量 | 实现位置 |
 |---|---|---|
-| I1 | 状态是仓库里的文件,不是会话里的对话 | `MissionRepository` + SNAPSHOT/CURRENT + `ensureAttached()` |
+| I1 | 状态是**磁盘上**的文件,不是会话里的对话(不等于「跟着 git 走」,见 8.8) | `MissionRepository` + SNAPSHOT/CURRENT + `ensureAttached()` |
 | I2 | AC 在 Plan 冻结,执行期只读 | `FREEZE_AC` + `gateCheck()` 的冻结件分支 + 工具集切换;判定依据先于执行冻结:`evaluateAdmission()` + `evaluateBaseline()` |
 | I3 | 判定证据必须来自执行者之外 | 只读独立 Verifier AgentSession + soft 永不触发 pass |
 | I4 | 熔断优先于重试 | `breaker.decide()`,并入 `VERDICT(fail)` 处理 |
@@ -902,7 +902,7 @@ quick 档不落盘、不走 `validatePlan()`,`acceptanceCriteria` 恒为空,
 
 - **上下文隔离**由**换脑**(4.10)承担,不是由子 agent 承担。换脑是整会话替换 +
   从 SNAPSHOT 重附着,崩溃安全;sub-agent 的上下文是易失的,进程一死什么都不剩,
-  与 I1(状态是仓库里的文件,不是会话里的对话)相反。
+  与 I1(状态是磁盘上的文件,不是会话里的对话)相反。
 - **调研隔离**由 **spike**(4.7.1)承担。它就是"scout 子 agent"的形状,只是产物被强制
   落到 `missions/spikes/`,并接一次换脑与 PLAN 重写 —— 可审计、可续、可回看。
 
@@ -911,3 +911,71 @@ quick 档不落盘、不走 `validatePlan()`,`acceptanceCriteria` 恒为空,
 更硬的一条是并行执行者共享工作区,hard 证据不再可归因(T1 的分支红了可能是 T2 改坏的),
 失败签名、基线红绿、`regression` 分类同时失去意义。参考 `docs/factory-ai-missions-research.md`:
 Factory 公开表态"串行执行 + 定向并行"实测优于广泛并行,并行化是否必要仍是其开放问题。
+
+---
+
+### 8.8 状态为什么不跟着 git 走(以及怎么换机器)
+
+**I1 说的是「磁盘上的文件」,不是「跟着仓库同步的文件」。** 它买到的是"活得过会话重建"
+—— 换脑、reload、重启都从 `CURRENT` + `SNAPSHOT.json` 重附着,这一半百分之百成立。
+它没有买、也不该买的是"git clone 一下就接着干"。
+
+理由不是"运行态污染 git 历史"(那太弱),而是结构性的:
+
+**`SNAPSHOT.json` 是一个由 CAS revision 保护的状态机快照,没有任何合并语义。**
+把它提交进版本控制,等于给一个只能串行推进的状态机开一个并发入口:两台机器各自
+clone 到 revision 5、各自推进到 6,内容不同而编号相同,`MissionRepository` 的 CAS
+校验对此完全无能为力 —— 它防的是同一份文件系统上的竞态。更糟的是
+`taskOrder`/`attempts`/`sameSignatureCount` 一旦被三方合并,I4(熔断)就成了随机数。
+
+所以 mission 的正确移动方式只能是**串行交接**:把文件搬过去,原机不再动它。
+不同步状态是在保护一条不变量,不是遗漏了可移植性。
+
+#### 排除清单按属性划,不按目录划
+
+| | 进版本控制 | 属性 |
+|---|---|---|
+| `generations/<n>/` | ✅ | 不可变,AC 冻结的审计链 |
+| `LOG.md` | ✅ | append-only,可合并;`plan.md` 与换脑简报都要求读它 |
+| `archive/` | ✅ | 写完不改;L3 简报要读里面的旧 MISSION.md |
+| `SNAPSHOT.json` / `CURRENT` | ❌ | 高频重写 + CAS + 无合并语义(上面那条) |
+| `CHECK.json` / `profile.json` | ❌ | 瞬时运行态 / 本机现场 |
+| `evidence/` | ❌ | 每条带完整 stdout/stderr,量的考虑 |
+
+落点是 `Runtime.ensureStateExcludes()`。`LOG.md` 与 `archive/` 曾经也在排除侧,
+理由只是"它们躺在 `state/` 目录下" —— 那是目录布局的副产品,不是决定;
+结果是接手的人被提示词指去读一份不存在的失败史。
+
+> `ensureInfoExclude()` 只追加不删除:老仓库的 `.git/info/exclude` 里已经写下的
+> `LOG.md`/`archive` 两行不会自动消失,要手工去掉。
+
+#### 换机器的做法
+
+带外拷贝这几样到新机器的同一路径,然后 `/mission resume <id>`:
+
+```
+missions/state/CURRENT                # 定位指针
+missions/state/<id>/SNAPSHOT.json     # 真相源(必需)
+missions/state/<id>/LOG.md            # 已进 git 的话不用管
+```
+
+两件事要知道:
+
+- **用 `/mission resume`,不要指望自动附着。** `ensureAttached()` 走的是
+  `clearPendingHandoff: false`;原机若中断在换脑挂起中,新机会接进一个闸门硬阻断
+  的状态,而 `/mission next` 的握手要比对原机的 session 文件路径,永远对不上。
+  `resume()` 显式清挂起,这是设计好的出口。中断在 CHECK/ACT 的会走
+  `RECOVER_INTERRUPTED_CHECK` 统一退回 DO,attempts 不变。
+- **别用 `git add -f` 搬。** 除了上面的 CAS 问题,它还有一个不明显的代价:
+  `computeGitTreeFingerprint()` 现在显式排掉 `missions/state`,但在此之前
+  状态件一旦被 git 跟踪,SNAPSHOT 的每次重写都会进 `git diff HEAD`,树指纹每轮
+  都变,4.8 的补证据闸门("没改动就不许原样重交")就永远不成立 —— 实测过,直接放行。
+
+#### 还有一堵墙:环境指纹
+
+即使状态搬对了,`state.envFingerprint` 是原机记的。同 OS、同工具链版本 → 指纹一致,
+接力顺畅;跨 OS 基本必然漂,因为 `missions/scripts/env-fingerprint.sh` 的输出里
+`go version` 带 `darwin/arm64` 这类平台串,而 `sha256sum` 在原生 macOS 上不存在
+(锁文件那几行会退化成空 hash)。指纹一漂,每轮判定都是 `inconclusive`(cause=`env`),
+连 3 次停机。这是 I9 按设计工作,但对跨 OS 接力就是一堵墙 —— 脚本可改
+(它随 scaffold 落盘,仓库里的才是规范),但当前模板没有为跨平台做归一化。
