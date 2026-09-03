@@ -1,6 +1,6 @@
 {
   "planner": {
-    "provider": "litellm",
+    "provider": "postdare",
     "model": "glm-5.3-flash"
   }
 }

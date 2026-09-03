@@ -1077,7 +1077,16 @@ test("DEFINE 范围确认:complex 恒确认,拒绝则停在 DEFINE 且不返还�
 	const pi = mockPi();
 	let answer = false;
 	const ctx = { ...mockCtx(tmp), hasUI: true } as any;
-	ctx.ui = { ...ctx.ui, confirm: async () => answer };
+	// 自绘确认页退化成可控裁决,但真的渲染一遍 —— 真实 define 过一遍 render 才能发现炸
+	ctx.ui = {
+		...ctx.ui,
+		custom: async (factory: any) => {
+			const plain = { fg: (_c: string, x: string) => x, bg: (_c: string, x: string) => x, bold: (x: string) => x };
+			const comp = factory({ requestRender: () => {}, terminal: { rows: 24 } }, plain, {}, () => {});
+			for (const w of [40, 96]) assert.ok(comp.render(w).length > 0);
+			return { status: answer ? "confirmed" : "rejected" };
+		},
+	};
 	const rt = new Runtime(pi, tmp);
 	await rt.startNew(ctx, "重构鉴权", "complex");
 

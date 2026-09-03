@@ -592,3 +592,77 @@ test("问答页短题列表也铺满(盒高不随题跳动)", () => {
 		assertWidths(r.lines, Math.max(40, width), `ask 短题 w=${width}`);
 	}
 });
+
+// ── DEFINE 范围确认页 ──
+
+import { renderDefineReview } from "../src/ui/define-review.ts";
+
+const DEFINE_DEF = {
+	constraints: ["不动 User 表", "沿用现有中间件顺序"],
+	nonGoals: ["不做 refresh token 轮换", "不做多端登录互踢"],
+	doneWhen: [
+		{ id: "DW1", text: "access token 过期前 60s 内自动刷新,集成测试覆盖刷新竞态" },
+		{ id: "DW2", text: "刷新失败时降级到登录页,且不丢当前路由的 query 参数" },
+		{ id: "DW3", text: "这一行故意写得非常长,验证窄终端下折行与悬挂缩进的表现是否正确——它应该被 wrap 而不是截断" },
+	],
+	verifySeam: "已有集成测试 test/auth/*",
+	resolved: [{ q: "令牌里放什么?", a: "只放 sub+exp(推荐)" }],
+	at: 0,
+};
+
+test("renderDefineReview:各段聚焦 × 各宽 × 各滚动 × 编辑态都恰好铺满", () => {
+	for (const width of WIDTHS) {
+		for (const focus of [0, 3, 5]) {
+			for (const scroll of [0, 3, 999]) {
+				for (const editing of [false, true]) {
+					const r = renderDefineReview({
+						theme,
+						width,
+						rows: 30,
+						goal: "把登录页的会话过期处理改成静默续期,过期后用户无感知,不再弹登录框",
+						definition: DEFINE_DEF,
+						focus,
+						editing,
+						draft: "DW2 那条根本判不了,写清楚怎么测",
+						scroll,
+					});
+					assertWidths(r.lines, Math.max(40, width), `define w=${width} focus=${focus} scroll=${scroll} edit=${editing}`);
+				}
+			}
+		}
+	}
+});
+
+test("renderDefineReview:空段不撑破,占位行可见", () => {
+	const r = renderDefineReview({
+		theme,
+		width: 96,
+		rows: 24,
+		goal: "",
+		definition: { constraints: [], nonGoals: [], doneWhen: [], verifySeam: undefined, resolved: [], at: 0 },
+		focus: 4,
+		editing: false,
+		draft: "",
+		scroll: 0,
+	});
+	assertWidths(r.lines, 96, "define 空段");
+	assert.ok(r.lines.join("\n").includes("(未声明)"), "空段落要有占位,人得知道是'没有'而不是'忘了展示'");
+});
+
+test("DEFINE 范围确认页不出现贴边框竖线", () => {
+	for (const line of renderDefineReview({
+		theme,
+		width: 96,
+		rows: 24,
+		goal: "把登录页改成静默续期",
+		definition: DEFINE_DEF,
+		focus: 0,
+		editing: false,
+		draft: "",
+		scroll: 0,
+	}).lines) {
+		const stripped = line.replace(/\x1b\[[0-9;]*m/g, "");
+		if (!/^[│╭╰├]/.test(stripped)) continue;
+		assert.ok(!/^.{0,2}[▎▍▌┃]/.test(stripped), `范围确认页仍有贴边竖线: ${JSON.stringify(stripped)}`);
+	}
+});

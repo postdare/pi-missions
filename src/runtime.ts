@@ -18,6 +18,7 @@ import { evaluateBaseline, shouldProbeBaseline, type BaselineProbe } from "./cor
 import { evaluateAsk, needsScopeConfirm, normalizeAskAnswers, roundCapFor, type AskQuestion } from "./core/define.ts";
 import { evaluateCoverage } from "./core/coverage.ts";
 import { openPlanReview } from "./ui/plan-review.ts";
+import { openDefineReview } from "./ui/define-review.ts";
 import { openAskReview } from "./ui/ask-review.ts";
 import { validateSpikePlan } from "./core/spike.ts";
 import type { DoneWhen, Definition, MissionPlan } from "./store/mission.ts";
@@ -938,26 +939,30 @@ export class Runtime {
 
 		// 范围确认:complex 恒确认,standard 只在真的有过歧义时确认(判定见 core/define.ts)
 		if (ctx.hasUI && needsScopeConfirm(a.state.tier, a.state.defineAsks)) {
-			const body = [
-				`目标:${goal}`,
-				"",
-				"完成条件(PLAN 会把每条翻译成一个 verify 分支):",
-				...doneWhen.map((d) => `  ${d.id}: ${d.text}`),
-				...(definition.nonGoals.length ? ["", "明确不做:", ...definition.nonGoals.map((n) => `  - ${n}`)] : []),
-				...(definition.constraints.length ? ["", "已确认的约束:", ...definition.constraints.map((c) => `  - ${c}`)] : []),
-				...(definition.verifySeam ? ["", `验证接缝:${definition.verifySeam}`] : []),
-				"",
-				"确认这个范围?",
-			].join("\n");
-			const confirmed = await ctx.ui.confirm("pi-missions · 确认范围", body);
-			if (!confirmed) {
+			const verdict = await openDefineReview(ctx, goal, definition);
+			if (verdict.status === "rejected") {
+				// 无意见拒绝(Esc):关页后补收一次 —— 只回一个 bit 的"不行"没法改
+				let comment = verdict.comment ?? "";
+				if (!comment && typeof ctx.ui?.editor === "function") {
+					comment =
+						(await ctx.ui.editor(
+							"拒绝意见(planner 会读到,也会写进 LOG.md)",
+							"# 哪里不对、期望改成什么。写具体一点 —— 这是 planner 唯一能拿到的反馈。\n",
+						)) ?? "";
+					comment = comment
+						.split("\n")
+						.filter((l: string) => !l.trimStart().startsWith("#"))
+						.join("\n")
+						.trim();
+				}
+				if (!comment) comment = "(人工拒绝,未写明原因)";
 				if (!a.inMemory) {
-					appendLog(statePaths(this.layout, a.state.missionId).logMd, "DEFINE 范围确认被拒,停留在 DEFINE");
+					appendLog(statePaths(this.layout, a.state.missionId).logMd, `DEFINE 范围确认被拒:${comment.replace(/\s+/g, " ")}`);
 				}
 				return {
 					error:
-						"人工拒绝了这个范围定义。根据他们的说明改 goal / doneWhen / nonGoals 后重新调用 mission_define。" +
-						"注意:提问轮次不会返还。",
+						`人工拒绝了这个范围定义:${comment}\n` +
+						"据此改 goal / doneWhen / nonGoals 后重新调用 mission_define。注意:提问轮次不会返还。",
 				};
 			}
 		}

@@ -173,11 +173,8 @@ export async function openAskReview(ctx: any, questions: AskQuestion[]): Promise
 			done: (r: AskReviewResult) => void,
 		) => {
 			let qi = 0;
-			const sel: number[] = questions.map((q) => (q.options?.length ? q.options.indexOf(q.recommend) : 0));
-			// 推荐项不在 options 里时默认选它(custom 行由 sel === options.length 表示)
-			for (const [i, q] of questions.entries()) {
-				if (q.options?.length && sel[i] < 0) sel[i] = q.options.length;
-			}
+			const sel: number[] = questions.map((q) => (q.options?.length ? Math.max(0, q.options.indexOf(q.recommend)) : 0));
+			// 推荐项不在 options 里时退回第一项 —— 默认不能落在自定义答案上,人没敲字就提交会落成空答案
 			const draft: string[] = questions.map(() => "");
 			let editing = false;
 			let scroll = 0;
