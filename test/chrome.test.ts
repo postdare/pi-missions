@@ -189,7 +189,6 @@ function fakeMission(id: string, goal: string, phase: string, tier = "standard")
 		cost: {},
 		escalation: { level: 1, history: [] },
 		sessionMap: {},
-		envFingerprint: null,
 		updatedAt: Date.now(),
 	} as unknown as MissionState;
 	return { missionId: id, state, plan: { goal } as ScannedMission["plan"], stateDir: "/tmp/x" };

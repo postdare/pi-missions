@@ -195,7 +195,7 @@ test("renderTaskDetail:显示实时 CHECK 与完整分流执行日志", () => {
 	assert.ok(joined.includes("完整 stderr"));
 });
 
-test("renderTaskDetail: 无结论的标签跟着成因走 —— 裁判坏了不能写'环境漂移'", () => {
+test("renderTaskDetail: 无结论的标签跟着成因走 —— 裁判坏了不能写成证据缺口", () => {
 	const base: TaskDetailData = {
 		task: { id: "T1", title: "任务", verify: ["quick"] },
 		taskState: {
@@ -210,17 +210,20 @@ test("renderTaskDetail: 无结论的标签跟着成因走 —— 裁判坏了不
 		attempts: [],
 		tier: "quick",
 	};
-	const textOf = (cause?: "env" | "evidence" | "judge") =>
+	const textOf = (cause?: string) =>
 		renderTaskDetail(
-			{ ...base, taskState: { ...base.taskState!, lastInconclusiveCause: cause } },
+			{ ...base, taskState: { ...base.taskState!, lastInconclusiveCause: cause as never } },
 			mockTheme,
 			80,
 		).join("\n");
 
 	assert.match(textOf("judge"), /裁判不可用/);
-	assert.doesNotMatch(textOf("judge"), /环境漂移/);
+	assert.doesNotMatch(textOf("judge"), /证据缺口/);
 	assert.match(textOf("evidence"), /证据缺口/);
-	assert.match(textOf("env"), /环境漂移/);
-	// 老状态没有这个字段(v2 快照里读出来的),退回原来的措辞而不是崩掉
-	assert.match(textOf(undefined), /环境漂移/);
+	// 字段缺失(老 v2 快照),以及取消环境指纹之前落盘的 "env" —— 都按证据缺口说,别崩也别留 undefined
+	for (const stale of [undefined, "env"]) {
+		const line = textOf(stale);
+		assert.match(line, /证据缺口/, `stale=${stale}`);
+		assert.doesNotMatch(line, /undefined|环境漂移/, `stale=${stale}`);
+	}
 });

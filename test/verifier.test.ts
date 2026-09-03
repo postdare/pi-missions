@@ -14,7 +14,6 @@ const options = {
 	thinkingLevel: "off",
 	brief: "verify",
 	timeoutMs: 1000,
-	envFingerprint: "fp",
 	expectedAcIds: ["AC1"],
 };
 

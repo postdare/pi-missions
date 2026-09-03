@@ -20,9 +20,8 @@ import type { Evidence } from "./core/types.ts";
 import { judge } from "./core/verdict.ts";
 import { reportIsSubstantive } from "./core/spike.ts";
 import { findMilestoneOf, findTask, isLastTaskOfMilestone } from "./store/mission.ts";
-import { envFingerprintSh, statePaths } from "./store/paths.ts";
+import { statePaths } from "./store/paths.ts";
 import { appendLog } from "./store/log.ts";
-import { computeEnvFingerprint } from "./store/git.ts";
 import { saveEvidence } from "./store/evidence.ts";
 import { saveCheckState, type CheckState } from "./store/check.ts";
 import { DEFAULT_THINKING } from "./roles/models.ts";
@@ -125,7 +124,6 @@ export class CheckRunner {
 			cmd: string,
 			args: string[],
 			timeout: number,
-			envFingerprint: string,
 		): Promise<void> => {
 			const startedAt = Date.now();
 			persistCheck({
@@ -143,7 +141,6 @@ export class CheckRunner {
 				result: result.code === 0 ? "pass" : "fail",
 				raw,
 				exitCode: result.code,
-				envFingerprint,
 				command,
 				startedAt,
 				durationMs,
@@ -167,10 +164,7 @@ export class CheckRunner {
 			persistCheck({ currentBranch: undefined });
 		};
 
-		const runIndependentVerifier = async (
-			envFingerprint: string,
-			renderBrief: () => Promise<string>,
-		): Promise<void> => {
+		const runIndependentVerifier = async (renderBrief: () => Promise<string>): Promise<void> => {
 			if (!isCurrent()) return;
 			if (!a.git) {
 				judgeUnavailable = "独立 Verifier 未启动:目标目录不是 git 仓库";
@@ -241,7 +235,6 @@ export class CheckRunner {
 				model,
 				thinkingLevel: verifierConfig?.thinking ?? DEFAULT_THINKING.verifier,
 				timeoutMs,
-				envFingerprint,
 				expectedAcIds: requiredAcIds,
 				brief: await renderBrief(),
 				onProgress: updateVerifierProgress,
@@ -334,8 +327,6 @@ export class CheckRunner {
 		rt.refreshWidget(ctx);
 
 		try {
-			const fp = await computeEnvFingerprint(rt.exec, rt.cwd, envFingerprintSh(l));
-			if (!isCurrent()) return;
 			const spike = rt.currentSpikeReport();
 			if (spike) {
 				const startedAt = Date.now();
@@ -357,8 +348,7 @@ export class CheckRunner {
 					result: substantive ? "pass" : "fail",
 					raw,
 					exitCode: substantive ? 0 : 1,
-					envFingerprint: fp,
-					command: `check ${spike.rel}`,
+						command: `check ${spike.rel}`,
 					startedAt,
 					durationMs,
 					stdout: substantive ? report! : "",
@@ -375,7 +365,7 @@ export class CheckRunner {
 				persistCheck({ currentBranch: undefined });
 				if (substantive) {
 					if (!isCurrent()) return;
-					await runIndependentVerifier(fp, async () =>
+					await runIndependentVerifier(async () =>
 						renderSpikeVerifierBrief({
 							goal: a.plan.goal,
 							taskId: task?.id ?? "",
@@ -397,13 +387,13 @@ export class CheckRunner {
 				requiredAcIds = criterion ? ["quick"] : [];
 				if (criterion?.judge === "command") {
 					const command = criterion.command;
-					await runHard("quick", command, "bash", ["-c", command], 300_000, fp);
+					await runHard("quick", command, "bash", ["-c", command], 300_000);
 					if (!isCurrent()) return;
 					persistCheck({
 						verifier: { status: "skipped", message: "quick 命令判据:hard 证据已足够" },
 					});
 				} else if (criterion?.judge === "ai") {
-					await runIndependentVerifier(fp, async () =>
+					await runIndependentVerifier(async () =>
 						renderVerifierBrief({
 							goal: a.plan.goal,
 							taskId: task?.id ?? "",
@@ -419,7 +409,6 @@ export class CheckRunner {
 						ctx,
 						criterion.text,
 						evidences,
-						fp,
 						persistCheck,
 					);
 					if (!isCurrent()) return;
@@ -444,11 +433,10 @@ export class CheckRunner {
 						"bash",
 						[script, name],
 						600_000,
-						fp,
 					);
 					if (!isCurrent()) return;
 				}
-				await runIndependentVerifier(fp, async () =>
+				await runIndependentVerifier(async () =>
 					renderVerifierBrief({
 						goal: a.plan.goal,
 						taskId: task?.id ?? "",
@@ -466,7 +454,6 @@ export class CheckRunner {
 			if (!isCurrent()) return;
 			persistCheck({ stage: "judging", summary: "正在生成最终判定..." });
 			const verdict = judge(evidences, {
-				expectedFingerprint: a.state.envFingerprint,
 				requiredAcIds,
 				judgeUnavailable,
 			});
@@ -515,7 +502,6 @@ export class CheckRunner {
 					acId: "check-runtime",
 					result: "inconclusive",
 					raw: message,
-					envFingerprint: a.state.envFingerprint ?? undefined,
 					command: checkState.currentBranch,
 					startedAt: Date.now(),
 					durationMs: 0,
@@ -529,8 +515,7 @@ export class CheckRunner {
 					/* CHECK.json 与 LOG.md 已保留异常,归档失败不阻断状态恢复 */
 				}
 				const verdict = judge(evidences, {
-					expectedFingerprint: a.state.envFingerprint,
-					requiredAcIds,
+						requiredAcIds,
 					judgeUnavailable,
 				});
 				const result = await rt.applyEvent({ type: "VERDICT", at: Date.now(), verdict }, ctx);
@@ -580,7 +565,6 @@ export class CheckRunner {
 		ctx: any,
 		criterionText: string,
 		evidences: Evidence[],
-		envFingerprint: string,
 		persistCheck: (patch: any) => void,
 	): Promise<string | null> {
 		persistCheck({
@@ -615,7 +599,6 @@ export class CheckRunner {
 			acId: "quick",
 			result: passed ? "pass" : "fail",
 			raw: reason,
-			envFingerprint,
 			command: "人工终审(不可重放)",
 			startedAt,
 			durationMs: Date.now() - startedAt,

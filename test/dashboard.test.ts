@@ -40,7 +40,6 @@ function runningState(): ReturnType<typeof initialState> {
 		sameSignatureCount: 2,
 		lastFailureReason: "AuthIntegrationTest#refreshToken 断言失败",
 	};
-	s.envFingerprint = "sha256:9f2c";
 	s.cost = { executor: 0.87, verifier: 0.09 };
 	return s;
 }
@@ -237,15 +236,17 @@ test("概览:非 TUI 扁平卡片仍要带上身份与进度(没有盒标题兜�
 });
 
 test("widget:无结论预警的括号内容跟着成因走 —— 核验模型 400 时别把人指去查环境", () => {
-	const warnOf = (cause?: "env" | "evidence" | "judge") => {
+	const warnOf = (cause?: string) => {
 		const s = runningState();
-		s.tasks.T2 = { ...s.tasks.T2, inconclusiveStreak: 2, lastInconclusiveCause: cause };
+		s.tasks.T2 = { ...s.tasks.T2, inconclusiveStreak: 2, lastInconclusiveCause: cause as never };
 		return renderWidgetCard(mockTheme, plan, s, Date.now(), 120).join("\n");
 	};
 	assert.match(warnOf("judge"), /核验裁判不可用/);
-	assert.doesNotMatch(warnOf("judge"), /环境可能漂移/);
 	assert.match(warnOf("evidence"), /证据没采到/);
-	assert.match(warnOf("env"), /环境可能漂移/);
-	// 老快照里没有这个字段,退回原措辞
-	assert.match(warnOf(undefined), /环境可能漂移/);
+	// 字段缺失(老快照),以及**取消环境指纹之前**落盘的 "env" —— 都不能渲染成 (undefined)
+	for (const stale of [undefined, "env"]) {
+		const line = warnOf(stale);
+		assert.match(line, /证据没采到/, `stale=${stale}`);
+		assert.doesNotMatch(line, /undefined/, `stale=${stale}`);
+	}
 });

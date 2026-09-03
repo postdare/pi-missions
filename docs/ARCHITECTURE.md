@@ -372,7 +372,7 @@ revision 绑定。磁盘写入顺序固定:
    五段可滚动:目标与边界 / 方案 / 验收标准 / 任务 / **verify.sh 全文**。
    见 4.6.2
 3. **基线跑** —— 落 verify.sh,逐条跑 AC 分支,`evaluateBaseline()` 核对红绿(见 4.6.1)
-4. **冻结** —— 发布 generation + SNAPSHOT、发 `PLAN_FROZEN`,记录环境指纹并提示提交 git
+4. **冻结** —— 发布 generation + SNAPSHOT、发 `PLAN_FROZEN`,提示提交 git
 
 前三关任意一关不过,计划都不冻结,相位停在 PLAN,错误信息回给 planner 自己修。
 基线跑放在人工确认**之后**是刻意的:PLAN 相位不执行任何东西(工具集里没有 bash),
@@ -485,8 +485,7 @@ mission 一旦会话重建就永久失联。
 
 ```
 0. 无证据                → inconclusive   ← 防"没跑就算过"
-1. 环境指纹不符          → inconclusive   ← I9
-2. 必需范围内的证据
+1. 必需范围内的证据
    inconclusive          → inconclusive   ← 范围外 AC 的无结论只是信息:
                                              CHECK 按任务收集证据,挂在后续任务的
                                              AC(典型:lint/build 回归)verifier 永远
@@ -505,7 +504,6 @@ mission 一旦会话重建就永久失联。
 **防空转与补证据闸门**:
 `verdict.ts` 对 `inconclusive` 进行三因分类(`inconclusiveCause`,见 `core/types.ts` 的
 `InconclusiveCause`)。成因决定处置与文案 —— 说错成因等于把人指到错误的方向:
-- `env`:环境指纹漂移。无需改代码,不受补证据闸门限制(仅受连续 3 次停机兜底)。
 - `evidence`:缺机械断言、范围内核验无结论或仅有 soft 证据。此时状态机在当前任务挂起 `awaitingEvidence`,记录提交时的工作区树指纹(`treeFp`)及缺失的 `missingAcIds`。
 - `judge`:**裁判本身不可用** —— 独立 Verifier 被 provider 打回、模型解析不到、非 TUI 下人工终审弹不出来。由 `check-runner.ts` 把原因经 `judge()` 的 `judgeUnavailable` 传入,只改写"因缺证据而无结论"那一类(hard 证据够判 pass 的照旧 pass,降级 hard-only 是设计)。**首轮即停机**:执行者改什么都换不来一个能用的裁判,回 DO 只是拿同一个坏裁判再空转一轮。也不挂 `awaitingEvidence` —— 它补不出这份证据。
 - **重交拦截**:在工作区未发生任何改动(git tree 指纹一致)时,执行者原样再次调用 `mission_submit` 会被状态机直接拦截并拒绝迁移,促使其补充有效机械断言或修改代码;当工作区产生修改(`treeFp` 变化)后放行,或通过 `mission_escalate` 升级方案。非 git 仓库自动退化放行。
@@ -588,13 +586,6 @@ done/halted 时还原它,而不是发一套本扩展想象中的内置全集。
 > 历史:这里原来一律发 `[...BUILTIN_ALL, ...MISSION_TOOLS]`,而 `SavedProfile` 根本
 > 不存工具集(pi 有 `getActiveTools()`,`src/` 里一次都没调过)。于是被摘掉的第三方
 > 工具在 mission 结束后**永远回不来**,得重开会话。那是 bug,不是取舍。
-
-### 4.12 环境指纹(Env Fingerprint)
-
-`missions/scripts/env-fingerprint.sh` 的输出哈希。冻结时记录一次
-(`state.envFingerprint`),每次采集证据时重算。不符 → 整份判 `inconclusive`
-而不是 `fail`(I9)。理由(`src/core/verdict.ts` 文件头):**判 fail 会让 agent 去改代码,
-而病根在环境。**
 
 ### 4.13 State Card
 
@@ -708,7 +699,6 @@ LLM 调 mission_submit
   ▼
 agent_settled 触发 tick,phase === check → runCheck()
   │  1. 建立 CHECK.json(stage=preparing),随后每个子阶段原子更新
-  │  2. 算环境指纹
   │  3. 逐个跑 verify.sh <分支> 拿退出码           → hard 证据
   │     CHECK.json 同步记录当前分支、已完成分支与耗时
   │  4. 起进程内 Verifier AgentSession,喂 AC + hard 结果 + diff → semi 证据
@@ -740,7 +730,6 @@ followUp 发 DO brief 或 ACT brief,循环继续
 ├── README.md                      工作流规则(脚手架铺设,已存在不覆盖)
 ├── phases/{define,plan,do,check,act}.md  相位提示词 ← 进哪个相位读哪个
 ├── scripts/
-│   └── env-fingerprint.sh         环境指纹
 ├── models.json                    角色 → 模型映射(可选)
 ├── spikes/<id>/<taskId>.md        探针结论(执行者在 spike 任务里唯一能写的文件)
 └── state/
@@ -777,7 +766,6 @@ git 提供 AC 冻结的审计链。
 | I6 | 不在仓库里的等于不存在 | `missions/` 全套 + `ensureScaffold()` |
 | I7 | 确定性判定归代码,语义判断归模型 | hard 证据零模型成本;升档判据机械可测 |
 | I8 | 上下文按相位分层加载 | `before_agent_start` + `phasePromptFor()`:standard 读 `phases/<phase>.md`,quick 走内联 `QUICK_PHASE_RULES` |
-| I9 | 环境不一致判 INCONCLUSIVE | 指纹比对 + `verdict.ts` 第 1 条 |
 
 ---
 
@@ -971,11 +959,36 @@ missions/state/<id>/LOG.md            # 已进 git 的话不用管
   状态件一旦被 git 跟踪,SNAPSHOT 的每次重写都会进 `git diff HEAD`,树指纹每轮
   都变,4.8 的补证据闸门("没改动就不许原样重交")就永远不成立 —— 实测过,直接放行。
 
-#### 还有一堵墙:环境指纹
+---
 
-即使状态搬对了,`state.envFingerprint` 是原机记的。同 OS、同工具链版本 → 指纹一致,
-接力顺畅;跨 OS 基本必然漂,因为 `missions/scripts/env-fingerprint.sh` 的输出里
-`go version` 带 `darwin/arm64` 这类平台串,而 `sha256sum` 在原生 macOS 上不存在
-(锁文件那几行会退化成空 hash)。指纹一漂,每轮判定都是 `inconclusive`(cause=`env`),
-连 3 次停机。这是 I9 按设计工作,但对跨 OS 接力就是一堵墙 —— 脚本可改
-(它随 scaffold 落盘,仓库里的才是规范),但当前模板没有为跨平台做归一化。
+### 8.9 环境指纹已取消(以及代价)
+
+曾经有一条 I9:「环境不一致判 INCONCLUSIVE,不判 FAIL」。冻结时把
+`missions/scripts/env-fingerprint.sh` 的输出哈希记进 `state.envFingerprint`,
+每次采证据重算,不符就整份判无结论。**已整体删除** —— 脚本、`computeEnvFingerprint()`、
+`judge()` 的第 1 优先级分支、`Evidence.envFingerprint`、`InconclusiveCause` 的 `env`。
+
+**它想保护的东西是真的。** 「红→绿才是证据」这条推理要求红和绿在同一个世界里测出来;
+世界变了却判 fail,会把 agent 支去改代码,而病根在环境 —— 最后熔断把升级阶梯烧掉。
+`inconclusive` 而不是 `fail` 这个选择本身是对的:它把环境噪音挡在 I4(熔断)之外。
+
+**但触发条件配错了方向。** 指纹把**锁文件 hash** 也算了进去,而锁文件是执行者的产出。
+实测复现:一个「加一个依赖并用起来」的 mission,执行者做得完全正确(AC 分支是绿的),
+照样连判三轮 `inconclusive` 然后停机。判据本该是「指纹只能覆盖执行者控制不了的东西」——
+把工作产物放进"世界有没有在我们脚下动"的检查里是范畴错误,而 DO 相位的全部意义
+就是让世界动。
+
+外加两个次生问题:输出里带 `go version` 的 `darwin/arm64` 这类平台串、`sha256sum` 在
+原生 macOS 上不存在,使它一半是环境校验、一半是机器身份校验(这也是 8.8 里换机器接力
+那堵墙的正身);以及无关工具链参与哈希(装个 Rust 会让一个改 CSS 的 mission 作废)。
+
+**取消后的代价,明确接受:** 环境漂移现在表现为 hard fail,与代码错误同形。
+agent 会去改代码,改不动就熔断升 L2 —— 你要到重写完方案才可能反应过来病根在环境。
+换来的是少一层限制、少一个会自己踩自己的机械闸门。若日后要补回来,正确形状是
+只覆盖执行者控制不了的东西(解释器/编译器版本,归一化掉平台串),而不是"我能想到的一切"。
+
+回归防线:`test/runtime.smoke.test.ts` 的「装依赖的 mission 不会把自己判停」。
+
+> 遗留:取消之前落盘的 snapshot 里存着 `lastInconclusiveCause: "env"`,
+> 它已不在 `InconclusiveCause` 里。`dashboard.ts` 的 `inconclusiveHint()` 与
+> `task-detail.ts` 的标签都按未知成因兜底,不会渲染出 `(undefined)`。

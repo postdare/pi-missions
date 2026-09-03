@@ -32,7 +32,6 @@ LLM 永远不能自己宣布"我做完了"——它只能提交,由 L0 依据证
 | I6 | 不在仓库里的,对 Agent 等于不存在 | 换机器/换 agent 行为不一致 |
 | I7 | 确定性判定归代码,语义判断归模型 | 又慢又贵 |
 | I8 | 上下文按相位分层加载 | 注意力稀释,跳步骤 |
-| I9 | 环境不一致判 INCONCLUSIVE,不判 FAIL | 环境漂移触发无效熔断 |
 
 ## 安装
 
@@ -174,7 +173,7 @@ LLM 可调用的工具五个,按相位分发:`mission_ask` / `mission_define`(DE
 - **逐项选择与高亮**: 焦点在任务列表时,用 `↑`/`↓` 上下选择特定任务,选中的任务块带有高亮背景与 `▸` 标识。
 - **任务详情页 (`Enter`)**: 选中任务后按 `Enter` 展开该任务的深度详情页:
   - **任务定义与状态**: 任务 ID、标题、所属里程碑、执行状态与任务类型(`impl` 或 `spike`)。
-  - **执行历史与熔断状态**: 尝试次数 (`attempt m/n`)、失败签名、连续同签名计数、连续无结论计数(标签按成因区分:环境漂移 / 证据缺口 / 裁判不可用)与上次失败原因。
+  - **执行历史与熔断状态**: 尝试次数 (`attempt m/n`)、失败签名、连续同签名计数、连续无结论计数(标签按成因区分:证据缺口 / 裁判不可用)与上次失败原因。
   - **验收标准与 verify 分支**: 映射的 AC ID、verify 分支、基线要求(`red`/`green`)及 AC 完整正文。
   - **实时 CHECK 进度**: 每 2 秒读取 L0 写入的 `CHECK.json`,显示准备环境、执行脚本、独立核验、生成判定等阶段,以及耗时、当前分支和已完成分支;独立核验进行中还会显示 Verifier 的最近动作、轮次、工具调用数、token 与费用。
 - **验证中的人工干预**: 独立核验运行时按 `S` 补充检查指令(写入 CHECK.json/LOG.md 审计链,只补检查重点,改不了冻结 AC),按 `Ctrl+A` 立即中止 mission 并同步终止 Verifier。
@@ -189,7 +188,6 @@ LLM 可调用的工具五个,按相位分发:`mission_ask` / `mission_define`(DE
 ├── missions/
 │   ├── README.md              # 工作流规则(脚手架自动铺设)
 │   ├── phases/{define,plan,do,check,act}.md  # 相位提示词,可定制
-│   ├── scripts/env-fingerprint.sh # 环境指纹(I9)
 │   ├── spikes/<id>/<task>.md  # 探针结论
 │   └── state/
 │       ├── CURRENT            # 活跃 mission 定位提示
@@ -234,7 +232,7 @@ LLM 可调用的工具五个,按相位分发:`mission_ask` / `mission_define`(DE
 - **semi**:进程内独立 Verifier AgentSession(只读 read/grep/find/ls + 结构化 mission_verdict)逐条核对 AC;
 - **soft**:执行者自述,只能触发 ACT,永远不能触发 PASS。
 
-环境指纹不符 → INCONCLUSIVE(不计入熔断);连续 3 次 INCONCLUSIVE → 停机等人。
+连续 3 次 INCONCLUSIVE → 停机等人。
 
 ## DEFINE:先定义问题(I2 的入口条件)
 
@@ -403,20 +401,6 @@ rsync -a missions/state/<id>/SNAPSHOT.json   新机器:<repo>/missions/state/<id
 SNAPSHOT 的每次重写都会出现在 `git diff` 里 —— 补证据闸门("工作区没改动就不许原样
 重交")靠工作区树指纹判定,而那个指纹会因此每轮都变。这条已经修了(指纹显式排掉
 `missions/state`),但提交状态件仍然会给你一堆无意义的 diff 噪音和随时可能的冲突。
-
-### 一个前提:环境指纹要对得上
-
-状态搬对了还有一关。`state.envFingerprint` 是原机在冻结时记的,新机每次判定都会重算 ——
-不一致就整份判 `inconclusive`(I9:病根在环境,判 fail 会让 agent 去改代码),
-连 3 次停机。
-
-- **同 OS、同工具链版本 → 一致**,接力顺畅。
-- **跨 OS 基本必然漂**:`missions/scripts/env-fingerprint.sh` 里 `go version` 的输出带
-  `darwin/arm64` 这类平台串,而 `sha256sum` 在原生 macOS 上不存在(锁文件那几行会
-  退化成空 hash)。
-
-这个脚本随脚手架落盘,**仓库里的才是规范**(I6)—— 要跨 OS 接力,自己改成归一化的版本
-(比如只取语义版本号、用 `shasum -a 256` 兜底)。当前模板没有替你做这件事。
 
 ## 与其它扩展共存(以及为什么不支持 sub-agent)
 

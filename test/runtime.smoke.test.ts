@@ -1678,6 +1678,52 @@ test("换机器接力做了一半:有冻结计划没有运行态,要说清楚而
 	assert.deepEqual(rt3.detachedMissions(), [], "状态健全的 mission 不算 detached");
 });
 
+test("装依赖的 mission 不会把自己判停 —— 环境指纹取消掉的正是这个事故", async () => {
+	// 取消前:指纹把 package-lock.json 的 hash 也算了进去,而锁文件是执行者的产出。
+	// 于是「加一个依赖并用起来」这种最常见的任务形状,执行者做得完全正确(AC 分支是绿的),
+	// 照样连判三轮 inconclusive(cause=env)然后停机。实测复现过。
+	const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "pi-missions-smoke-"));
+	await execReal("git", ["init", "-q"], { cwd: tmp });
+	await execReal("git", ["config", "user.name", "test"], { cwd: tmp });
+	await execReal("git", ["config", "user.email", "test@example.com"], { cwd: tmp });
+	fs.writeFileSync(path.join(tmp, "package.json"), '{"name":"x","version":"1.0.0"}\n');
+	fs.writeFileSync(path.join(tmp, "package-lock.json"), '{"name":"x","lockfileVersion":3,"packages":{}}\n');
+	await execReal("git", ["add", "-A"], { cwd: tmp });
+	await execReal("git", ["commit", "-qm", "seed"], { cwd: tmp });
+
+	const pi = mockPi();
+	const ctx = mockCtx(tmp);
+	const rt = new Runtime(pi, tmp);
+	await rt.startNew(ctx, "加一个校验库并用起来", "standard");
+	await rt.define(ctx, {
+		goal: "加一个校验库并用起来",
+		doneWhen: [{ id: "DW1", text: "入参校验走新库" }],
+		constraints: [],
+		nonGoals: [],
+	});
+	await rt.writePlan(ctx, {
+		goal: "加一个校验库并用起来",
+		acceptanceCriteria: [{ id: "AC1", text: "validate.js 存在", verify: "has-validate", covers: ["DW1"] }],
+		milestones: [{ id: "M1", title: "only", tasks: [{ id: "T1", title: "装库并接上", verify: ["has-validate"] }] }],
+		verifyScript: '#!/usr/bin/env bash\ncase "$1" in has-validate) test -f validate.js ;; *) exit 2 ;; esac\n',
+	});
+	assert.equal(rt.active!.state.phase, "do");
+
+	// 执行者做了完全正确的事:装依赖(锁文件因此变了)+ 写代码
+	fs.writeFileSync(
+		path.join(tmp, "package-lock.json"),
+		'{"name":"x","lockfileVersion":3,"packages":{"node_modules/zod":{"version":"3.0.0"}}}\n',
+	);
+	fs.writeFileSync(path.join(tmp, "validate.js"), "export const ok = 1;\n");
+
+	await rt.applyEvent({ type: "SUBMIT", at: Date.now() }, ctx);
+	await rt.runCheck(ctx);
+
+	const verdict = pi.calls.entries.filter((e) => e.type === "missions-verdict").pop()?.data?.verdict;
+	assert.equal(verdict?.outcome, "pass", `锁文件变化不该影响判定,实际:${JSON.stringify(verdict)}`);
+	assert.equal(rt.active!.state.phase, "done");
+});
+
 test("quick 人工终审:人点通过 → done,证据是 human 级且标记为不可重放", async () => {
 	const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "pi-missions-smoke-"));
 	const pi = mockPi();

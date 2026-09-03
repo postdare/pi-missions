@@ -33,29 +33,6 @@ export function ensureInfoExclude(cwd: string, pattern: string): boolean {
 }
 
 /**
- * 计算环境指纹。脚本由 scaffold 落盘,与锁文件一起进仓库,可复现(I9)。
- * 脚本缺失(quick 档尚未落盘)时用内置探针兜底。
- */
-export async function computeEnvFingerprint(exec: Exec, cwd: string, scriptPath: string): Promise<string> {
-	let material: string;
-	if (fs.existsSync(scriptPath)) {
-		const r = await exec("bash", [scriptPath], { cwd, timeout: 30_000 });
-		material = r.stdout;
-	} else {
-		const r = await exec(
-			"bash",
-			[
-				"-c",
-				'node --version 2>/dev/null; java -version 2>&1 | head -1; mvn -version 2>/dev/null | head -1; python3 --version 2>/dev/null; go version 2>/dev/null; for f in package-lock.json pom.xml requirements.txt yarn.lock pnpm-lock.yaml Cargo.lock go.sum; do [ -f "$f" ] && echo "$f:$(sha256sum "$f" | cut -d" " -f1)"; done',
-			],
-			{ cwd, timeout: 30_000 },
-		);
-		material = r.stdout;
-	}
-	return `sha256:${createHash("sha256").update(material).digest("hex").slice(0, 16)}`;
-}
-
-/**
  * 计算工作区树指纹(HEAD + status + diff)。用于补证据闸门判定「工作区是否有任何实际改动」。
  * 非 git 仓库或执行异常时返回 null(降级放行)。
  *

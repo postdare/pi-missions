@@ -257,26 +257,6 @@ test("inconclusive·evidence 挂待补证据闸门并记下 treeFp,同指纹 SUB
 	assert.equal(accepted.state.tasks.T1.awaitingEvidence, null);
 });
 
-test("inconclusive·env 不设闸门,原样重交可放行", () => {
-	const tree = "sha256:1111111111111111";
-	let s = toDo();
-	s = transition(s, { type: "SUBMIT", at: AT, treeFp: tree }).state;
-	const envVerdict: Verdict = {
-		outcome: "inconclusive",
-		inconclusiveCause: "env",
-		failing: [],
-		reason: "环境指纹不符",
-	};
-	s = transition(s, { type: "VERDICT", at: AT, verdict: envVerdict }).state;
-	assert.equal(s.phase, "do");
-	assert.equal(s.tasks.T1.awaitingEvidence, null);
-
-	// 原样重交放行
-	const okSubmit = transition(s, { type: "SUBMIT", at: AT, treeFp: tree });
-	assert.ok(!okSubmit.error);
-	assert.equal(okSubmit.state.phase, "check");
-});
-
 test("非 git 仓库(treeFp 为 null)时闸门退化放行", () => {
 	let s = toDo();
 	s = transition(s, { type: "SUBMIT", at: AT, treeFp: null }).state;

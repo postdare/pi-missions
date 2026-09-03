@@ -29,10 +29,10 @@ import {
 	validatePlan,
 } from "./store/mission.ts";
 import { loadConfig, matchGlob, type MissionsConfig } from "./store/config.ts";
-import { envFingerprintSh, layout, modelsJson, spikeReport, statePaths, type RepoLayout } from "./store/paths.ts";
+import { layout, modelsJson, spikeReport, statePaths, type RepoLayout } from "./store/paths.ts";
 import { ensureScaffold } from "./store/scaffold.ts";
 import { appendLog } from "./store/log.ts";
-import { computeEnvFingerprint, computeGitTreeFingerprint, ensureInfoExclude, isGitRepo } from "./store/git.ts";
+import { computeGitTreeFingerprint, ensureInfoExclude, isGitRepo } from "./store/git.ts";
 import { loadCheckState, removeCheckState, type CheckState } from "./store/check.ts";
 import { renderWidgetCard } from "./ui/dashboard.ts";
 import { renderStateCard, renderDoBrief, renderActBrief, renderHandoffBrief } from "./briefs.ts";
@@ -571,10 +571,7 @@ export class Runtime {
 		} else {
 			ctx.ui.notify("非 git 仓库:AC 冻结仅靠 L0 闸门,无 git 审计链(降级模式)", "warning");
 		}
-		appendLog(
-			statePaths(this.layout, a.state.missionId).logMd,
-			`env fingerprint=${a.state.envFingerprint} generation=${a.generation}`,
-		);
+		appendLog(statePaths(this.layout, a.state.missionId).logMd, `generation=${a.generation}`);
 	}
 
 	/** 探针任务开始前先把结论目录建好,免得执行者第一次写文件就撞在 ENOENT 上 */
@@ -1152,7 +1149,6 @@ export class Runtime {
 		const previousPlan = a.plan;
 		a.plan = plan;
 		this.stagedPlan = staged;
-		const envFingerprint = await computeEnvFingerprint(this.exec, this.cwd, envFingerprintSh(this.layout));
 		// 记录冻结时的 git HEAD —— verifier 的 diff 基准。
 		// 从 baseCommit 到 HEAD 的 diff 才是本次 mission 的产出,
 		// 从 HEAD 开始 diff 会把冻结前的工作混进 verdict 证据里。
@@ -1164,7 +1160,6 @@ export class Runtime {
 				at: Date.now(),
 				taskOrder: taskOrder(plan),
 				spikes: spikeTaskIds(plan),
-				envFingerprint,
 				baseCommit,
 				sessionFile: safeSessionFile(ctx),
 			},

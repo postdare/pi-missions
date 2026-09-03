@@ -32,7 +32,6 @@ export interface VerifierOptions {
 	brief: string;
 	timeoutMs: number;
 	signal?: AbortSignal;
-	envFingerprint: string;
 	/** 本轮必须逐条提交且只能提交这些 AC */
 	expectedAcIds: string[];
 	onProgress?: (progress: VerifierProgress) => void;
@@ -324,7 +323,6 @@ async function runVerifierOnce(
 				result: v.result,
 				raw: v.rationale,
 				failureTag: v.failureTag,
-				envFingerprint: opts.envFingerprint,
 			})),
 			usage,
 			trace,

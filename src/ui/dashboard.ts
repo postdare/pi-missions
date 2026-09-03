@@ -17,14 +17,20 @@ import { findTask, type MissionPlan } from "../store/mission.ts";
 import { clip, miniBar, pad, wrap } from "./chrome.ts";
 
 /**
- * 无结论成因 → 给人看的一句话。别退回"环境可能漂移"这个万能兜底:
- * 核验模型 400 时说环境漂移,人就会去查 git 状态而不是去查 models.json(真实事故)。
+ * 无结论成因 → 给人看的一句话。别用万能兜底:
+ * 核验模型 400 时说"环境可能漂移",人就会去查 git 状态而不是去查 models.json(真实事故)。
+ *
+ * 查表要容错:这个成因是**落盘**的(TaskState.lastInconclusiveCause),而取消环境指纹
+ * 之前的 snapshot 里存着已经不存在的 "env"。直接下标会渲染出 "(undefined)"。
  */
 const INCONCLUSIVE_HINT: Record<InconclusiveCause, string> = {
-	env: "环境可能漂移",
 	evidence: "证据没采到",
 	judge: "核验裁判不可用",
 };
+
+function inconclusiveHint(cause: InconclusiveCause | undefined): string {
+	return INCONCLUSIVE_HINT[cause as InconclusiveCause] ?? "证据没采到";
+}
 
 export interface EvidenceSummary {
 	/** acId/verify 分支 → 最近一次判定 */
@@ -261,7 +267,7 @@ export function renderWidgetCard(
 		lines.push(
 			theme.fg(
 				"warning",
-				`  ⚠ 连续 ${t.inconclusiveStreak} 次无法判定(${INCONCLUSIVE_HINT[t.lastInconclusiveCause ?? "env"]})`,
+				`  ⚠ 连续 ${t.inconclusiveStreak} 次无法判定(${inconclusiveHint(t.lastInconclusiveCause)})`,
 			),
 		);
 	}
@@ -393,9 +399,8 @@ export function overviewLines(plan: MissionPlan, state: MissionState, opts: Over
 			costSummary ? `${costSummary}${dim(` · ${roleDetail}`)}` : dim("尚无记录"),
 		),
 	);
-	lines.push(field(t, "指纹", state.envFingerprint ? dim(state.envFingerprint) : dim("未冻结(PLAN 完成后记录)")));
 
-	// 上面这几行(阶梯/成本/指纹)不折行 —— 它们的信息是"前重后轻",截断即可
+	// 上面这几行(阶梯/成本)不折行 —— 它们的信息是"前重后轻",截断即可
 	return lines.map((l) => clip(l, width));
 }
 

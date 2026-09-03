@@ -1,18 +1,30 @@
 /**
  * pi-missions · core/verdict
  *
- * 把一组证据判定为 pass / fail / inconclusive。
- * 这是 I3(判定权外置)与 I9(环境不一致判 inconclusive)的实现。
+ * 把一组证据判定为 pass / fail / inconclusive。这是 I3(判定权外置)的实现。
  *
  * 判定优先级(自上而下,命中即返回):
  *   0. 无证据                        → inconclusive  ← 防止"没跑就算过"
- *   1. 环境指纹不符                  → inconclusive  ← I9,不计入熔断
- *   2. 必需范围内的证据 inconclusive  → inconclusive  ← 范围外 AC 的无结论只是信息
- *   3. 任一 hard fail                → fail
- *   4. 必需 AC 缺少证据              → inconclusive  ← 防止漏跑当通过
- *   5. 任一 semi/human fail          → fail
- *   6. 只有 soft 证据                → inconclusive  ← I3,soft 不能触发 pass
- *   7. 其余                          → pass
+ *   1. 必需范围内的证据 inconclusive  → inconclusive  ← 范围外 AC 的无结论只是信息
+ *   2. 任一 hard fail                → fail
+ *   3. 必需 AC 缺少证据              → inconclusive  ← 防止漏跑当通过
+ *   4. 任一 semi/human fail          → fail
+ *   5. 只有 soft 证据                → inconclusive  ← I3,soft 不能触发 pass
+ *   6. 其余                          → pass
+ *
+ * ── 这里曾经有一条"环境指纹不符 → inconclusive"排在最前(旧 I9)。已删除。
+ *
+ * 它想保护的东西是真的:「红→绿才是证据」这条推理,要求红和绿在同一个世界里测出来;
+ * 世界变了却判 fail,会把 agent 支去改代码,而病根在环境,最后熔断把升级阶梯烧掉。
+ *
+ * 但它的触发条件配错了方向 —— 指纹把**锁文件 hash** 也算了进去,而锁文件是执行者的
+ * 产出。实测:一个"加一个依赖并用起来"的 mission,执行者做得完全正确(AC 分支是绿的),
+ * 照样连判三轮 inconclusive 然后停机。它挡住的合法情况比真问题多,而 DO 相位的全部
+ * 意义就是让世界动 —— 把执行者的工作产物放进"世界有没有在我们脚下动"的检查里,
+ * 本身就是范畴错误。
+ *
+ * 取消之后:环境漂移会表现为 hard fail,与代码错误同形。这是明确接受的取舍
+ * (要更轻、少一层限制),代价见 docs/ARCHITECTURE.md 8.9。
  *
  * 最后再过一道 judgeUnavailable:裁判本身坏掉时,把"缺证据"改判成"裁判不可用"
  * (cause=judge)。成因不同,处置也不同 —— 见 types.ts 的 InconclusiveCause。
@@ -22,8 +34,6 @@ import type { Evidence, Verdict } from "./types.ts";
 import { failureSignature } from "./breaker.ts";
 
 export interface JudgeOptions {
-  /** Plan 冻结时记录的环境指纹。传入则逐条比对 */
-  expectedFingerprint?: string | null;
   /** 本次必须被覆盖的 AC id 列表。缺一条即 inconclusive */
   requiredAcIds?: string[];
   /**
@@ -50,7 +60,7 @@ export function judge(evidences: Evidence[], options: JudgeOptions = {}): Verdic
 }
 
 function judgeEvidences(evidences: Evidence[], options: JudgeOptions): Verdict {
-  const { expectedFingerprint = null, requiredAcIds = [] } = options;
+  const { requiredAcIds = [] } = options;
 
   // 0. 无证据不等于通过
   if (evidences.length === 0) {
@@ -63,24 +73,7 @@ function judgeEvidences(evidences: Evidence[], options: JudgeOptions): Verdict {
     };
   }
 
-  // 1. 环境漂移优先于一切。判 fail 会导致 agent 去改代码,而病根在环境。
-  if (expectedFingerprint) {
-    const drifted = evidences.filter(
-      (e) => e.envFingerprint && e.envFingerprint !== expectedFingerprint,
-    );
-    if (drifted.length > 0) {
-      return {
-        outcome: "inconclusive",
-        failing: drifted,
-        reason:
-          `环境指纹不符(期望 ${short(expectedFingerprint)},` +
-          `实际 ${short(drifted[0].envFingerprint!)}),不计入熔断`,
-        inconclusiveCause: "env",
-      };
-    }
-  }
-
-  // 2. 证据本身无结论 —— 只在本次判定的必需范围(requiredAcIds)内阻断。
+  // 1. 证据本身无结论 —— 只在本次判定的必需范围(requiredAcIds)内阻断。
   //    CHECK 按任务收集证据:挂在后续任务的 AC(典型:lint/build 回归项)没有
   //    命令输出可核对,只读的 verifier 永远判不出结论 —— 若让范围外的无结论阻断,
   //    当前任务无论写得多好都过不了 CHECK,三次空转后熔断(真实事故 ×2)。
@@ -100,7 +93,7 @@ function judgeEvidences(evidences: Evidence[], options: JudgeOptions): Verdict {
     };
   }
 
-  // 3. hard 失败:最强证据,无视其余
+  // 2. hard 失败:最强证据,无视其余
   const hardFail = evidences.filter((e) => e.level === "hard" && e.result === "fail");
   if (hardFail.length > 0) {
     return {
@@ -111,7 +104,7 @@ function judgeEvidences(evidences: Evidence[], options: JudgeOptions): Verdict {
     };
   }
 
-  // 4. 必需 AC 未被覆盖 —— 漏跑不能算通过
+  // 3. 必需 AC 未被覆盖 —— 漏跑不能算通过
   const covered = new Set(evidences.map((e) => e.acId));
   const missing = requiredAcIds.filter((id) => !covered.has(id));
   if (missing.length > 0) {
@@ -124,7 +117,7 @@ function judgeEvidences(evidences: Evidence[], options: JudgeOptions): Verdict {
     };
   }
 
-  // 5. semi / human 失败。人工终审与模型核验同级:两者都在执行者之外(I3),
+  // 4. semi / human 失败。人工终审与模型核验同级:两者都在执行者之外(I3),
   //    区别只在可重放性,不在权威性 —— 人说不行就是不行。
   const judgedFail = evidences.filter(
     (e) => (e.level === "semi" || e.level === "human") && e.result === "fail",
@@ -147,7 +140,7 @@ function judgeEvidences(evidences: Evidence[], options: JudgeOptions): Verdict {
     };
   }
 
-  // 6. soft 单独不足以判定通过(I3)
+  // 5. soft 单独不足以判定通过(I3)
   const hasObjective = evidences.some((e) => e.level !== "soft");
   if (!hasObjective) {
     return {
@@ -159,16 +152,12 @@ function judgeEvidences(evidences: Evidence[], options: JudgeOptions): Verdict {
     };
   }
 
-  // 7. 通过
+  // 6. 通过
   return {
     outcome: "pass",
     failing: [],
     reason: `全部通过(${evidences.filter((e) => e.level !== "soft").length} 项客观证据)`,
   };
-}
-
-function short(fp: string): string {
-  return fp.length > 14 ? `${fp.slice(0, 14)}…` : fp;
 }
 
 /** 裁判理由压成一行带进 reason。截断只发生在超长的 verifier 论述上 */

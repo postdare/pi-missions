@@ -67,7 +67,6 @@ export const INCONCLUSIVE_STREAK_CAP = 3;
  * 真实事故:核验模型 400,连着三轮判无结论,提示写的却是"环境可能漂移"。
  */
 const HALT_HINT: Record<InconclusiveCause, string> = {
-	env: "停机等待人工检查环境",
 	evidence: "停机等待人工检查证据采集(verify 分支是否真的跑出了输出)",
 	judge: "停机等待修复核验裁判",
 };
@@ -233,7 +232,6 @@ export function transition(state: MissionState, event: MissionEvent): Transition
 					currentTask: first,
 					taskOrder: order,
 					tasks,
-					envFingerprint: event.envFingerprint ?? state.envFingerprint,
 					baseCommit: event.baseCommit ?? state.baseCommit,
 					sessionMap,
 				},
@@ -889,7 +887,6 @@ export function initialState(params: {
 	missionId: string;
 	tier: Tier;
 	taskOrder: string[];
-	envFingerprint?: string | null;
 }): MissionState {
 	const tasks: Record<string, TaskState> = {};
 	for (const id of params.taskOrder) {
@@ -911,7 +908,6 @@ export function initialState(params: {
 		taskOrder: params.taskOrder,
 		tasks,
 		escalation: { level: 1, history: [] },
-		envFingerprint: params.envFingerprint ?? null,
 		baseCommit: null,
 		pendingHandoff: null,
 		sessionMap: {},

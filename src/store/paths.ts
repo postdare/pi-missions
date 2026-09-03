@@ -14,7 +14,6 @@ export interface RepoLayout {
 	/** 探针结论:missions/spikes/<missionId>/<taskId>.md */
 	spikes: string;
 	phases: string;
-	scripts: string;
 }
 
 export interface MissionStatePaths {
@@ -37,7 +36,6 @@ export function layout(cwd: string, dirName: string): RepoLayout {
 		state: path.join(root, "state"),
 		spikes: path.join(root, "spikes"),
 		phases: path.join(root, "phases"),
-		scripts: path.join(root, "scripts"),
 	};
 }
 
@@ -70,9 +68,6 @@ export function spikeReport(l: RepoLayout, missionId: string, taskId: string): s
 	return path.join(l.spikes, missionId, `${taskId}.md`);
 }
 
-export function envFingerprintSh(l: RepoLayout): string {
-	return path.join(l.scripts, "env-fingerprint.sh");
-}
 
 export function modelsJson(l: RepoLayout): string {
 	return path.join(l.root, "models.json");

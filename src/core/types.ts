@@ -75,8 +75,6 @@ export interface Evidence {
 	 */
 	failureTag?: FailureCategory;
 	exitCode?: number;
-	/** 采集该证据时的环境指纹。与 mission 记录不符则整份判定 inconclusive */
-	envFingerprint?: string;
 	/** 完整执行命令(可选) */
 	command?: string;
 	/** 开始时间戳(可选) */
@@ -92,13 +90,14 @@ export interface Evidence {
 export type VerdictOutcome = "pass" | "fail" | "inconclusive";
 
 /**
- * 无结论的成因。三者的处置完全不同,别合并:
- * - env      环境指纹不符 —— 病根在环境,人去修环境,重试有意义
+ * 无结论的成因。两者的处置完全不同,别合并:
  * - evidence 该采的证据没采到 —— 执行者补机械证据后重试有意义
  * - judge    裁判本身不可用(核验模型报错、人工终审弹不出来)—— 执行者做什么都没用,
  *            重试只是拿同一个坏裁判再空转一轮,直接停机等人
+ *
+ * 曾经还有一个 `env`(环境指纹漂移)。取消了 —— 见 core/verdict.ts 文件头。
  */
-export type InconclusiveCause = "env" | "evidence" | "judge";
+export type InconclusiveCause = "evidence" | "judge";
 
 export interface Verdict {
 	outcome: VerdictOutcome;
@@ -130,7 +129,7 @@ export interface TaskState {
 	lastFailureReason?: string;
 	/** 同一签名连续出现次数。签名变化时重置为 1 */
 	sameSignatureCount: number;
-	/** 连续 INCONCLUSIVE 次数。环境漂移时防死循环,达到上限直接停机 */
+	/** 连续 INCONCLUSIVE 次数。判不出结论时防死循环,达到上限直接停机 */
 	inconclusiveStreak: number;
 	/** 最近一次 INCONCLUSIVE 的成因。UI 的措辞按它分流 —— 说错成因会把人指到错误的方向 */
 	lastInconclusiveCause?: InconclusiveCause;
@@ -173,8 +172,6 @@ export interface MissionState {
 		level: EscalationLevel;
 		history: EscalationRecord[];
 	};
-	/** Plan 冻结时记录的环境指纹 */
-	envFingerprint: string | null;
 	/**
 	 * Plan 冻结时记录的 git HEAD commit hash。
 	 * verifier 的 diff 基准:从这次冻结开始的所有改动才是本次 mission 的产出,
@@ -240,7 +237,6 @@ export type MissionEvent =
 			at: number;
 			taskOrder?: string[];
 			spikes?: string[];
-			envFingerprint?: string | null;
 			/** 冻结时的 git HEAD,verifier 的 diff 基准。首次冻结必传,重冻结(L2/L3)可不传 */
 			baseCommit?: string | null;
 			sessionFile?: string;

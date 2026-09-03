@@ -28,16 +28,6 @@ test("hard 失败压倒其余全部通过", () => {
   assert.ok(v.signature);
 });
 
-test("环境指纹不符判 inconclusive 而非 fail", () => {
-  const v = judge(
-    [ev({ result: "fail", raw: "boom", envFingerprint: "sha256:bbb" })],
-    { expectedFingerprint: "sha256:aaa" },
-  );
-  assert.equal(v.outcome, "inconclusive");
-  assert.equal(v.inconclusiveCause, "env");
-  assert.match(v.reason, /环境指纹/);
-});
-
 test("必需 AC 缺证据判 inconclusive", () => {
   const v = judge([ev({ acId: "AC1", result: "pass" })], {
     requiredAcIds: ["AC1", "AC2"],
@@ -179,10 +169,3 @@ test("裁判不可用不掩盖 hard 失败", () => {
   assert.ok(v.signature);
 });
 
-test("环境漂移优先于裁判不可用 —— 环境不对时先修环境", () => {
-  const v = judge([ev({ result: "pass", envFingerprint: "sha256:bbb" })], {
-    expectedFingerprint: "sha256:aaa",
-    judgeUnavailable: "独立核验不可用",
-  });
-  assert.equal(v.inconclusiveCause, "env");
-});
