@@ -16,7 +16,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ## 命令
 
 ```bash
-npm test                                           # 全部:core 单测 + runtime/UI 冒烟(381 个)
+npm test                                           # 全部:core 单测 + runtime/UI 冒烟(411 个)
 node --test src/core/__tests__/breaker.test.ts     # 单个文件
 node --test --test-name-pattern="熔断" src/core/__tests__/breaker.test.ts   # 单个用例(名字是中文)
 npx tsc --noEmit                                   # 类型检查(tsconfig 只 include src/)
@@ -74,9 +74,9 @@ PI_TUI_WRITE_LOG=/tmp/tui.log pi -e .          # 捕获写往 stdout 的原始 A
 src/index.ts    装配:挂 pi 事件、注册工具与命令、entry renderer
 src/runtime.ts  哑管道:采证据 → judge() → 喂事件给 machine → 翻译 Effect[] 成 pi 调用
 src/phase-prompts.ts  相位提示词的选取(按判定装置分流:standard 读盘,quick 走内联)
-src/core/       纯函数,唯一裁判(machine/breaker/verdict/baseline/tier/define/spike/coverage/review)
+src/core/       纯函数,唯一裁判(machine/breaker/verdict/baseline/tier/define/spike/scout/coverage/review)
 src/store/      v2 Repository、generation 投影、log/evidence/git/scaffold
-src/roles/      models.json 角色模型 + 进程内 Verifier AgentSession
+src/roles/      models.json 角色模型 + 进程内 Verifier / Scout AgentSession(都是只读,见下)
 src/hooks/      tool_call 闸门 + 编辑级增量反馈
 src/ui/         chrome(圆角盒框架)/ panel(/missions)/ plan-review(冻结前评审)/ ask-review(DEFINE 问答)/
                 human-review(quick 人工终审)/ status-view / dashboard / models-page
@@ -98,7 +98,13 @@ skills/         随包分发的 pi skill(入场导览:该不该开 mission、选
    并行工具执行时序不保证。相位能力矩阵在 `toolsForPhase()`。
 5. **AC 冻结后只读** —— 三道锁:工具集切换、`gate.ts` 拦 `missions/state/`
    (snapshot 与所有 generation)的 edit/write、bash 写操作粗检。别加绕过其中任何一道的"方便入口"。
-6. **`mission_submit` 不接受任何参数** —— 判定依据必须先于执行冻结(I2/I3)。
+6. **子 agent 一律只读,而且没有 bash** —— `VERIFIER_TOOLS` / `SCOUT_TOOLS` 是同一份名单。
+   子 agent 的工具调用不经过宿主会话的 `tool_call` / `tool_result` 钩子,所以能写工作区的
+   子 agent 会同时废掉三条:I2 的冻结件闸门、I7 的 `touchedFiles` 记账、编辑级增量反馈
+   (docs/ARCHITECTURE.md 8.7 有对照表)。**能跑任意命令就能写文件**,所以"没有 bash"
+   与"没有 edit/write"是同一条约束,不是两条。加新的子 agent 按这个模子:只读 + 结论
+   经结构化工具回到 L0,判定权留在 core 的纯函数里。
+7. **`mission_submit` 不接受任何参数** —— 判定依据必须先于执行冻结(I2/I3)。
    任何让执行者事后补判定标准的改动都是在拆这套设计。
 
 ## UI 层的四个坑(都有真实事故)

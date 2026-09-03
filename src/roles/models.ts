@@ -24,18 +24,22 @@ export const DEFAULT_THINKING: Record<Role, string> = {
 	executor: "medium",
 	verifier: "off",
 	escalator: "high",
+	// 侦查是查证不是推理:去 grep 几处调用点,想深了也不会更准,只会更贵更慢。
+	// 而扇出是 N 路并发,这一档的每一次调高都要乘以 N。
+	scout: "low",
 };
 
 /** pi 的 thinking 档位(models.md)。具体模型可能只支持其中一部分 */
 export const THINKING_LEVELS = ["off", "minimal", "low", "medium", "high", "xhigh", "max"] as const;
 
-export const ROLE_ORDER: Role[] = ["planner", "executor", "verifier", "escalator"];
+export const ROLE_ORDER: Role[] = ["planner", "executor", "verifier", "escalator", "scout"];
 
 export const ROLE_DESC: Record<Role, string> = {
 	planner: "DEFINE 定义问题 + PLAN 设计 AC",
 	executor: "DO 写代码(主力消耗)",
 	verifier: "进程内独立 AgentSession 核对 AC —— 判定权外置(I3)",
 	escalator: "ACT 一轮失败诊断",
+	scout: "PLAN 并行只读侦查 —— 指一个便宜的小模型,扇出才划算(I7)",
 };
 
 /** 循环切换 thinking 档位;传 null 表示当前用的是角色默认值 */

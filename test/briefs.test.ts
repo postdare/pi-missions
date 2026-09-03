@@ -15,7 +15,7 @@
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { renderActBrief, renderDoBrief, renderHandoffBrief, renderStateCard } from "../src/briefs.ts";
+import { renderActBrief, renderDoBrief, renderHandoffBrief, renderScoutEnvelope, renderStateCard } from "../src/briefs.ts";
 import { toolsForPhase } from "../src/hooks/gate.ts";
 import { initialState } from "../src/core/machine.ts";
 import type { MissionState, Phase, Tier } from "../src/core/types.ts";
@@ -128,5 +128,83 @@ test("State Card 在每个相位都只提该相位拿得到的工具", () => {
 				`${tier}/${phase} 的 State Card 提到 ${tool},但闸门里没有它`,
 			);
 		}
+	}
+});
+
+// ─────────────────────────── 侦查扇出(scout) ───────────────────────────
+
+const finding = (over: Partial<import("../src/core/scout.ts").ScoutFinding> = {}) => ({
+	id: "S1",
+	question: "旧 ORM 的私有 API 用在几处?",
+	assume: "3 处左右",
+	answer: "11 处,集中在 src/repo 下的 4 个文件",
+	status: "answered" as const,
+	citations: ["src/repo/user.ts:88"],
+	surprised: true,
+	...over,
+});
+
+test("State Card:查明与未查明分开印,未查明的那条明说它不是事实", () => {
+	// 混在一起印的话,planner 会把自己的假设当成核实过的事实写进 AC ——
+	// 那正是 scout 想消除的东西,而且伪装得更好
+	const card = renderStateCard(
+		planOf("standard", false),
+		stateOf("standard", {
+			phase: "plan",
+			currentTask: null,
+			scoutRounds: 1,
+			scoutFindings: [
+				finding(),
+				finding({ id: "S2", status: "unanswered", answer: "未查明(超时)。沿用假设:有现成集成测试", citations: [], surprised: false }),
+			],
+		}),
+	);
+	assert.match(card, /已查明 S1\(与假设有出入\)/);
+	assert.match(card, /出处:src\/repo\/user\.ts:88/);
+	assert.match(card, /未查明 S2/);
+	assert.match(card, /这不是事实,按风险项处理/);
+	assert.match(card, /侦查轮次:已用 1\/1/);
+});
+
+test("State Card:没扇出过就不印侦查段 —— 每轮都注入,空段是纯开销", () => {
+	const card = renderStateCard(planOf("standard", false), stateOf("standard", { phase: "plan", currentTask: null }));
+	assert.doesNotMatch(card, /侦查轮次/);
+});
+
+test("State Card:侦查段只在 PLAN 出现 —— 计划冻结之后它再没有决策价值", () => {
+	const card = renderStateCard(
+		planOf("standard", true),
+		stateOf("standard", { phase: "do", scoutRounds: 1, scoutFindings: [finding()] }),
+	);
+	assert.doesNotMatch(card, /已查明/);
+});
+
+test("信封:顶部点名哪几条与假设有出入 —— 顺着读最容易滑过的就是它们", () => {
+	const env = renderScoutEnvelope(
+		1,
+		[finding(), finding({ id: "S2", surprised: false, answer: "确实是 3 处" })],
+		{},
+	);
+	assert.match(env, /与你的假设有出入:S1/);
+	assert.doesNotMatch(env, /与你的假设有出入:S1、S2/);
+	assert.match(env, /不必转抄/, "落盘了就别让它再抄一遍,那是白烧 token");
+});
+
+test("信封:有未查明时必须警告别据它写 AC;全查明时不印这句废话", () => {
+	const withMissing = renderScoutEnvelope(
+		1,
+		[finding({ id: "S2", status: "unanswered", answer: "未查明。沿用假设:x", citations: [], surprised: false })],
+		{ S2: "超过 180s 或被中止" },
+	);
+	assert.match(withMissing, /别据它写 AC/);
+	assert.match(withMissing, /超过 180s 或被中止/, "失败原因要带出来 —— 超时和模型报错的处置不同");
+
+	assert.doesNotMatch(renderScoutEnvelope(1, [finding()], {}), /别据它写 AC/);
+});
+
+test("信封只提 PLAN 相位拿得到的工具", () => {
+	const allowed = new Set(toolsForPhase("plan", "standard"));
+	for (const tool of toolsMentioned(renderScoutEnvelope(1, [finding()], {}))) {
+		assert.ok(allowed.has(tool), `信封提到了 PLAN 拿不到的 ${tool}`);
 	}
 });

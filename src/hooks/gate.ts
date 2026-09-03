@@ -39,7 +39,14 @@ export function toolsForPhase(phase: Phase, tier: Tier = "standard"): string[] {
 		case "plan":
 			// quick 在这个相位只做一件事:看几眼代码,给出一条判据(见 core/criterion.ts)。
 			// 给的是只读工具 —— 判据必须先于写代码冻结,这道闸门就是 I2 的物理实现。
-			return tier === "quick" ? [...READONLY, "mission_criterion"] : [...READONLY, "mission_write_plan"];
+			//
+			// mission_scout(并行只读侦查)只给 standard/complex:quick 的额度是 0
+			// (core/scout.ts 的 ROUND_CAP),给了也只会撞一次闸门。
+			// 它同样只在 PLAN 出现 —— 侦查是为了写出计划,计划冻结之后再查就晚了,
+			// 那时该走的是 spike(它以重写计划结尾)。
+			return tier === "quick"
+				? [...READONLY, "mission_criterion"]
+				: [...READONLY, "mission_write_plan", "mission_scout"];
 		case "do":
 			return [...BUILTIN_ALL, "mission_submit"];
 		case "check":

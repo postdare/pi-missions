@@ -2014,3 +2014,72 @@ test("sanitizeGoal:粘贴图片留下的临时路径不进 mission 目标", asyn
 
 	fs.rmSync(tmp, { recursive: true, force: true });
 });
+
+// ─────────────────────────── 侦查扇出(scout)的闸门 ───────────────────────────
+
+/** 停在 PLAN 相位的 mission(newMission 会一路走到 DO) */
+async function atPlan(tmp: string, tier: "standard" | "quick" = "standard") {
+	const pi = mockPi();
+	const ctx = mockCtx(tmp);
+	const rt = new Runtime(pi, tmp);
+	const start = await rt.startNew(ctx, "换掉旧 ORM", tier);
+	assert.ok("id" in start, JSON.stringify(start));
+	if (tier === "standard") {
+		const fr = await rt.define(ctx, {
+			goal: "换掉旧 ORM",
+			doneWhen: [{ id: "DW1", text: "不再有对旧 ORM 私有 API 的调用" }],
+			constraints: [],
+			nonGoals: [],
+		});
+		assert.ok("ok" in fr, JSON.stringify(fr));
+	}
+	assert.equal(rt.active!.state.phase, "plan");
+	return { pi, ctx, rt };
+}
+
+const Q1 = {
+	id: "S1",
+	text: "旧 ORM 的私有 API 用在哪些文件、共几处?",
+	why: "决定 T1 是一次性替换还是分批",
+	assume: "3 处左右",
+};
+
+test("scout:被闸门拒掉时不消耗额度 —— 否则写错一次参数就烧掉一整轮", async () => {
+	const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "pi-missions-scout-"));
+	const { ctx, rt } = await atPlan(tmp);
+
+	// 缺 assume:core 的判据,这里验的是 runtime 确实在起子 agent 之前问过它
+	const bad = await rt.scout(ctx, [{ ...Q1, assume: "" }]);
+	assert.ok("error" in bad, JSON.stringify(bad));
+	assert.match(bad.error, /当前假设/);
+	assert.equal(rt.active!.state.scoutRounds ?? 0, 0, "拒了就不该记账");
+	assert.deepEqual(rt.active!.state.scoutAsked ?? [], []);
+
+	fs.rmSync(tmp, { recursive: true, force: true });
+});
+
+test("scout:quick 档没有这个环节,且必须先说这件事", async () => {
+	const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "pi-missions-scout-q-"));
+	const { ctx, rt } = await atPlan(tmp, "quick");
+
+	const r = await rt.scout(ctx, [Q1]);
+	assert.ok("error" in r, JSON.stringify(r));
+	assert.match(r.error, /quick 档没有侦查环节/);
+	// 工具集里本来就没有它 —— 闸门是第一道,这条只是最后一道
+	assert.ok(!toolsForPhase("plan", "quick").includes("mission_scout"));
+
+	fs.rmSync(tmp, { recursive: true, force: true });
+});
+
+test("scout:只在 PLAN 相位受理;DO 相位既拿不到工具,直接调也会被拒", async () => {
+	const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "pi-missions-scout-do-"));
+	const { ctx, rt } = await newMission(tmp);
+	assert.equal(rt.active!.state.phase, "do");
+
+	assert.ok(!toolsForPhase("do", "standard").includes("mission_scout"), "计划冻结之后再侦查就晚了");
+	const r = await rt.scout(ctx, [Q1]);
+	assert.ok("error" in r, JSON.stringify(r));
+	assert.match(r.error, /只有 plan 相位/);
+
+	fs.rmSync(tmp, { recursive: true, force: true });
+});

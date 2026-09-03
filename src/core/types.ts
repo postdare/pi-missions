@@ -9,6 +9,7 @@
 // ─────────────────────────────── 基础枚举 ───────────────────────────────
 
 import type { TaskKind } from "./spike.ts";
+import type { ScoutFinding } from "./scout.ts";
 
 export type Phase = "define" | "plan" | "do" | "check" | "act" | "done" | "halted";
 
@@ -20,7 +21,16 @@ export type Tier = "quick" | "standard" | "complex";
  */
 export type EscalationLevel = 1 | 2 | 3;
 
-export type Role = "planner" | "executor" | "verifier" | "escalator";
+/**
+ * 花钱的角色。有各自模型配置(missions/models.json)与成本分账。
+ *
+ * scout 不对应任何相位(ROLE_OF 里没有它)—— 它是 PLAN 相位内部起的只读
+ * 侦查子 agent(core/scout.ts)。单独成一个角色而不是并进 planner,理由与
+ * verifier 单独成角色是同一条:它要的模型档次完全不同 —— planner 要深想一次,
+ * scout 要便宜地并发查四件事。合并了就没法把扇出指到一个小模型上,
+ * 而"便宜"正是扇出这个工具存在的全部前提(I7)。
+ */
+export type Role = "planner" | "executor" | "verifier" | "escalator" | "scout";
 
 /** 单角色累计 token 用量(单位:个,不是美元) */
 export interface RoleTokenUsage {
@@ -211,6 +221,22 @@ export interface MissionState {
 	 * 跑过的 spike 会从 tasks 里消失 —— 额度必须自己记账。
 	 */
 	spikesRun: number;
+	/**
+	 * 已扇出的侦查轮数(core/scout.ts 的额度)。
+	 * 与 defineAsks 同性质:额度**先消耗后执行**,中途失败也算用掉 ——
+	 * 不然一轮扇出失败就能无限重来,额度形同不存在。
+	 */
+	scoutRounds?: number;
+	/**
+	 * 前几轮扇出问过的问题。查重与 follows 校验的输入(evaluateScout)。
+	 * 必须落盘:换脑之后新会话不知道上一轮查过什么,内存态不可信(I1)。
+	 */
+	scoutAsked?: { id: string; text: string }[];
+	/**
+	 * 侦查结论。落盘的理由与 defineAnswers 逐字相同 ——
+	 * planner 照它写计划,只活在上下文里的话换脑即丢,而额度已经烧掉了。
+	 */
+	scoutFindings?: ScoutFinding[];
 	/** 按角色分账的累计成本(美元),来自 message_end 的 usage.cost.total */
 	cost: Partial<Record<Role, number>>;
 	/**
@@ -262,6 +288,13 @@ export type MissionEvent =
 	| { type: "RECOVER_INTERRUPTED_CHECK"; at: number; from: "check" | "act" }
 	/** 机械升档(tier.ts 判定)。quick→standard 会补落盘(PERSIST_PLAN) */
 	| { type: "PROMOTE_TIER"; at: number; to: Tier; reason: string }
+	/**
+	 * 扇出一轮只读侦查(PLAN 相位)。**在起子 agent 之前发** —— 额度先消耗,
+	 * 与 DEFINE_ASKED 同形。只记账,不改相位。
+	 */
+	| { type: "SCOUT_DISPATCHED"; at: number; questions: { id: string; text: string }[] }
+	/** 一轮侦查的结论回收(含未答成的那几路)。只记账,不改相位。 */
+	| { type: "SCOUT_FINDINGS"; at: number; findings: ScoutFinding[] }
 	/** 独立 AgentSession 的模型费用与 token 用量。只记账,不参与相位判定。 */
 	| { type: "RECORD_ROLE_COST"; at: number; role: Role; amount: number; tokens?: RoleTokenUsage }
 	/** 工具结果记录改动面，供机械升档使用 */

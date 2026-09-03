@@ -16,6 +16,7 @@ import { evaluateCriterion } from "./core/criterion.ts";
 import { evaluatePromotion } from "./core/tier.ts";
 import { evaluateBaseline, shouldProbeBaseline, type BaselineProbe } from "./core/baseline.ts";
 import { evaluateAsk, needsScopeConfirm, normalizeAskAnswers, roundCapFor, type AskQuestion } from "./core/define.ts";
+import { evaluateScout, type ScoutQuestion } from "./core/scout.ts";
 import { evaluateCoverage } from "./core/coverage.ts";
 import { openPlanReview } from "./ui/plan-review.ts";
 import { openDefineReview } from "./ui/define-review.ts";
@@ -35,10 +36,18 @@ import { appendLog } from "./store/log.ts";
 import { computeGitTreeFingerprint, ensureInfoExclude, isGitRepo } from "./store/git.ts";
 import { loadCheckState, removeCheckState, type CheckState } from "./store/check.ts";
 import { renderWidgetCard } from "./ui/dashboard.ts";
-import { renderStateCard, renderDoBrief, renderActBrief, renderHandoffBrief } from "./briefs.ts";
+import {
+	renderStateCard,
+	renderDoBrief,
+	renderActBrief,
+	renderHandoffBrief,
+	renderScoutEnvelope,
+	renderScoutProgress,
+} from "./briefs.ts";
 import { CheckRunner } from "./check-runner.ts";
 import {
 	applyRole,
+	DEFAULT_THINKING,
 	loadModelsConfig,
 	saveModelsConfig,
 	profileFromJson,
@@ -50,6 +59,7 @@ import {
 	type SavedProfile,
 } from "./roles/models.ts";
 import { type VerifierControl } from "./roles/verifier.ts";
+import { runScouts } from "./roles/scout.ts";
 import { BUILTIN_ALL, gateCheck, MISSION_TOOLS, toolsForPhase } from "./hooks/gate.ts";
 import { IncrementalDiagnostics } from "./hooks/diagnostics.ts";
 import {
@@ -940,6 +950,119 @@ export class Runtime {
 		const body = records.map((rec) => `"${rec.q}"="${rec.a}"${rec.fallback ? "(人未作答,采用推荐)" : ""}`).join(" ");
 		const envelope = `人对第 ${round} 轮提问的回答:${body} —— 调用 mission_define 时把这份问答原样带进 resolved。`;
 		return { ok: true, questions: verdict.questions, round, envelope };
+	}
+
+	// ─────────────────────────── PLAN 侦查扇出(scout) ───────────────────────────
+
+	/**
+	 * 扇出一轮只读侦查。判据在 core/scout.ts,子 agent 在 roles/scout.ts,
+	 * 这里只做管道:校验 → 消耗额度 → 并行跑 → 记账 → 落盘结论 → 拼信封。
+	 *
+	 * 与 ask() 同一个骨架,包括最容易被"优化"掉的那一条:**额度先消耗再执行**。
+	 * 先跑后记账的话,一轮扇出失败就能无限重来,额度形同不存在。
+	 */
+	async scout(
+		ctx: any,
+		questions: ScoutQuestion[],
+		onProgress?: (text: string) => void,
+	): Promise<{ ok: true; round: number; envelope: string } | { error: string }> {
+		const a = this.active;
+		if (!a) return { error: "无活动 mission" };
+		if (a.state.phase !== "plan") {
+			return { error: `当前相位是 ${a.state.phase},只有 plan 相位可以扇出侦查` };
+		}
+
+		const verdict = evaluateScout({
+			tier: a.state.tier,
+			askedRounds: a.state.scoutRounds ?? 0,
+			asked: a.state.scoutAsked ?? [],
+			questions,
+		});
+		if (!verdict.ok) return { error: verdict.reason };
+
+		// 模型解析。与 verifier 的同形,但**降级方向相反**:
+		// verifier 配了模型解析不到就降级 hard-only(它的独立性是正确性项,不能偷偷换人);
+		// scout 只是查资料,换个模型不影响判定,所以回退会话模型继续跑 —— 但必须告警:
+		// 会话模型通常是最贵的那个,而扇出是 N 路,静默回退等于悄悄把账翻 N 倍。
+		const cfg = this.modelsConfig().scout;
+		const hasConfigured = !!(cfg?.provider && cfg?.model);
+		const configured = hasConfigured ? ctx.modelRegistry?.find?.(cfg!.provider!, cfg!.model!) : null;
+		if (hasConfigured && !configured) {
+			this.warn(
+				ctx,
+				`配置的 scout 模型 ${cfg!.provider}/${cfg!.model} 不可用,本轮 ${verdict.questions.length} 路侦查改用会话模型 —— ` +
+					"会话模型通常贵得多,而这是并行 N 路。建议在 /missions 的模型页把 scout 指到一个便宜的小模型。",
+			);
+		} else if (!hasConfigured) {
+			this.warn(
+				ctx,
+				`scout 未配置模型,本轮 ${verdict.questions.length} 路侦查用会话模型跑 —— 并行 N 路都按它计价。` +
+					"侦查是查证不是推理,在 /missions 的模型页指一个便宜的小模型即可,扇出才划算(I7)。",
+			);
+		}
+
+		// 额度先消耗(与 DEFINE_ASKED 同):跑挂了也算用掉这一轮
+		const dispatched = await this.applyEvent(
+			{
+				type: "SCOUT_DISPATCHED",
+				at: Date.now(),
+				questions: verdict.questions.map((q) => ({ id: q.id, text: q.text })),
+			},
+			ctx,
+		);
+		if (dispatched.error) return { error: dispatched.error };
+		const round = this.active!.state.scoutRounds ?? 1;
+		const sp = statePaths(this.layout, a.state.missionId);
+		if (!a.inMemory) {
+			appendLog(
+				sp.logMd,
+				`SCOUT 第 ${round} 轮扇出 ${verdict.questions.length} 路:` +
+					verdict.questions.map((q) => `${q.id} ${q.text.replace(/\s+/g, " ")}`).join(" / "),
+			);
+		}
+
+		const result = await runScouts({
+			cwd: this.cwd,
+			model: configured ?? ctx.model,
+			thinkingLevel: cfg?.thinking ?? DEFAULT_THINKING.scout,
+			timeoutMs: this.config.scoutTimeoutMs ?? 180_000,
+			goal: a.plan.goal,
+			questions: verdict.questions,
+			onProgress: onProgress ? (p) => onProgress(renderScoutProgress(p)) : undefined,
+		});
+
+		// 无条件记账(同 verifier):网关不报价时 cost=0,但 token 必须落盘,
+		// 否则扇出的消耗在账上隐形 —— 而"扇出到底值不值"只能看这笔账
+		const u = result.usage;
+		if (u.cost > 0 || u.input + u.output + u.cacheRead + u.cacheWrite > 0) {
+			await this.applyEvent(
+				{
+					type: "RECORD_ROLE_COST",
+					at: Date.now(),
+					role: "scout",
+					amount: u.cost,
+					tokens: { input: u.input, output: u.output, cacheRead: u.cacheRead, cacheWrite: u.cacheWrite },
+				},
+				ctx,
+			);
+		}
+
+		const stored = await this.applyEvent(
+			{ type: "SCOUT_FINDINGS", at: Date.now(), findings: result.findings },
+			ctx,
+		);
+		if (stored.error) return { error: stored.error };
+		if (!a.inMemory) {
+			for (const f of result.findings) {
+				appendLog(
+					sp.logMd,
+					`SCOUT ${f.id} ${f.status === "answered" ? (f.surprised ? "与假设有出入" : "符合假设") : "未查明"}:` +
+						`${f.answer.replace(/\s+/g, " ")}${f.citations.length ? `(出处:${f.citations.join(", ")})` : ""}`,
+				);
+			}
+		}
+
+		return { ok: true, round, envelope: renderScoutEnvelope(round, result.findings, result.failures) };
 	}
 
 	/**

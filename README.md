@@ -307,6 +307,44 @@ DEFINE 产出一张人话的完成条件清单(DW1、DW2…),PLAN 的每条 AC �
 
 冻结之后 `/mission plan` 可以只读打开同一页。
 
+## 并行侦查(mission_scout)
+
+写计划的时候常常同时卡着好几个关于本仓库的**事实问题**:旧 ORM 的私有 API 用在哪几处、
+有没有现成的集成测试可以挂 AC、那个配置项是从哪读的。一个个自己 grep 过去是串行的,
+而它们互相独立 —— 这正是可以并行的形状。
+
+`mission_scout` 一次最多扇出 4 路,每路一个**只读**子 agent 查一个问题,
+结论带出处一起回来。子 agent 只有 `read/grep/find/ls`,**没有 shell,也改不了任何文件**。
+
+```
+S1 与假设有出入
+  问:旧 ORM 的私有 API 用在哪些文件、共几处?
+  你的假设:3 处左右
+  结论:11 处,集中在 src/repo 下的 4 个文件
+  出处:src/repo/user.ts:88, src/repo/order.ts:31, …
+S2 未查明(超过 180s 或被中止)
+```
+
+每个问题必须写清两件事,都是机械强制的:
+
+- **`why`** —— 这个答案改变计划里的什么(哪条 AC、哪个 verify 分支、任务怎么拆)。
+  改变不了计划的问题不值得花一路子 agent。
+- **`assume`** —— 你现在假设答案是什么。它有两个用处:那一路超时了 planner 拿它兜底;
+  而**假设与结论的差值**才是这次侦查真正买到的东西(上面 S1 那种)。
+
+额度和 DEFINE 的提问同构:一轮最多 4 路,standard 1 轮、complex 2 轮;
+把上一轮问过的问题换个措辞再问会被直接拒;第二轮的每个问题必须用 `follows`
+挂在上一轮某个问题上 —— 挂不上说明它本来就该在第一轮问,不是上一轮答案打开的新问题。
+
+**没有出处的结论不算结论**:子 agent 说查到了但一条出处都没给,系统一律降级成「未查明」。
+未查明的那几条会明确标出来,并在计划里当风险项处理 —— 不能把一个未经核实的假设包装成 AC。
+
+侦查是查证不是推理,`scout` 角色的默认 thinking 是 `low`;
+在 `/missions` 的模型页把它指到一个便宜的小模型,扇出才划算(没配会告警)。
+
+**和 spike 的分工是「答案在哪」,不是「有多难」**:代码里现成能读到的用 scout(一次工具调用),
+要动手量一量或试一下才知道的用 spike(一整轮)。
+
 ## 探针任务(spike)
 
 有些模糊不是描述不清,是**答案不在人那里,在代码里**:旧 API 到底用在 3 处还是 300 处、
@@ -429,20 +467,27 @@ mission 结束(done / halted)时按开工那一刻记下的现场还原,包括�
 无论它是独立 `pi` 进程还是 SDK 起的独立会话。让它写代码,等于:冻结件写保护拦不住它、
 它改的文件不进 `touchedFiles` 这本账(升档判据恒为假)、编辑后的增量检查对它不存在。
 
-只读的 sub-agent 没有这些问题,它退化成一次函数调用 —— **独立 Verifier 就是这么做的**
-(只读工具 + 结构化 `mission_verdict`,判定权仍在 L0 的 `judge()`)。换句话说,
-这套系统已经在用 sub-agent,只是用在唯一站得住的位置上。
+只读的 sub-agent 没有这些问题,它退化成一次函数调用。这套系统已经在用两个,
+都用在站得住的位置上:
+
+| | 干什么 | 工具集 | 结论回到哪 |
+|---|---|---|---|
+| **Verifier** | CHECK 逐条核对冻结的 AC | 只读 + `mission_verdict` | `judge()` |
+| **scout** | PLAN 并行查几个事实(见下) | 只读 + `mission_finding` | `evaluateScout()` / `interpretFinding()` |
+
+两者**都没有 bash** —— 能跑任意命令就能写文件,那三条保证就又没了。
 
 另外两件常被当成"缺 sub-agent"的事,各自已有答案,而且答案更强:
 
 | 需求 | 通行做法 | pi-missions | 差别 |
 |---|---|---|---|
 | 上下文隔离 | 委派子任务、只回压缩结论 | **换脑**:整会话替换 + 从 SNAPSHOT 重附着 | 崩溃安全 —— 子 agent 的上下文是易失的 |
-| 调研隔离 | scout agent 返回摘要 | **spike**:只读闸门 + 结论落盘 + 强制回 PLAN | 产物在仓库里,可审计、可续、可回看 |
+| 调研隔离 | 一个 scout agent 返回摘要 | 按代价排的三级阶梯:**自己读** → **`mission_scout` 并行侦查** → **spike** | 产物都在仓库里,可审计、可续、可回看 |
 
-**任务级并行也不做。** 并行执行者共享同一个工作区,hard 证据不再可归因(T1 的分支红了
+**写工作区的任务级并行不做。** 并行执行者共享同一个工作区,hard 证据不再可归因(T1 的分支红了
 可能是 T2 改坏的),失败签名、冻结基线的红绿、regression 分类会同时失去意义 ——
-而这些正是这套系统敢说"通过"的全部依据。更细的代码落点见
+而这些正是这套系统敢说"通过"的全部依据。
+(`mission_scout` 的并行不在此列:它只读,谁也改不了谁看到的东西。)更细的代码落点见
 [docs/ARCHITECTURE.md §8.7](./docs/ARCHITECTURE.md)。
 
 ## 配置
@@ -455,6 +500,7 @@ mission 结束(done / halted)时按开工那一刻记下的现场还原,包括�
   "incrementalCheck": "npx tsc --noEmit",  // 编辑级反馈(§8.2),未配置则关闭
   "publicApiGlobs": ["src/api/**"],   // 升档判据
   "verifierTimeoutMs": 300000,
+  "scoutTimeoutMs": 180000,           // 单路 scout;扇出是并行的,这也是整轮上限
   "contextWatermark": 0.5             // 超过即主动换脑
 }
 ```
@@ -466,7 +512,8 @@ mission 结束(done / halted)时按开工那一刻记下的现场还原,包括�
   "planner":   { "provider": "anthropic", "model": "…", "thinking": "high" },
   "executor":  { "model": "…", "thinking": "medium" },
   "verifier":  { "model": "…", "thinking": "off" },
-  "escalator": { "thinking": "high" }
+  "escalator": { "thinking": "high" },
+  "scout":     { "model": "…", "thinking": "low" }   // 并行侦查,指个便宜的小模型
 }
 ```
 
@@ -482,7 +529,7 @@ verifier 的 thinking 默认 `off`(它只做核对,省钱),但**有些推理模�
 ### 在面板里改(`/missions` → `Tab` 到「模型」页)
 
 ```
-╭─ MISSIONS ────────────────────────────────────────────────────── 4 个角色 ─╮
+╭─ MISSIONS ────────────────────────────────────────────────────── 5 个角色 ─╮
 │  任务   模型                                                               │
 │                                                                            │
 │   planner    ● anthropic/claude-opus-5            high         $0.4120     │
@@ -490,6 +537,7 @@ verifier 的 thinking 默认 `off`(它只做核对,省钱),但**有些推理模�
 │                DO 写代码(主力消耗)                                         │
 │   verifier   ⚠ openai/… → anthropic/claude-opus-5 off(默认)    $0.0940     │
 │   escalator  ○ anthropic/claude-opus-5(跟随会话)  high(默认)               │
+│   scout      ● anthropic/claude-haiku-4-5         low(默认)     $0.0110     │
 │                                                                            │
 │ ● 已配置   ⚠ 配了但不可用(实际跟随会话)   ○ 未配置   写入 missions/models… │
 ╰────────────────────────────────────────────────────────────────────────────╯

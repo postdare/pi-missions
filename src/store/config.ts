@@ -17,6 +17,12 @@ export interface MissionsConfig {
 	publicApiGlobs?: string[];
 	/** 独立 Verifier AgentSession 超时毫秒,默认 300000 */
 	verifierTimeoutMs?: number;
+	/**
+	 * 单路 scout 超时毫秒,默认 180000。
+	 * 扇出是并行的,所以这也是整轮侦查的墙钟上限,不是 N 倍。
+	 * 比 verifier 短:侦查是查几个具体事实,查不动就该如实交"未查明"回来。
+	 */
+	scoutTimeoutMs?: number;
 	/** 上下文水位(0-1),超过则主动换脑,默认 0.5 */
 	contextWatermark?: number;
 }

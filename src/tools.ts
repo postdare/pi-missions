@@ -1,8 +1,8 @@
 /**
- * pi-missions · LLM 可调用的工具(五个,按相位分发;mission_verdict 在子进程里)
+ * pi-missions · LLM 可调用的工具(按相位分发;mission_verdict / mission_finding 在子 agent 里)
  *
  *   DEFINE: mission_ask / mission_define
- *   PLAN:  mission_write_plan
+ *   PLAN:  mission_write_plan / mission_scout(quick 档是 mission_criterion)
  *   DO:    mission_submit
  *   ACT:   mission_escalate
  *
@@ -40,6 +40,29 @@ const QuestionSchema = Type.Object({
 			"必填:你倾向的答案。没有推荐答案的问题会被直接拒绝 —— 你连倾向都没有,说明这个问题你自己还没想过。",
 	}),
 	impact: Type.String({ description: "必填:这个答案会改变哪条完成条件、哪个方案分支。改变不了任何东西的问题不该问" }),
+});
+
+const ScoutQuestionSchema = Type.Object({
+	id: Type.String({ description: "问题 id,如 S1。结论按它对应回来;第二轮的 follows 也用它指代" }),
+	text: Type.String({
+		description:
+			"要查清的那一个**事实**。具体到能被 read/grep 回答:" +
+			"「旧 ORM 的私有 API 在哪些文件里被用到、共几处」这种;" +
+			"「这个项目是怎么组织的」这种查了也没用。",
+	}),
+	why: Type.String({
+		description:
+			"必填:这个答案会改变计划里的什么 —— 哪条 AC、哪个 verify 分支、任务怎么拆。" +
+			"改变不了计划的问题不值得花一路子 agent 去查。",
+	}),
+	assume: Type.String({
+		description:
+			"必填:你现在假设答案是什么。它是这一路超时时的兜底,而假设与结论的**差值**才是这次侦查买到的东西。" +
+			"连假设都写不出说明问题太笼统,先把它拆成具体的事实问题。",
+	}),
+	follows: Type.Optional(
+		Type.String({ description: "第二轮起必填:这一问追的是上一轮哪个问题的 id" }),
+	),
 });
 
 const DoneWhenSchema = Type.Object({
@@ -252,6 +275,47 @@ export function registerMissionTools(pi: any, getRuntime: GetRuntime): void {
 				],
 				details: { ok: true },
 			};
+		},
+	});
+
+	pi.registerTool({
+		name: "mission_scout",
+		description:
+			"[PLAN 相位] 并行扇出只读侦查:把几个卡住你写计划的**事实问题**各交给一个独立的只读子 agent 去查," +
+			"结论带出处一起回来。阻塞调用,几路同时跑,所以一轮的耗时约等于最慢的那一路。\n" +
+			"一轮最多 4 路;轮次上限由档位定(standard 1 轮、complex 2 轮)—— 系统强制,不是建议。" +
+			"每个问题必须写清 why(改变计划里的什么)和 assume(你现在的假设);第二轮起还要用 follows " +
+			"指明它追的是上一轮哪个问题 —— 挂不上的问题本来就该在第一轮问。前面查过的问题换个措辞再问会被直接拒绝。\n" +
+			"子 agent 只有 read/grep/find/ls,**没有 shell,也不能改任何文件** —— 所以它只能回答" +
+			"「代码里现在是什么样」,不能回答「跑起来会怎样」。要动手量一量才知道的(性能瓶颈在哪、" +
+			"这个改法可不可行),那是 spike:在计划里排一个 kind=\"spike\" 的任务,它以重写计划结尾。\n" +
+			"也不要用它替代 mission_ask:答案在人脑子里的决策问题,查代码查不出来。",
+		parameters: Type.Object({
+			questions: Type.Array(ScoutQuestionSchema, {
+				minItems: 1,
+				maxItems: 4,
+				description:
+					"互相独立的事实问题 —— 它们会同时跑,后一个问题看不到前一个的答案。" +
+					"有依赖关系的问题拆到下一轮(complex 才有第二轮)。",
+			}),
+		}),
+		async execute(_id: string, params: any, _signal: any, onUpdate: any, ctx: any) {
+			// 节流:4 路子 agent 的每一次工具调用都会推一帧,不掐着会把 TUI 刷爆
+			// (pi 自己的 bash 工具同样节流,见 core/tools/bash.js 的 BASH_UPDATE_THROTTLE_MS)
+			let lastAt = 0;
+			const r = await getRuntime(ctx).scout(ctx, params.questions ?? [], (text) => {
+				const now = Date.now();
+				if (now - lastAt < 300) return;
+				lastAt = now;
+				// 进度回显是锦上添花:onUpdate 的形状由宿主定,炸了也不能让整轮侦查失败
+				try {
+					onUpdate?.({ content: [{ type: "text", text }], details: undefined });
+				} catch {
+					/* 忽略 */
+				}
+			});
+			if ("error" in r) return toolError(r.error);
+			return { content: [{ type: "text", text: r.envelope }], details: { ok: true, round: r.round } };
 		},
 	});
 

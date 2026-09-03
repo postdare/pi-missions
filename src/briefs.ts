@@ -10,6 +10,8 @@ import type { MissionPlan } from "./store/mission.ts";
 import { findTask } from "./store/mission.ts";
 import type { MissionState } from "./core/types.ts";
 import { roundCapFor } from "./core/define.ts";
+import { scoutRoundCapFor, type ScoutFinding } from "./core/scout.ts";
+import type { ScoutFanoutProgress } from "./roles/scout.ts";
 import type { QuickCriterion } from "./runtime.ts";
 
 export const QUICK_JUDGE_LABEL: Record<QuickCriterion["judge"], string> = {
@@ -109,6 +111,24 @@ export function renderStateCard(
 		const notes = state.planReview.notes;
 		lines.push(`PREV REJECTION(第 ${state.planReview.rejections} 次): ${notes[notes.length - 1]}`);
 		if (notes.length > 1) lines.push(`  更早的打回:${notes.slice(0, -1).join(" / ")}`);
+	}
+	// 侦查结论跟着 State Card 走,理由与上面的打回意见逐字相同:换脑之后新会话读不到
+	// 上一轮的对话,而额度已经烧掉了。查明的与未查明的**分开印** —— 混在一起的话,
+	// planner 会把自己的假设当成核实过的事实写进 AC,那正是 scout 想消除的东西。
+	if (state.phase === "plan") {
+		const used = state.scoutRounds ?? 0;
+		const scap = scoutRoundCapFor(state.tier);
+		if (scap > 0 && used > 0) {
+			lines.push(`侦查轮次:已用 ${used}/${scap}(闸门细则见 mission_scout 的工具说明)。`);
+		}
+		const findings = state.scoutFindings ?? [];
+		for (const f of findings.filter((x) => x.status === "answered")) {
+			const cite = f.citations.length ? `(出处:${f.citations.join(", ")})` : "";
+			lines.push(`已查明 ${f.id}${f.surprised ? "(与假设有出入)" : ""}:${f.answer.replace(/\s+/g, " ")}${cite}`);
+		}
+		for (const f of findings.filter((x) => x.status === "unanswered")) {
+			lines.push(`未查明 ${f.id}:${f.answer.replace(/\s+/g, " ")} —— 这不是事实,按风险项处理,别据它写 AC。`);
+		}
 	}
 	if (state.pendingHandoff) lines.push(`⏸ 换脑挂起中:${state.pendingHandoff}。请执行 /mission next。`);
 	if (state.phase === "define") {
@@ -222,4 +242,63 @@ export function renderHandoffBrief(
 	]
 		.filter(Boolean)
 		.join("\n");
+}
+
+
+// ─────────────────────────── 侦查扇出(scout)的渲染 ───────────────────────────
+
+/**
+ * 扇出结果的信封 —— planner 调完 mission_scout 立刻读到的那段。
+ *
+ * 两条纪律都是防同一件事(planner 把自己的假设当成核实过的事实):
+ *   · 查明与未查明**分开列**,未查明的那几条明说"这是你的假设,不是事实"
+ *   · 顶部点名哪几条与假设有出入 —— 顺着读下去最容易滑过的恰恰是这几条,
+ *     而它们正是这一轮扇出唯一买到的东西
+ *
+ * 顺序保持提问顺序(不按"有出入"重排):id 是 planner 自己编的,乱序会让它对不上号。
+ */
+export function renderScoutEnvelope(
+	round: number,
+	findings: ScoutFinding[],
+	failures: Record<string, string> = {},
+): string {
+	const answered = findings.filter((f) => f.status === "answered");
+	const missing = findings.filter((f) => f.status === "unanswered");
+	const surprises = answered.filter((f) => f.surprised).map((f) => f.id);
+	const head =
+		`第 ${round} 轮侦查回来了(${findings.length} 路:查明 ${answered.length},未查明 ${missing.length}` +
+		(surprises.length ? `;与你的假设有出入:${surprises.join("、")}` : "") +
+		")。";
+
+	const lines: string[] = [head, ""];
+	for (const f of findings) {
+		if (f.status === "answered") {
+			lines.push(`${f.id} ${f.surprised ? "与假设有出入" : "符合假设"}`);
+			lines.push(`  问:${f.question}`);
+			lines.push(`  你的假设:${f.assume}`);
+			lines.push(`  结论:${f.answer}`);
+			lines.push(`  出处:${f.citations.join(", ")}`);
+		} else {
+			lines.push(`${f.id} 未查明${failures[f.id] ? `(${failures[f.id]})` : ""}`);
+			lines.push(`  问:${f.question}`);
+			lines.push(`  ${f.answer}`);
+		}
+	}
+	lines.push("");
+	lines.push("这些结论已经落盘,换脑之后也在 State Card 里,不必转抄。");
+	if (missing.length > 0) {
+		lines.push(
+			`标「未查明」的那 ${missing.length} 条不是事实,是你自己的假设 —— ` +
+				"在计划里当风险项处理(或者排一个 spike 去量),别据它写 AC。",
+		);
+	}
+	lines.push("本轮到此为止:不要继续分析,现在写计划并调用 mission_write_plan。");
+	return lines.join("\n");
+}
+
+/** 扇出进行中的进度文本(经工具的 onUpdate 流式回显)。一路一行,窄终端也读得下 */
+export function renderScoutProgress(p: ScoutFanoutProgress): string {
+	const head = `侦查扇出 ${p.done}/${p.total} 路已回`;
+	const rows = Object.entries(p.activity).map(([id, act]) => `  ${id}  ${act}`);
+	return [head, ...rows].join("\n");
 }

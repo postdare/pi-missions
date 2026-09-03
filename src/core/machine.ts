@@ -98,6 +98,36 @@ export function transition(state: MissionState, event: MissionEvent): Transition
 			);
 		}
 
+		// ─────────────── PLAN 相位内的只读侦查扇出(core/scout.ts) ───────────────
+		//
+		// 两个事件都只记账,不改相位 —— scout 不是相位迁移,是 PLAN 内部的一次查证。
+		// 闸门判定(额度、查重、follows)在 evaluateScout 里,机器这里只落账,
+		// 与 DEFINE_ASKED / DEFINE_ANSWERED 的分工完全一致。
+		case "SCOUT_DISPATCHED": {
+			if (state.phase !== "plan") return reject(state, "SCOUT_DISPATCHED 只能在 plan 相位");
+			const asked = [...(state.scoutAsked ?? []), ...event.questions];
+			return ok(
+				{ ...state, scoutRounds: (state.scoutRounds ?? 0) + 1, scoutAsked: asked },
+				[log(`SCOUT 第 ${(state.scoutRounds ?? 0) + 1} 轮扇出 ${event.questions.length} 路:${event.questions.map((q) => q.id).join(" ")}`)],
+				event.at,
+			);
+		}
+
+		case "SCOUT_FINDINGS": {
+			if (state.phase !== "plan") return reject(state, "SCOUT_FINDINGS 只能在 plan 相位");
+			// 同 id 以新结论覆盖:重规划(L2)后同一个问题可能被重新查证。
+			// 直接 push 会让 State Card 里出现两条相互矛盾的结论,而 planner 无从分辨新旧。
+			const merged = new Map((state.scoutFindings ?? []).map((f) => [f.id, f]));
+			for (const f of event.findings) merged.set(f.id, f);
+			const answered = event.findings.filter((f) => f.status === "answered").length;
+			const surprises = event.findings.filter((f) => f.surprised).length;
+			return ok(
+				{ ...state, scoutFindings: [...merged.values()] },
+				[log(`SCOUT 回收 ${event.findings.length} 路:查明 ${answered},与假设有出入 ${surprises}`)],
+				event.at,
+			);
+		}
+
 		case "RECORD_ROLE_COST": {
 			const tk = event.tokens;
 			const hasTokens = !!tk && tk.input + tk.output + tk.cacheRead + tk.cacheWrite > 0;
@@ -916,6 +946,9 @@ export function initialState(params: {
 		defineAnswers: [],
 		planReview: { rejections: 0, notes: [] },
 		spikesRun: 0,
+		scoutRounds: 0,
+		scoutAsked: [],
+		scoutFindings: [],
 		cost: {},
 		metrics: { touchedFiles: [], touchedPublicApi: false },
 		updatedAt: 0,

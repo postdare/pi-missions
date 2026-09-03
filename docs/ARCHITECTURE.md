@@ -48,6 +48,7 @@ pi-missions 是跑在 [pi](https://github.com/earendil-works/pi-coding-agent) �
 │  │  │  coverage.ts  完成条件 ↔ AC 的覆盖校验           │  │   │
 │  │  │  review.ts    计划打回的记账与硬拦                │  │   │
 │  │  │  spike.ts     探针任务的额度与结论判据          │  │   │
+│  │  │  scout.ts     PLAN 并行侦查的额度与结账判据     │  │   │
 │  │  │  breaker.ts   失败签名 + 熔断 + 升级判定       │  │   │
 │  │  │  verdict.ts   证据 → pass/fail/inconclusive    │  │   │
 │  │  │  baseline.ts  冻结时的基线红绿校验              │  │   │
@@ -56,7 +57,7 @@ pi-missions 是跑在 [pi](https://github.com/earendil-works/pi-coding-agent) �
 │  │                                                     │   │
 │  │  src/store/   仓库读写(计划/状态/日志/证据/路径)   │   │
 │  │  src/hooks/   闸门 + 编辑级增量反馈                  │   │
-│  │  src/roles/   角色模型映射 + 进程内 Verifier AgentSession │   │
+│  │  src/roles/   角色模型映射 + 进程内 Verifier / Scout      │   │
 │  │  src/ui/      主面板 / 状态条 / 卡片                 │   │
 │  └─────────────────────────────────────────────────────┘   │
 └────────────────────────────────────────────────────────────┘
@@ -113,7 +114,7 @@ UI 层同样保持纯函数设计,所有视图接收不可变数据对象并输�
 | 相位 | PDCA | 谁在动 | 工具集(`toolsForPhase()`) |
 |---|---|---|---|
 | `define` | — | LLM(planner) | 只读 + `mission_ask` + `mission_define` |
-| `plan` | P | LLM(planner) | 只读 + `mission_write_plan` |
+| `plan` | P | LLM(planner) | 只读 + `mission_write_plan` + `mission_scout`(quick 档:`mission_criterion`) |
 | `do` | D | LLM(executor) | 全部内置工具 + `mission_submit` |
 | `check` | C | **L0,没有 LLM 回合** | 只读 |
 | `act` | A | LLM(escalator),**只有一轮** | 只读 + `mission_escalate` |
@@ -336,6 +337,10 @@ L3 → `definition.doneWhen` / `nonGoals`。
 **角色复用 planner**:同一种"读代码 + 想清楚问题"的工作,不为一个只跑一两轮的相位
 在 models.json 和成本分账里多开一个维度。代价是 DEFINE 的花费并进 planner 账下。
 
+(反过来,`scout` **单独**成一个角色 —— 判据不是"跑几轮",而是"要的模型档次是不是同一个":
+planner 要深想一次,scout 要便宜地并发查四件事。合并了就没法把扇出指到小模型上,
+而便宜正是扇出存在的全部前提。)
+
 ### 4.5 AC(验收标准)与 verify 分支
 
 ```ts
@@ -486,6 +491,53 @@ mission 一旦会话重建就永久失联。
 **为什么强制回 PLAN 而不是直接接着做**:spike 后面的任务是基于未知写的,本来就该重写;
 更重要的是,允许探针的产出直接进实现,等于给了一条"在没有 AC 的状态下改代码"的通路,
 绕过整个验证闸门。换脑也是必须的 —— 探针上下文里全是调研噪音(I5)。
+
+#### 4.7.2 并行侦查扇出(scout)
+
+`mission_scout`(PLAN 相位,standard/complex)。一次最多起 4 个**只读** AgentSession,
+各查一个关于本仓库的事实问题,结论带出处经 `mission_finding` 回到 L0。
+它踩在 8.7 的判据上(只读 + 结构化回收),不是"通用 sub-agent"的口子。
+
+**和 spike 的分工**是「答案在哪」,不是「有多难」:
+
+| | scout | spike |
+|---|---|---|
+| 回答得了 | 代码里现在是什么样 | 跑起来会怎样 |
+| 时机 | 计划冻结**之前** | 计划冻结之后,作为一个任务跑 |
+| 执行者 | 独立只读 AgentSession(N 路并行) | 宿主会话的执行者(带闸门) |
+| 产物 | `ScoutFinding[]` → State Card + LOG.md | 结论文件 + 换脑 + PLAN 重写 |
+| 代价 | 一次工具调用 | 一整轮 |
+
+**四条闸门**,全部机械可测,判定在 `evaluateScout()`(`src/core/scout.ts`):
+
+| 规则 | 为什么 |
+|---|---|
+| 一轮最多 4 路;standard 1 轮、complex 2 轮 | 扇出便宜是相对的:N 路 = N 份 token,而"再查一轮"和 DEFINE 的"再问一轮"同构 |
+| 每题必须有 `why` 与 `assume` | `why` 挡改变不了计划的问题;`assume` 是超时兜底,且**假设与结论的差值**才是这一轮买到的东西 |
+| 查过的问题换措辞再问 → 拒 | 原地打转最常见的形态。归一化后比较(抹空白与标点) |
+| 第二轮起每题必须 `follows` 上一轮某个 id | 结账判据,与 `evaluateAsk` 的"settled 必须增长"、`breaker` 的"同签名连续计数"同构 —— 挂不上的问题本来就该在第一轮问 |
+
+**结论的采信也在 L0**(`interpretFinding()`,`src/core/scout.ts` —— 采信与否是判定,
+所以在 core 而不在 roles),不看子 agent 自评:
+
+- 没调 `mission_finding` / 交了空结论 / 超时 → `status: "unanswered"`
+- `found: true` 但 **citations 为空 → 一律降级 unanswered**。没有出处的自然语言结论
+  不可证伪,它对下游的唯一作用是让 planner 更自信地写错 AC(与 Verifier 那条
+  "判 fail 时说清反证是什么"同源)
+- 未查明的那几条,`answer` 里必须带上 `assume` —— planner 要拿它继续规划,
+  而 State Card 与信封都明说**这不是事实,是你自己的假设**
+
+**额度先消耗再执行**(`SCOUT_DISPATCHED` 在起子 agent 之前发),与 `DEFINE_ASKED` 同:
+先跑后记账的话,一轮扇出失败就能无限重来。
+
+**落盘**:`scoutRounds` / `scoutAsked` / `scoutFindings` 三个字段进 SNAPSHOT,
+理由与 `defineAnswers` 逐字相同 —— 换脑之后 planner 照它写计划,只活在上下文里就等于白烧。
+三者都**不进** `isState()` 的结构校验(与 `defineAnswers`、`tokens` 一样),
+否则升级前留下的 in-flight snapshot 会整份加载失败。
+
+**成本**:`scout` 是独立角色(`missions/models.json`),默认 thinking `low`。
+未配置时回退会话模型并**告警** —— 会话模型通常是最贵的那个,而这是并行 N 路,
+静默回退等于悄悄把账翻 N 倍。侦查是查证不是推理,指一个便宜的小模型才划算(I7)。
 
 ### 4.8 判定(Verdict)
 
@@ -668,9 +720,11 @@ README 标题里的"双层循环":
 | `mission_ask` | DEFINE | 提问(每轮 ≤3 且每问带推荐答案;standard 2 轮 / complex 3 轮;要结账。L0 强制) |
 | `mission_define` | DEFINE | 交出目标 + **完成条件** + 约束 + 非目标 + 接缝 + 问答记录,进入 PLAN |
 | `mission_write_plan` | PLAN | 原子提交**方案** + AC(含 `covers`)+ 任务分解(含 spike)+ verify.sh 内容 |
+| `mission_scout` | PLAN | 并行扇出只读侦查(每轮 ≤4 路;standard 1 轮 / complex 2 轮;要 `why`/`assume`,第二轮起要结账。L0 强制,4.7.2) |
 | `mission_submit` | DO | 声明已提交,触发判定(**不等于通过**)。无参数——判定依据早已冻结 |
 | `mission_escalate` | ACT | 主动升级 L2/L3 |
 | `mission_verdict` | — | 只存在于 Verifier AgentSession(`defineTool` 结构化参数),逐条 AC 提交结论 |
+| `mission_finding` | — | 只存在于 scout AgentSession,交回一条带出处的侦查结论(采信与否由 L0 的 `interpret()` 定) |
 
 **没有任何工具能直接改 SNAPSHOT.json。** 状态推进全部由 L0 事件驱动并经 Repository CAS 提交。
 
@@ -894,15 +948,34 @@ quick 档不落盘、不走 `validatePlan()`,`acceptanceCriteria` 恒为空,
 只读、且结论经结构化工具回到 L0 的 sub-agent 安全** —— 它退化成一次函数调用,
 判定权仍在 `judge()`。现行 Verifier(4.7)正是按这个模子做的,新的也必须按它做。
 
+按这个模子做的第二个实例是 **scout**(4.7.2):PLAN 相位内并行扇出的只读侦查。
+它踩在同一条判据上,三处都可以逐条对照:
+
+| | Verifier | scout |
+|---|---|---|
+| 工具白名单 | `VERIFIER_TOOLS`(只读 + `mission_verdict`) | `SCOUT_TOOLS`(只读 + `mission_finding`)—— **两者都没有 bash** |
+| 结论回收 | `mission_verdict` → `Evidence[]` → `judge()` | `mission_finding` → `ScoutFinding[]` → `SCOUT_FINDINGS` 事件 |
+| 判定权 | 在 `judge()`,不在子 agent | 在 core 的 `evaluateScout()` / `interpretFinding()`,不在子 agent |
+
+"没有 bash"这条不能松:能跑任意命令就能写文件,而上面那张表里的三条保证会同时失效。
+`test/scout.test.ts` 与 `test/verifier.test.ts` 各有一个用例把白名单钉死。
+
+scout 的并行**不是**下面说的任务级并行:它不写工作区,所以不存在归因问题 ——
+N 路各读各的,结论按问题 id 回收,谁也改不了谁看到的东西。
+
 顺带说明另外两件容易被当成"缺 sub-agent"的事,它们已经各有答案:
 
 - **上下文隔离**由**换脑**(4.10)承担,不是由子 agent 承担。换脑是整会话替换 +
   从 SNAPSHOT 重附着,崩溃安全;sub-agent 的上下文是易失的,进程一死什么都不剩,
   与 I1(状态是磁盘上的文件,不是会话里的对话)相反。
-- **调研隔离**由 **spike**(4.7.1)承担。它就是"scout 子 agent"的形状,只是产物被强制
-  落到 `missions/spikes/`,并接一次换脑与 PLAN 重写 —— 可审计、可续、可回看。
+- **调研隔离**由一条按代价排序的阶梯承担,不是由通用子 agent 承担:
+  ① planner 自己用只读工具读(免费);② `mission_scout` 并行扇出只读侦查(一次工具调用,
+  4.7.2);③ `spike` 探针任务(一整轮:产物落到 `missions/spikes/`,接一次换脑与 PLAN 重写)。
+  选择判据是**答案在哪**:代码里现成能读到的走 ①②,要动手量一量或试一下才知道的走 ③。
+  三者的产出都可审计、可续、可回看 —— scout 的结论进 `MissionState.scoutFindings` 与 LOG.md,
+  换脑之后仍在 State Card 里。
 
-**任务级并行同样不做**:`MissionState.phase` 是 mission 级单值、`currentTask` 是单个
+**写工作区的任务级并行同样不做**:`MissionState.phase` 是 mission 级单值、`currentTask` 是单个
 任务 id、`nextTask()` 就是 `order[i+1]`,并行要把相位降到任务级,那是重写 `machine.ts`。
 更硬的一条是并行执行者共享工作区,hard 证据不再可归因(T1 的分支红了可能是 T2 改坏的),
 失败签名、基线红绿、`regression` 分类同时失去意义。参考 `docs/factory-ai-missions-research.md`:
