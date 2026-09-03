@@ -165,6 +165,12 @@ export interface MissionState {
 	/** Plan 冻结时记录的环境指纹 */
 	envFingerprint: string | null;
 	/**
+	 * Plan 冻结时记录的 git HEAD commit hash。
+	 * verifier 的 diff 基准:从这次冻结开始的所有改动才是本次 mission 的产出,
+	 * 从 HEAD 开始 diff 会把冻结前的工作也混进去。
+	 */
+	baseCommit: string | null;
+	/**
 	 * 换脑挂起原因;null = 无挂起。
 	 * 挂起期间闸门硬阻断一切写操作,唯一出口是 /mission next(HANDOFF_DONE)。
 	 * I5 的物理实现:升级后的重新规划绝不在被污染的上下文里进行。
@@ -224,6 +230,8 @@ export type MissionEvent =
 			taskOrder?: string[];
 			spikes?: string[];
 			envFingerprint?: string | null;
+			/** 冻结时的 git HEAD,verifier 的 diff 基准。首次冻结必传,重冻结(L2/L3)可不传 */
+			baseCommit?: string | null;
 			sessionFile?: string;
 	  }
 	/** 人工在计划评审页打回。达到上限时机器直接转 DEFINE(判据在 core/review.ts) */

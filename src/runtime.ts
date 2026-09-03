@@ -10,9 +10,8 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import * as crypto from "node:crypto";
 import { truncateToWidth } from "@earendil-works/pi-tui";
-import type { Effect, MissionEvent, MissionState, Phase, Role, Tier, TransitionResult, Evidence } from "./core/types.ts";
+import type { Effect, MissionEvent, MissionState, Phase, Role, Tier, TransitionResult } from "./core/types.ts";
 import { initialState, transition, ROLE_OF } from "./core/machine.ts";
-import { judge } from "./core/verdict.ts";
 import { evaluateCriterion } from "./core/criterion.ts";
 import { evaluatePromotion } from "./core/tier.ts";
 import { evaluateBaseline, shouldProbeBaseline, type BaselineProbe } from "./core/baseline.ts";
@@ -20,13 +19,10 @@ import { evaluateAsk, needsScopeConfirm, normalizeAskAnswers, roundCapFor, type 
 import { evaluateCoverage } from "./core/coverage.ts";
 import { openPlanReview } from "./ui/plan-review.ts";
 import { openAskReview } from "./ui/ask-review.ts";
-import { reportIsSubstantive, validateSpikePlan } from "./core/spike.ts";
+import { validateSpikePlan } from "./core/spike.ts";
 import type { DoneWhen, Definition, MissionPlan } from "./store/mission.ts";
 import {
-	allTasks,
-	findMilestoneOf,
 	findTask,
-	isLastTaskOfMilestone,
 	spikeTaskIds,
 	taskOrder,
 	validatePlan,
@@ -36,9 +32,10 @@ import { envFingerprintSh, layout, modelsJson, spikeReport, statePaths, type Rep
 import { ensureScaffold } from "./store/scaffold.ts";
 import { appendLog } from "./store/log.ts";
 import { computeEnvFingerprint, computeGitTreeFingerprint, ensureInfoExclude, isGitRepo } from "./store/git.ts";
-import { saveEvidence } from "./store/evidence.ts";
-import { loadCheckState, removeCheckState, saveCheckState, type CheckState } from "./store/check.ts";
+import { loadCheckState, removeCheckState, type CheckState } from "./store/check.ts";
 import { renderWidgetCard } from "./ui/dashboard.ts";
+import { renderStateCard, renderDoBrief, renderActBrief, renderHandoffBrief } from "./briefs.ts";
+import { CheckRunner } from "./check-runner.ts";
 import {
 	applyRole,
 	loadModelsConfig,
@@ -50,15 +47,8 @@ import {
 	type ModelsConfig,
 	type RoleModelConfig,
 	type SavedProfile,
-	DEFAULT_THINKING,
 } from "./roles/models.ts";
-import {
-	renderSpikeVerifierBrief,
-	renderVerifierBrief,
-	runVerifier,
-	type VerifierControl,
-	type VerifierProgress,
-} from "./roles/verifier.ts";
+import { type VerifierControl } from "./roles/verifier.ts";
 import { BUILTIN_ALL, gateCheck, MISSION_TOOLS, toolsForPhase } from "./hooks/gate.ts";
 import { IncrementalDiagnostics } from "./hooks/diagnostics.ts";
 import {
@@ -110,10 +100,8 @@ const HANDOFF_NUDGE: Record<string, string> = {
 	check: "等待系统判定",
 };
 
-const EVIDENCE_TAIL = 4000;
 /** 基线探针的单分支超时。与 CHECK 同量级:基线本来就该快速失败 */
 const BASELINE_TIMEOUT_MS = 600_000;
-const DIFF_TAIL = 12000;
 
 export class Runtime {
 	active: ActiveMission | null = null;
@@ -122,17 +110,22 @@ export class Runtime {
 	private savedProfile: SavedProfile | null = null;
 	private diagnostics: IncrementalDiagnostics | null = null;
 	private suppressHandoffFollowUp = false;
-	private liveCheckState: CheckState | null = null;
+	// internal:以下两个成员开放给 CheckRunner(src/check-runner.ts)读写,
+	// 其余代码不应触碰。开放原因是 CHECK 编排要跨 await 读写进度与控制句柄。
+	liveCheckState: CheckState | null = null;
+	activeVerifierControl: VerifierControl | null = null;
 	private checkPromises = new WeakMap<ActiveMission, Promise<void>>();
-	private activeVerifierControl: VerifierControl | null = null;
 	private stagedPlan: StagedPlan | null = null;
 
-	private readonly pi: any;
-	private readonly cwd: string;
+	// internal:pi/cwd 是 Runtime 的注入面,CheckRunner 经此调用 exec/notify
+	readonly pi: any;
+	readonly cwd: string;
+	private readonly checkRunner: CheckRunner;
 
 	constructor(pi: any, cwd: string) {
 		this.pi = pi;
 		this.cwd = cwd;
+		this.checkRunner = new CheckRunner(this);
 	}
 
 	get config(): MissionsConfig {
@@ -147,7 +140,7 @@ export class Runtime {
 		return new MissionRepository(this.layout);
 	}
 
-	private get exec() {
+	get exec() {
 		return (cmd: string, args: string[], opts?: { cwd?: string; timeout?: number; signal?: AbortSignal }) =>
 			this.pi.exec(cmd, args, { cwd: this.cwd, ...opts });
 	}
@@ -598,474 +591,15 @@ export class Runtime {
 	}
 
 	async steerVerifier(ctx: any, message: string): Promise<{ ok: true } | { error: string }> {
-		const text = message.trim();
-		if (!text) return { error: "steer 内容为空" };
-		if (!this.active || this.active.state.phase !== "check") {
-			return { error: "当前不在 CHECK 相位" };
-		}
-		const control = this.activeVerifierControl;
-		if (!control) return { error: "独立 Verifier 尚未启动或已经结束" };
-		try {
-			await control.steer(text);
-			const verifier = this.liveCheckState?.verifier;
-			if (verifier) {
-				verifier.steerCount = (verifier.steerCount ?? 0) + 1;
-				this.liveCheckState!.updatedAt = Date.now();
-				if (!this.active.inMemory) {
-					saveCheckState(statePaths(this.layout, this.active.state.missionId).checkJson, this.liveCheckState!);
-					appendLog(
-						statePaths(this.layout, this.active.state.missionId).logMd,
-						`VERIFIER STEER ${text.replace(/\s+/g, " ").slice(0, 200)}`,
-					);
-				}
-			}
-			this.refreshWidget(ctx);
-			return { ok: true };
-		} catch (error) {
-			return { error: error instanceof Error ? error.message : String(error) };
-		}
+		return this.checkRunner.steer(ctx, message);
 	}
 
-	private isCurrentCheck(active: ActiveMission, taskId: string, attempt: number): boolean {
-		return (
-			this.active === active &&
-			active.state.phase === "check" &&
-			active.state.currentTask === taskId &&
-			(active.state.tasks[taskId]?.attempts ?? 1) === attempt
-		);
-	}
-
+	/**
+	 * CHECK 编排已提取到 src/check-runner.ts 的 CheckRunner。
+	 * 保留本方法签名:startCheck 的并发守卫与冒烟测试的 rt.runCheck 挂钩都从这里进。
+	 */
 	async runCheck(ctx: any): Promise<void> {
-		const a = this.active;
-		if (!a || a.state.phase !== "check" || !a.state.currentTask) return;
-		const taskId = a.state.currentTask;
-		const task = findTask(a.plan, taskId);
-		const attempt = a.state.tasks[taskId]?.attempts ?? 1;
-		const isCurrent = () => this.isCurrentCheck(a, taskId, attempt);
-		const l = this.layout;
-		const sp = statePaths(l, a.state.missionId);
-		const checkState: CheckState = {
-			taskId,
-			attempt,
-			startedAt: Date.now(),
-			updatedAt: Date.now(),
-			stage: "preparing",
-			completedBranches: [],
-			verifier: { status: "pending" },
-			summary: "准备环境...",
-		};
-		const persistCheck = (partial: Partial<CheckState> = {}) => {
-			Object.assign(checkState, partial);
-			checkState.updatedAt = Date.now();
-			if (isCurrent()) this.liveCheckState = checkState;
-			if (!a.inMemory && isCurrent()) saveCheckState(sp.checkJson, checkState);
-		};
-		const evidences: Evidence[] = [];
-		let requiredAcIds: string[] = [];
-		const hardResults: Array<{ acId: string; pass: boolean; outputTail: string }> = [];
-
-		const runHard = async (
-			acId: string,
-			command: string,
-			cmd: string,
-			args: string[],
-			timeout: number,
-			envFingerprint: string,
-		): Promise<void> => {
-			const startedAt = Date.now();
-			persistCheck({
-				stage: "running_scripts",
-				currentBranch: acId,
-				summary: `正在执行 verify 分支: ${acId}`,
-			});
-			this.refreshWidget(ctx);
-			const result = await this.exec(cmd, args, { timeout });
-			const durationMs = Date.now() - startedAt;
-			const raw = tail(`${result.stdout}\n${result.stderr}`, EVIDENCE_TAIL);
-			const evidence: Evidence = {
-				level: "hard",
-				acId,
-				result: result.code === 0 ? "pass" : "fail",
-				raw,
-				exitCode: result.code,
-				envFingerprint,
-				command,
-				startedAt,
-				durationMs,
-				stdout: result.stdout,
-				stderr: result.stderr,
-			};
-			evidences.push(evidence);
-			hardResults.push({
-				acId,
-				pass: result.code === 0,
-				outputTail: tail(raw, 800),
-			});
-			checkState.completedBranches.push({
-				acId,
-				status: evidence.result,
-				exitCode: result.code,
-				startedAt,
-				durationMs,
-				command,
-			});
-			persistCheck({ currentBranch: undefined });
-		};
-
-		const runIndependentVerifier = async (
-			envFingerprint: string,
-			renderBrief: () => Promise<string>,
-		): Promise<void> => {
-			if (!isCurrent()) return;
-			if (!a.git) {
-				persistCheck({
-					verifier: { status: "skipped", message: "目标目录不是 git 仓库" },
-				});
-				return;
-			}
-			const startedAt = Date.now();
-			const timeoutMs = this.config.verifierTimeoutMs ?? 300_000;
-			persistCheck({
-				stage: "running_verifier",
-				verifier: { status: "running", startedAt, activity: "初始化独立 AgentSession", trace: [] },
-				summary: "脚本已完成，独立验证者核验中...",
-			});
-			this.refreshWidget(ctx);
-			const verifierConfig = this.modelsConfig().verifier;
-			const hasConfiguredModel = !!(verifierConfig?.provider && verifierConfig?.model);
-			const configuredModel = hasConfiguredModel
-				? ctx.modelRegistry?.find?.(verifierConfig!.provider!, verifierConfig!.model!)
-				: null;
-			// 配了模型但解析不到 → 显式降级 hard-only,绝不静默退回会话模型(semi 证据的来源必须可审计)
-			if (hasConfiguredModel && !configuredModel) {
-				const message = `配置的 verifier 模型 ${verifierConfig!.provider}/${verifierConfig!.model} 不可用,降级为 hard-only`;
-				if (!a.inMemory) appendLog(sp.logMd, message);
-				persistCheck({
-					verifier: { status: "degraded", startedAt, durationMs: Date.now() - startedAt, activity: "核验不可用", message },
-				});
-				return;
-			}
-			const model = configuredModel ?? ctx.model;
-			let ownedControl: VerifierControl | null = null;
-			const updateVerifierProgress = (progress: VerifierProgress) => {
-				if (!isCurrent()) return;
-				const steerCount = checkState.verifier?.steerCount ?? 0;
-				persistCheck({
-					verifier: {
-						status: "running",
-						startedAt,
-						activity: progress.activity,
-						trace: progress.trace,
-						turns: progress.turns,
-						toolCalls: progress.toolCalls,
-						inputTokens: progress.input,
-						outputTokens: progress.output,
-						cacheReadTokens: progress.cacheRead,
-						cacheWriteTokens: progress.cacheWrite,
-						cost: progress.cost,
-						steerCount,
-					},
-					summary: `独立核验: ${progress.activity}`,
-				});
-				this.refreshWidget(ctx);
-			};
-			const verifierResult = await runVerifier({
-				cwd: this.cwd,
-				model,
-				thinkingLevel: verifierConfig?.thinking ?? DEFAULT_THINKING.verifier,
-				timeoutMs,
-				envFingerprint,
-				expectedAcIds: requiredAcIds,
-				brief: await renderBrief(),
-				onProgress: updateVerifierProgress,
-				onControl: (control) => {
-					if (control) {
-						ownedControl = control;
-						if (isCurrent()) this.activeVerifierControl = control;
-					} else if (this.activeVerifierControl === ownedControl) {
-						this.activeVerifierControl = null;
-					}
-				},
-			});
-			const durationMs = Date.now() - startedAt;
-			// 无条件记账:网关不报价时 cost=0,但 token 用量必须落盘,否则 verifier 的消耗在账上隐形
-			const vu = verifierResult.usage;
-			if (isCurrent() && (vu.cost > 0 || vu.input + vu.output + vu.cacheRead + vu.cacheWrite > 0)) {
-				await this.applyEvent(
-					{
-						type: "RECORD_ROLE_COST",
-						at: Date.now(),
-						role: "verifier",
-						amount: vu.cost,
-						tokens: { input: vu.input, output: vu.output, cacheRead: vu.cacheRead, cacheWrite: vu.cacheWrite },
-					},
-					ctx,
-				);
-			}
-			if (verifierResult.status === "completed") {
-				evidences.push(
-					...verifierResult.evidences.map((e) => ({
-						...e,
-						command: "in-process verifier AgentSession",
-						startedAt,
-						durationMs,
-						stdout: `${verifierResult.trace.join("\n")}\n\n${e.raw}`,
-						stderr: "",
-					})),
-				);
-				persistCheck({
-					verifier: {
-						...checkState.verifier,
-						status: "completed",
-						startedAt,
-						durationMs,
-						activity: "核验完成",
-						trace: verifierResult.trace,
-						inputTokens: vu.input,
-						outputTokens: vu.output,
-						cacheReadTokens: vu.cacheRead,
-						cacheWriteTokens: vu.cacheWrite,
-						cost: vu.cost,
-					},
-				});
-				return;
-			}
-			// 原因必须进 LOG,不能只进 CHECK.json。真实事故:简报与校验的 id 命名空间
-			// 不一致,每一轮都抛"提交了未知 AC",LOG 里却只有一句"unavailable" ——
-			// 整个 mission 的 semi 层从未生效,而看 LOG 的人完全看不出这是个 bug
-			// 而不是模型不可用。降级本身是设计(模型策略是优化项),降级的**原因**不是。
-			const degradeWhy = (verifierResult.status === "timeout" ? "超时" : verifierResult.message)
-				.replace(/\s+/g, " ")
-				.slice(0, 200);
-			if (!a.inMemory) {
-				appendLog(sp.logMd, `verifier 降级 hard-only:${degradeWhy}`);
-			}
-			this.warn(ctx, `独立核验降级为 hard-only:${degradeWhy}`);
-			persistCheck({
-				verifier: {
-					...checkState.verifier,
-					status: verifierResult.status === "timeout" ? "timeout" : "degraded",
-					startedAt,
-					durationMs,
-					activity: verifierResult.status === "timeout" ? "核验超时" : "核验不可用",
-					trace: verifierResult.trace,
-					inputTokens: vu.input,
-					outputTokens: vu.output,
-					cacheReadTokens: vu.cacheRead,
-					cacheWriteTokens: vu.cacheWrite,
-					cost: vu.cost,
-					message:
-						verifierResult.status === "timeout"
-							? `独立验证者超时,降级为 hard-only:${verifierResult.message}`
-							: `独立验证者不可用,降级为 hard-only:${verifierResult.message}`,
-				},
-			});
-		};
-
-		persistCheck();
-		this.refreshWidget(ctx);
-
-		try {
-			const fp = await computeEnvFingerprint(this.exec, this.cwd, envFingerprintSh(l));
-			if (!isCurrent()) return;
-			const spike = this.currentSpikeReport();
-			if (spike) {
-				const startedAt = Date.now();
-				persistCheck({
-					stage: "running_scripts",
-					currentBranch: "spike",
-					summary: "正在检查探针结论文件...",
-				});
-				const report = fs.existsSync(spike.abs) ? fs.readFileSync(spike.abs, "utf8") : null;
-				const substantive = reportIsSubstantive(report);
-				const durationMs = Date.now() - startedAt;
-				const raw = substantive
-					? `结论文件 ${spike.rel}(${report!.trim().length} 字)`
-					: `结论文件 ${spike.rel} 缺失或过短 —— 探针的产出就是这份结论`;
-				requiredAcIds = ["spike"];
-				evidences.push({
-					level: "hard",
-					acId: "spike",
-					result: substantive ? "pass" : "fail",
-					raw,
-					exitCode: substantive ? 0 : 1,
-					envFingerprint: fp,
-					command: `check ${spike.rel}`,
-					startedAt,
-					durationMs,
-					stdout: substantive ? report! : "",
-					stderr: substantive ? "" : raw,
-				});
-				checkState.completedBranches.push({
-					acId: "spike",
-					status: substantive ? "pass" : "fail",
-					exitCode: substantive ? 0 : 1,
-					startedAt,
-					durationMs,
-					command: `check ${spike.rel}`,
-				});
-				persistCheck({ currentBranch: undefined });
-				if (substantive) {
-					if (!isCurrent()) return;
-					await runIndependentVerifier(fp, async () =>
-						renderSpikeVerifierBrief({
-							goal: a.plan.goal,
-							taskId: task?.id ?? "",
-							question: task?.question ?? "",
-							report: tail(report!, EVIDENCE_TAIL),
-							diff: await this.gitDiff(),
-						}),
-					);
-				} else {
-					persistCheck({
-						verifier: { status: "skipped", message: "探针结论未通过机械检查" },
-					});
-				}
-			} else if (a.state.tier === "quick") {
-				// 判据一条,裁判按冻结时选的那种。三种裁判产出的证据级别不同
-				// (hard / semi / human),但都在执行者之外 —— I3 的要求是这个,
-				// 不是"判定必须可执行"。
-				const criterion = a.quickCriterion;
-				requiredAcIds = criterion ? ["quick"] : [];
-				if (criterion?.judge === "command") {
-					const command = criterion.command;
-					await runHard("quick", command, "bash", ["-c", command], 300_000, fp);
-					if (!isCurrent()) return;
-					persistCheck({
-						verifier: { status: "skipped", message: "quick 命令判据:hard 证据已足够" },
-					});
-				} else if (criterion?.judge === "ai") {
-					await runIndependentVerifier(fp, async () =>
-						renderVerifierBrief({
-							goal: a.plan.goal,
-							taskId: task?.id ?? "",
-							taskTitle: a.plan.goal,
-							acceptanceCriteria: [{ id: "quick", text: criterion.text, verify: "quick" }],
-							expectedAcIds: requiredAcIds,
-							hardResults,
-							diff: await this.gitDiff(),
-						}),
-					);
-				} else if (criterion?.judge === "human") {
-					await this.collectHumanVerdict(ctx, criterion.text, evidences, fp, persistCheck);
-					if (!isCurrent()) return;
-				} else {
-					persistCheck({
-						verifier: { status: "skipped", message: "quick 档无判据(不应发生:准入已守)" },
-					});
-				}
-			} else {
-				const script = this.repository.verifyScriptPath(a.state.missionId, a.generation);
-				let verifyNames = task?.verify ?? [];
-				if (a.state.tier === "complex" && task && isLastTaskOfMilestone(a.plan, task.id)) {
-					const milestone = findMilestoneOf(a.plan, task.id);
-					verifyNames = [...new Set(milestone!.tasks.flatMap((t) => t.verify))];
-				}
-				requiredAcIds = verifyNames;
-				for (const name of verifyNames) {
-					await runHard(
-						name,
-						`bash ${script} ${name}`,
-						"bash",
-						[script, name],
-						600_000,
-						fp,
-					);
-					if (!isCurrent()) return;
-				}
-				await runIndependentVerifier(fp, async () =>
-					renderVerifierBrief({
-						goal: a.plan.goal,
-						taskId: task?.id ?? "",
-						taskTitle: task?.title ?? "",
-						acceptanceCriteria: a.plan.acceptanceCriteria,
-						// 与 runVerifier 的 expectedAcIds 同一个数组:简报和校验必须同源,
-						// 各自取数就会漂,而漂了是静默降级 hard-only(见 renderVerifierBrief)
-						expectedAcIds: requiredAcIds,
-						hardResults,
-						diff: await this.gitDiff(),
-					}),
-				);
-			}
-
-			if (!isCurrent()) return;
-			persistCheck({ stage: "judging", summary: "正在生成最终判定..." });
-			const verdict = judge(evidences, {
-				expectedFingerprint: a.state.envFingerprint,
-				requiredAcIds,
-			});
-			if (!a.inMemory) saveEvidence(sp.evidenceDir, taskId, attempt, evidences);
-			persistCheck({
-				stage: "completed",
-				outcome: verdict.outcome,
-				summary: `判定完成: ${verdict.outcome.toUpperCase()}`,
-			});
-			if (!isCurrent()) return;
-			this.pi.appendEntry("missions-verdict", {
-				missionId: a.state.missionId,
-				taskId,
-				attempt,
-				verdict,
-				evidences: evidences.map((e) => ({
-					level: e.level,
-					acId: e.acId,
-					result: e.result,
-					exitCode: e.exitCode,
-					durationMs: e.durationMs,
-					rawTail: e.result === "fail" ? tail(e.raw, 600) : undefined,
-				})),
-			});
-			const result = await this.applyEvent({ type: "VERDICT", at: Date.now(), verdict }, ctx);
-			if (result.error) return;
-
-			const state = this.active!.state;
-			if (state.pendingHandoff) return;
-			if (state.phase === "act") {
-				this.pi.sendUserMessage(renderActBrief(a.plan, state), { deliverAs: "followUp" });
-			} else if (state.phase === "do") {
-				this.pi.sendUserMessage(renderDoBrief(a.plan, state, this.currentSpikeReport()?.rel), {
-					deliverAs: "followUp",
-				});
-			}
-		} catch (error) {
-			if (!isCurrent()) return;
-			const message = error instanceof Error ? error.message : String(error);
-			if (!a.inMemory) appendLog(sp.logMd, `CHECK ERROR ${message}`);
-			ctx.ui.notify(`CHECK 执行异常:${message}`, "error");
-			if (isCurrent()) {
-				persistCheck({ stage: "error", error: message, summary: `判定异常: ${message}` });
-				const errorEvidence: Evidence = {
-					level: "hard",
-					acId: "check-runtime",
-					result: "inconclusive",
-					raw: message,
-					envFingerprint: a.state.envFingerprint ?? undefined,
-					command: checkState.currentBranch,
-					startedAt: Date.now(),
-					durationMs: 0,
-					stdout: "",
-					stderr: message,
-				};
-				evidences.push(errorEvidence);
-				try {
-					if (!a.inMemory) saveEvidence(sp.evidenceDir, taskId, attempt, evidences);
-				} catch {
-					/* CHECK.json 与 LOG.md 已保留异常,归档失败不阻断状态恢复 */
-				}
-				const verdict = judge(evidences, {
-					expectedFingerprint: a.state.envFingerprint,
-					requiredAcIds,
-				});
-				const result = await this.applyEvent({ type: "VERDICT", at: Date.now(), verdict }, ctx);
-				if (!result.error && result.state.phase === "do") {
-					this.pi.sendUserMessage(renderDoBrief(a.plan, result.state, this.currentSpikeReport()?.rel), {
-						deliverAs: "followUp",
-					});
-				}
-			}
-		} finally {
-			this.refreshWidget(ctx);
-		}
+		return this.checkRunner.run(ctx);
 	}
 
 	// ─────────────────────────── tick(agent_settled 内层循环) ───────────────────────────
@@ -1550,6 +1084,11 @@ export class Runtime {
 		a.plan = plan;
 		this.stagedPlan = staged;
 		const envFingerprint = await computeEnvFingerprint(this.exec, this.cwd, envFingerprintSh(this.layout));
+		// 记录冻结时的 git HEAD —— verifier 的 diff 基准。
+		// 从 baseCommit 到 HEAD 的 diff 才是本次 mission 的产出,
+		// 从 HEAD 开始 diff 会把冻结前的工作混进 verdict 证据里。
+		const baseCommitR = await this.exec("git", ["rev-parse", "HEAD"], { timeout: 5_000 });
+		const baseCommit = baseCommitR.exitCode === 0 ? baseCommitR.stdout.trim() : null;
 		const r = await this.applyEvent(
 			{
 				type: "PLAN_FROZEN",
@@ -1557,6 +1096,7 @@ export class Runtime {
 				taskOrder: taskOrder(plan),
 				spikes: spikeTaskIds(plan),
 				envFingerprint,
+				baseCommit,
 				sessionFile: safeSessionFile(ctx),
 			},
 			ctx,
@@ -1748,13 +1288,7 @@ export class Runtime {
 		}
 	}
 
-	private async gitDiff(): Promise<string> {
-		const r = await this.exec("git", ["-c", "core.pager=cat", "diff", "HEAD", "--stat"], { timeout: 30_000 });
-		const d = await this.exec("git", ["-c", "core.pager=cat", "diff", "HEAD"], { timeout: 30_000 });
-		return tail(`${r.stdout}\n\n${d.stdout}`, DIFF_TAIL);
-	}
-
-	private warn(ctx: any, msg: string): void {
+	warn(ctx: any, msg: string): void {
 		ctx.ui.notify(msg, "warning");
 		if (this.active) appendLog(statePaths(this.layout, this.active.state.missionId).logMd, `WARN ${msg}`);
 	}
@@ -1783,60 +1317,6 @@ export class Runtime {
 		});
 	}
 
-	/**
-	 * 人工终审。三条纪律,少一条 human 证据就退化成 soft(执行者自述)的变体:
-	 *
-	 *  1. **没有默认值**。做成"回车即过"的话,人没看,只是按了键 —— 那不是 I3
-	 *     意义上的外部判定。取消/超时一律不产出证据,由 judge() 的规则 4 判
-	 *     inconclusive,而不是判 pass。
-	 *  2. **fail 必须给理由**,理由进 LOG。签名不用这句话算(措辞每次都变),
-	 *     用固定串,见 breaker.ts 的 canonicalOf。
-	 *  3. **记账为不可重放**。写进证据的 command 字段,面板与 LOG 都能看到
-	 *     这条判据没有留下能重跑的东西。
-	 */
-	private async collectHumanVerdict(
-		ctx: any,
-		criterionText: string,
-		evidences: Evidence[],
-		envFingerprint: string,
-		persistCheck: (patch: any) => void,
-	): Promise<void> {
-		persistCheck({
-			stage: "running_verifier",
-			summary: "等待人工终审...",
-			verifier: { status: "skipped", message: "人工终审(不可重放)" },
-		});
-		this.refreshWidget(ctx);
-		const startedAt = Date.now();
-		const PASS = "通过 —— 收工";
-		const FAIL = "不通过 —— 我来说哪里不对";
-		let choice: string | undefined;
-		if (ctx.hasUI) {
-			choice = await ctx.ui.select(`人工终审:${criterionText}`, [PASS, FAIL]);
-		} else {
-			ctx.ui.notify("当前环境无法弹出人工终审(非 TUI),本轮判为无结论", "warning");
-		}
-		// 没做选择 ≠ 通过。不产出证据,让 judge() 判 inconclusive
-		if (choice !== PASS && choice !== FAIL) return;
-
-		const passed = choice === PASS;
-		let reason = "人工终审通过";
-		if (!passed) {
-			const said = ctx.hasUI ? await ctx.ui.input("哪里不对?", "一句话说明,会写进 LOG") : undefined;
-			reason = said?.trim() || "人工终审未通过(未说明原因)";
-		}
-		evidences.push({
-			level: "human",
-			acId: "quick",
-			result: passed ? "pass" : "fail",
-			raw: reason,
-			envFingerprint,
-			command: "人工终审(不可重放)",
-			startedAt,
-			durationMs: Date.now() - startedAt,
-		});
-	}
-
 	checkStateFor(missionId: string): CheckState | null {
 		if (this.active?.state.missionId === missionId && this.liveCheckState) {
 			return this.liveCheckState;
@@ -1847,174 +1327,8 @@ export class Runtime {
 
 // ─────────────────────────── 渲染(纯函数,UI 层共用) ───────────────────────────
 
-const QUICK_JUDGE_LABEL: Record<QuickCriterion["judge"], string> = {
-	ai: "独立验证者(读 diff 逐条核对)",
-	human: "人工终审(提交后由人判定,不是自动判定)",
-	command: "命令退出码",
-};
-
-export function renderStateCard(
-	plan: MissionPlan,
-	state: MissionState,
-	dirName = "missions",
-	generation?: number,
-	quickCriterion?: QuickCriterion | null,
-): string {
-	const task = state.currentTask ? findTask(plan, state.currentTask) : undefined;
-	const t = state.currentTask ? state.tasks[state.currentTask] : undefined;
-	const acs =
-		plan.acceptanceCriteria.length > 0
-			? plan.acceptanceCriteria
-					.map(
-						(c) =>
-							`  - ${c.id}: ./${dirName}/state/${state.missionId}/generations/${generation ?? "<generation>"}/verify.sh ${c.verify} 退出码 0 —— ${c.text}`,
-					)
-					.join("\n")
-			: plan.tier === "quick"
-				? // 必须印出**真实的判据和裁判**。曾经这里写死一句"判定依据是 --verify 冻结的
-					// 那条命令",于是 planner 读到的是"没有冻结的 AC",转头就准备自己造一套 ——
-					// 判定标准在卡片上隐形,等于 I2(执行期只读)在模型眼里根本不存在。
-					quickCriterion
-					? `  quick: ${quickCriterion.text}\n  核对方: ${QUICK_JUDGE_LABEL[quickCriterion.judge]}`
-					: "  (quick 档判据尚未冻结:先调用 mission_criterion 定一条,之后才解锁写工具)"
-				: "  (尚未冻结:本相位的产出就是可执行的 AC,由 mission_write_plan 提交)";
-	const lines = [
-		`[MISSION] ${state.missionId} · ${state.tier} · phase=${state.phase}` +
-			(state.currentTask ? ` · task=${state.currentTask} · attempt=${t?.attempts ?? 0}` : ""),
-		`GOAL: ${plan.goal}`,
-		`AC(冻结,不可修改):`,
-		acs,
-	];
-	if (plan.definition) {
-		const f = plan.definition;
-		lines.push(`完成条件(每条都要有 AC 覆盖):${f.doneWhen.map((d) => `${d.id} ${d.text}`).join(" · ")}`);
-		if (f.constraints.length) lines.push(`约束(DEFINE 已确认):${f.constraints.join(" · ")}`);
-		if (f.nonGoals.length) lines.push(`不做:${f.nonGoals.join(" · ")}`);
-		if (f.verifySeam) lines.push(`验证接缝:${f.verifySeam}`);
-	}
-	if (task?.kind === "spike") {
-		lines.push(
-			`CURRENT TASK: ${task.id} ${task.title} —— 探针(spike),产出是书面结论,不是代码`,
-			`  要回答:${task.question ?? ""}`,
-			`  结论写到:./${dirName}/spikes/${state.missionId}/${task.id}.md(闸门只放行这一个文件)`,
-			"  一次机会,不重试;提交后系统会带着结论回到 PLAN 重新规划。",
-		);
-	} else if (task) {
-		// quick 的判据已经完整印在上面的 AC 段里,这里不再重复;standard/complex 印 verify 分支。
-		// 曾经的兜底文案是"verify: submit 时提供" —— 那和 mission_submit 不接受任何参数
-		// 直接矛盾,等于在卡片上告诉执行者"判定标准可以事后补"(I2/I3 的反面)。
-		const verifyNote = task.verify.join(", ");
-		lines.push(`CURRENT TASK: ${task.id} ${task.title}${verifyNote ? `(verify: ${verifyNote})` : ""}`);
-	}
-	if (t?.lastFailureReason) lines.push(`PREV FAILURE: ${t.lastFailureReason}`);
-	if (t?.awaitingEvidence && state.phase === "do") {
-		lines.push(`AWAITING EVIDENCE: 上一轮因「${t.awaitingEvidence.reason}」无法判定，请补充机械证据或修改实现后再提交`);
-	}
-	// 打回意见必须跟着 State Card 走:换脑之后新会话读不到上一轮的对话,
-	// 没有它 planner 又回到"只知道被拒、不知道为什么"的状态
-	if (state.phase === "plan" && state.planReview.notes.length > 0) {
-		const notes = state.planReview.notes;
-		lines.push(`PREV REJECTION(第 ${state.planReview.rejections} 次): ${notes[notes.length - 1]}`);
-		if (notes.length > 1) lines.push(`  更早的打回:${notes.slice(0, -1).join(" / ")}`);
-	}
-	if (state.pendingHandoff) lines.push(`⏸ 换脑挂起中:${state.pendingHandoff}。请执行 /mission next。`);
-	if (state.phase === "define") {
-		const asked = state.defineAsks;
-		const cap = roundCapFor(state.tier);
-		if (asked >= cap) {
-			lines.push(
-				`提问轮次已用完(${asked}/${cap}):根据已有回答调用 mission_define;仍不足以定义就说明缺什么,由人重新描述。`,
-			);
-		} else {
-			lines.push(
-				`先定义问题:读代码,必要时 mission_ask 提问(已用 ${asked}/${cap} 轮,每轮最多 3 个,每个问题必须带推荐答案)。` +
-					"不要写代码或设计方案。",
-			);
-			if (asked > 0 && state.defineSettled.length > 0) {
-				lines.push(`已落定:${state.defineSettled.join(" · ")} —— 再问一轮必须让这个清单变长。`);
-			}
-			if (state.defineAnswers.length > 0) {
-				// 已收到的回答就摆在这里:换脑后的新会话照这个抄 resolved,不必靠上下文
-				for (const rec of state.defineAnswers.slice(-6)) {
-					lines.push(`问:${rec.q.replace(/\s+/g, " ")}`);
-					lines.push(`答:${rec.a.replace(/\s+/g, " ")}`);
-				}
-			}
-		}
-	}
-	if (state.phase === "do" && task && task.kind !== "spike") {
-		lines.push(`你只需完成 ${task.id}。完成后调用 mission_submit,不要自行判定通过。`);
-	}
-	return lines.join("\n");
-}
-
-export function renderDoBrief(plan: MissionPlan, state: MissionState, spikeReportRel?: string | null): string {
-	const task = state.currentTask ? findTask(plan, state.currentTask) : undefined;
-	const t = state.currentTask ? state.tasks[state.currentTask] : undefined;
-	if (task?.kind === "spike") {
-		return [
-			`[pi-missions] 进入 DO:${task.id} ${task.title} —— 这是一次**探针(spike)**,不是实现任务。`,
-			`要回答的问题:${task.question ?? ""}`,
-			`只做调查(读代码、grep、跑只读命令),把结论写进 ${spikeReportRel ?? "结论文件"} ——`,
-			"闸门只放行写这一个文件,改实现会被拦。结论要给出依据的事实(文件、数量、报错、测量值),",
-			"不要写\"需要进一步调研\"。写完调用 mission_submit;之后系统会带着结论回到 PLAN 重新规划。",
-			"探针只打一次,没有第二次尝试。",
-		].join("\n");
-	}
-	if (t?.awaitingEvidence) {
-		const acList = t.awaitingEvidence.acIds.length > 0 ? ` (涉及 AC: ${t.awaitingEvidence.acIds.join(", ")})` : "";
-		return [
-			`[pi-missions] 回到 DO:${state.currentTask} —— 上一轮判定因「${t.awaitingEvidence.reason}」无结论${acList}。`,
-			"本系统已启用补证据闸门:在工作区有实际改动前,原样重交将被直接拦截。",
-			"请按以下指引补全证据后重试:",
-			"1. 为对应 verify 分支补充能够跑出明确结论的机械断言,或完善实现使只读验证者可核验;",
-			"2. 重交前请在终端自测对应 verify 分支,确认其已能产出确定结果;",
-			"3. 若缺少证据是因计划分解/AC 分配有误(如对应分支应由后续任务负责),请调用 mission_escalate 升级方案,切勿盲目硬改。",
-			"补充证据后调用 mission_submit 重新判定。",
-		].join("\n");
-	}
-	const lines = [`[pi-missions] 进入 DO:${state.currentTask} ${task?.title ?? ""}(第 ${t?.attempts ?? 1} 次尝试)`];
-	if (t?.lastFailureReason) lines.push(`上一轮失败:${t.lastFailureReason} —— 换思路,不要重复同一修法。`);
-	lines.push("完成后调用 mission_submit。");
-	return lines.join("\n");
-}
-
-function renderActBrief(plan: MissionPlan, state: MissionState): string {
-	const t = state.currentTask ? state.tasks[state.currentTask] : undefined;
-	return [
-		`[pi-missions] 进入 ACT:${state.currentTask} 第 ${t?.attempts ?? "?"} 次尝试验证失败。`,
-		`失败:${t?.lastFailureReason ?? "见 LOG.md"}`,
-		"分析失败性质并给出下一轮的修法(实现问题),或调用 mission_escalate 升级(方案/问题定义问题)。你只有这一轮,不能写代码。",
-	].join("\n");
-}
-
-function renderHandoffBrief(
-	plan: MissionPlan,
-	state: MissionState,
-	dirName = "missions",
-	generation?: number,
-	quickCriterion?: QuickCriterion | null,
-	inMemory = false,
-): string {
-	return [
-		renderStateCard(plan, state, dirName, generation, quickCriterion),
-		"",
-		`工作流规则见 ${dirName}/README.md;当前相位规则见 ${dirName}/phases/${state.phase}.md。`,
-		state.phase === "plan"
-			? inMemory
-				? // quick 不落盘:没有 LOG.md 可读。指着一个不存在的文件让人去读,
-					// 换来的是新会话花好几轮 ls/cat 找不到,然后在没有失败历史的情况下瞎猜。
-					"重规划:该 mission 不落盘,没有 LOG.md —— 失败历史只有上面 PREV FAILURE 那一条,别去 missions/state 找。"
-				: `重规划:先读 ${dirName}/state 下该 mission 的 LOG.md 失败记录,再调用 mission_write_plan。`
-			: "",
-		state.phase === "define"
-			? `重新定义问题(L3):先读 ${dirName}/state 下该 mission 的 LOG.md 与 archive/ 里的旧 MISSION.md,` +
-				"弄清原来的问题定义错在哪。提问预算已重置,可以再问一轮,然后调用 mission_define。"
-			: "",
-	]
-		.filter(Boolean)
-		.join("\n");
-}
+// renderStateCard / renderDoBrief / renderActBrief / renderHandoffBrief
+// 已提取到 src/briefs.ts —— 纯函数,不依赖 Runtime 实例。
 
 function slugify(goal: string): string {
 	const ascii = goal
@@ -2023,10 +1337,6 @@ function slugify(goal: string): string {
 		.replace(/^-+|-+$/g, "")
 		.slice(0, 40);
 	return ascii || `mission-${Date.now().toString(36)}`;
-}
-
-function tail(s: string, n: number): string {
-	return s.length > n ? s.slice(-n) : s;
 }
 
 function safeSessionFile(ctx: any): string {

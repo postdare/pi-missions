@@ -48,8 +48,21 @@ export function nearThreshold(task: TaskState | undefined, tier: Tier): boolean 
 
 /** Java/JUnit 测试标识:AuthIntegrationTest#refreshToken 或 FooTest.bar */
 const TEST_ID = /\b([A-Z]\w*(?:Test|Tests|IT|ITCase|Spec))\s*[.#]\s*([a-zA-Z_]\w*)/g;
+/**
+ * snake_case 测试标识(Python/pytest、Rust、Go testing):
+ *   pytest:  test_foo_bar
+ *   Rust:    test_foo_bar
+ *   Go:      TestFoo (大写开头,已被 TEST_ID 覆盖;subtests: TestFoo/subtest_name)
+ * 只抓 test_ 前缀的(PascalCase 的 Go/Java 测试已被 TEST_ID 覆盖)。
+ */
+const TEST_ID_SNAKE = /\b(test_[a-z][a-z0-9_]*)\b/g;
 /** 异常与错误类型 */
 const THROWABLE = /\b([A-Z]\w*(?:Exception|Error|Throwable|Failure))\b/g;
+/**
+ * panic / runtime error(Python traceback 末行、Rust panic、Go runtime error)。
+ * 抓的是"程序崩溃"这个类别,不是具体消息 —— 消息每次不同,但 panic 本身是稳定信号。
+ */
+const PANIC = /\b(?:panicked\s+at|runtime\s+error|fatal\s+error|Traceback\s*\(most\s+recent\s+call\s+last\))/i;
 /**
  * 断言种类。只保留"种类",不保留期望值/实际值。
  * 把 expected:<401> 与 expected:<500> 归为同一签名是刻意的:
@@ -63,11 +76,25 @@ const ASSERTION_KINDS: Array<[RegExp, string]> = [
   [/assertThrows/, "assert-throws"],
   [/\bto(?:Be|Equal|Match)\b/, "expect-to-be"],
   [/should\s+(?:be|equal|have)/i, "should-be"],
+  // pytest: `assert x == y` → AssertionError
+  [/assert\s+\S+\s*==\s/, "pytest-assert-eq"],
+  [/assert\s+\S+\s*!=\s/, "pytest-assert-neq"],
+  [/assert\s+\S+\s+is\s+(?:not\s+)?None/, "pytest-assert-none"],
+  // Rust: `assert_eq!(left, right)` / `assert!(cond)`
+  [/assert_eq!/, "rust-assert-eq"],
+  [/assert_ne!/, "rust-assert-ne"],
+  [/assert!/, "rust-assert"],
 ];
 /** 源文件后缀。必须剥掉,否则 Foo.java 会被当成 类Foo#方法java */
-const SOURCE_EXT = /\.(java|kt|kts|scala|groovy|ts|tsx|js|jsx|mjs|cjs|go|py|rb|cs)\b/gi;
-/** 编译/类型错误码,如 TS2345、error: cannot find symbol */
-const DIAG_CODE = /\b(TS\d{4}|error:\s*[a-z ]{4,40})/gi;
+const SOURCE_EXT = /\.(java|kt|kts|scala|groovy|ts|tsx|js|jsx|mjs|cjs|go|py|rb|cs|rs)\b/gi;
+/**
+ * 编译/类型错误码。覆盖:
+ *   TS2345              — TypeScript
+ *   E0308               — Rust
+ *   error: cannot find  — GCC/Clang/通用 C/C++
+ *   error[E0308]        — Rust (带方括号的形式)
+ */
+const DIAG_CODE = /\b(TS\d{4}|E\d{4}|error:\s*[a-z ]{4,40})/gi;
 
 /**
  * 把原始失败输出压成一个稳定的规范串。
@@ -93,7 +120,9 @@ export function normalize(raw: string): string {
   const tokens = new Set<string>();
 
   for (const m of s.matchAll(TEST_ID)) tokens.add(`test:${m[1]}#${m[2]}`);
+  for (const m of s.matchAll(TEST_ID_SNAKE)) tokens.add(`test:${m[1]}`);
   for (const m of s.matchAll(THROWABLE)) tokens.add(`throw:${m[1]}`);
+  if (PANIC.test(s)) tokens.add("panic");
   for (const [re, kind] of ASSERTION_KINDS) if (re.test(s)) tokens.add(`assert:${kind}`);
   for (const m of s.matchAll(DIAG_CODE)) tokens.add(`diag:${m[1].toLowerCase().trim()}`);
 

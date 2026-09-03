@@ -8,7 +8,8 @@
  * 判定逻辑全部在 src/core/(纯函数,有单测);这里只做翻译。
  */
 
-import { Runtime, renderStateCard } from "./runtime.ts";
+import { Runtime } from "./runtime.ts";
+import { renderStateCard } from "./briefs.ts";
 import { registerMissionTools } from "./tools.ts";
 import { registerCommands } from "./commands.ts";
 import { TextCard, renderLogCard, renderVerdictCard, type VerdictCardData } from "./ui/renderer.ts";

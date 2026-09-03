@@ -223,6 +223,7 @@ export function transition(state: MissionState, event: MissionEvent): Transition
 					taskOrder: order,
 					tasks,
 					envFingerprint: event.envFingerprint ?? state.envFingerprint,
+					baseCommit: event.baseCommit ?? state.baseCommit,
 					sessionMap,
 				},
 				[
@@ -595,7 +596,7 @@ function spikeTransition(state: MissionState, at: number, taskId: string, verdic
 		...t,
 		status: passed ? ("done" as const) : ("blocked" as const),
 		inconclusiveStreak: 0,
-		lastFailureReason: passed ? undefined : compact(verdict.reason),
+		lastFailureReason: passed ? undefined : failureReason(verdict.reason),
 		awaitingEvidence: null,
 	}));
 	const reason = `spike ${taskId} ${passed ? "结论已产出" : "未产出结论"}`;
@@ -640,7 +641,7 @@ function failTransition(
 	const base: TaskState =
 		task ?? { id: taskId, status: "running", attempts: 1, sameSignatureCount: 0, inconclusiveStreak: 0 };
 	const counted = applyFailure({ ...base, inconclusiveStreak: 0, awaitingEvidence: null }, sig);
-	counted.lastFailureReason = compact(verdict.reason);
+	counted.lastFailureReason = failureReason(verdict.reason);
 
 	const action = decide({ tier: state.tier, task: base, signature: sig, level: state.escalation.level });
 	const header = `${taskId} a=${base.attempts} verdict=FAIL sig=${sig} ev=${compact(verdict.reason)}`;
@@ -827,6 +828,19 @@ function compact(s: string): string {
 }
 
 /**
+ * 失败原因的截断 —— 比 LOG 的 compact 更宽。
+ *
+ * lastFailureReason 是 semi/human 失败信息进入模型上下文的唯一通道
+ * (verdict 卡片只给 TUI 看)。semi/human 证据不可重放:executor 在 DO 相位
+ * 有 bash 可以重跑 hard 证据,但 escalator 在 ACT 相位只有只读工具,
+ * 这段文字是它对失败原因的全部认知。120 字符放不下两条 AC 的理由,
+ * 截断等于扔掉不可重放的诊断信息。
+ */
+function failureReason(s: string): string {
+	return s.replace(/\s+/g, " ").trim().slice(0, 500);
+}
+
+/**
  * mission 的起始相位。
  * quick 档没有 AC 也没有 PLAN(判定依据是 --verify 冻结的命令),建好立刻冻结进 DO;
  * standard/complex 先过 DEFINE —— 需求模糊时写不出 AC,这是 I2 的入口条件。
@@ -865,6 +879,7 @@ export function initialState(params: {
 		tasks,
 		escalation: { level: 1, history: [] },
 		envFingerprint: params.envFingerprint ?? null,
+		baseCommit: null,
 		pendingHandoff: null,
 		sessionMap: {},
 		defineAsks: 0,
