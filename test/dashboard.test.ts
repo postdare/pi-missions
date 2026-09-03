@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { visibleWidth } from "@earendil-works/pi-tui";
-import { overviewLines, PHASE_STYLE, renderWidgetCard, renderStatusDashboard, taskBlocks, taskLines } from "../src/ui/dashboard.ts";
+import { overviewLines, PHASE_STYLE, renderWidgetCard, renderStatusDashboard, shortId, taskBlocks, taskLines } from "../src/ui/dashboard.ts";
 import { initialState } from "../src/core/machine.ts";
 import type { MissionPlan } from "../src/store/mission.ts";
 
@@ -54,12 +54,14 @@ const mockTheme = {
 	bold: (s: string) => s,
 };
 
-test("widget:身份/进度/成本/熔断预警(多任务才显示进度条)", () => {
+test("widget:身份/goal/进度/成本/熔断预警(多任务才显示进度条)", () => {
 	usedColors.length = 0;
 	const lines = renderWidgetCard(mockTheme, plan, runningState(), Date.now(), 120);
-	assert.ok(lines[0].includes("auth-refactor"));
+	assert.ok(lines[0].includes("auth-refactor"), "没有日期前缀的 id 原样上屏,不许砍成 refactor");
 	assert.ok(lines[0].includes("standard"));
 	assert.ok(lines[0].includes("● 执行"), "相位显示成带图标的中文,不是 phase=do");
+	assert.ok(lines[0].includes("迁移登录鉴权到 JWT"), "goal 上屏在行 1");
+	assert.ok(!lines.some((l) => l.includes("executor")), "role 是 phase 的纯函数,不再重复显示");
 	assert.ok(lines[1].includes("T2"));
 	assert.ok(lines[1].includes("attempt 2/3"));
 	assert.ok(lines[1].includes("1/2")); // 多任务:进度条在第二行
@@ -69,6 +71,111 @@ test("widget:身份/进度/成本/熔断预警(多任务才显示进度条)", ()
 	assert.ok(usedColors.includes("warning"));
 	// mission id 用了 accent
 	assert.ok(usedColors.includes("accent"));
+});
+
+test("widget:id 只剥日期前缀,省下的列给 goal", () => {
+	const s = runningState();
+	s.missionId = "2026-09-03-mission-mtl9aicc";
+	const lines = renderWidgetCard(mockTheme, { ...plan, missionId: s.missionId }, s, Date.now(), 120);
+	assert.ok(lines[0].includes("mission-mtl9aicc"), `短 id 上屏:${lines[0]}`);
+	assert.ok(!lines[0].includes("2026-09-03"), "日期前缀不再占列");
+	assert.equal(visibleWidth(lines[0]), 120, "goal 放得下时成本仍右对齐");
+});
+
+test("shortId:只剥日期前缀 —— 取末段会把拉丁 goal 的 slug 扔掉", () => {
+	// id 的构造是 <日期>-<slugify(goal)>,拉丁 goal 的 id 本身就是 goal
+	assert.equal(shortId("2026-09-03-migrate-auth-to-jwt"), "migrate-auth-to-jwt");
+	assert.equal(shortId("2026-09-03-mission-mtl9aicc"), "mission-mtl9aicc");
+	assert.equal(shortId("auth-refactor"), "auth-refactor", "没有日期前缀就原样返回");
+	assert.equal(shortId("nodash"), "nodash");
+});
+
+const LONG_GOAL =
+	"把登录鉴权整体迁移到 JWT,包括刷新令牌轮换、多设备踢下线与审计日志落盘,并保证旧客户端在灰度期内继续可用";
+
+test("widget:goal 再长也不吃高度,也不挤掉时长/成本", () => {
+	// widget 是常驻 chrome,高度是永久成本。goal 全程不变,截断即可;
+	// 曾经这里用 wrap,COLUMNS=56 + 一个正常长度的中文 goal 就涨到 12 行。
+	const s = runningState();
+	const p = { ...plan, goal: LONG_GOAL };
+	for (const width of [56, 72, 80, 120, 200]) {
+		const short = renderWidgetCard(mockTheme, plan, s, Date.now(), width);
+		const long = renderWidgetCard(mockTheme, p, s, Date.now(), width);
+		assert.equal(long.length, short.length, `goal 长短不改变行数 @${width}`);
+	}
+	// 右侧账目在任何宽度下都不许被 goal 吃掉
+	for (const width of [80, 120, 200]) {
+		const lines = renderWidgetCard(mockTheme, p, s, plan.createdAt + 5 * 60_000, width);
+		assert.ok(lines[0].includes("$0.96"), `长 goal 下成本仍在行 1 @${width}:${lines[0]}`);
+		assert.ok(lines[0].includes("5min"), `长 goal 下时长仍在行 1 @${width}`);
+		assert.equal(visibleWidth(lines[0]), width, `行 1 恰好占满 @${width}`);
+	}
+});
+
+test("widget:goal 预算不足就整条不显示 —— 认不出的残句还白占列", () => {
+	const s = runningState();
+	const narrow = renderWidgetCard(mockTheme, { ...plan, goal: LONG_GOAL }, s, Date.now(), 48);
+	assert.ok(!narrow[0].includes("把登录"), `48 列放不下 goal:${narrow[0]}`);
+	assert.ok(narrow[0].includes("standard"), "身份位仍在");
+});
+
+test("widget:任务标题按宽度折行(截断 bug 回归),attempt 1/N 收起", () => {
+	const s = runningState();
+	s.tasks.T2 = { ...s.tasks.T2, status: "running", attempts: 1, sameSignatureCount: 0 };
+	const longTitle = "FirstScreen 双屏轨道:ScreenLayout 与 HomeLinkList 的分组拖拽坐标体系迁移";
+	const p: MissionPlan = {
+		...plan,
+		milestones: [{ id: "M1", title: "m", tasks: [{ id: "T2", title: longTitle, verify: [] }] }],
+	};
+	const lines = renderWidgetCard(mockTheme, p, s, Date.now(), 80);
+	const joined = lines.join("");
+	for (const ch of longTitle) assert.ok(joined.includes(ch), `标题全文可见,不截断:${ch}`);
+	assert.ok(!lines.some((l) => l.includes("attempt 1/3")), "attempt 1/N 收起,训练不出选择性失明");
+	// 续行必须悬挂到标题列:"  " + "▸ T2 " = 7 列。差一列不报错,只会看着像另起一段
+	assert.ok(lines[1].startsWith("  ▸ T2 "), `前缀不带分隔点:${lines[1]}`);
+	const titleCol = lines[1].indexOf("FirstScreen");
+	assert.equal(titleCol, 7, "标题起于第 7 列");
+	assert.equal(
+		lines[2].length - lines[2].trimStart().length,
+		titleCol,
+		`续行悬挂量必须等于标题列:${JSON.stringify(lines[2])}`,
+	);
+});
+
+test("widget:任何相位 × 宽度 × 换脑原因都不许有行越界(越界会炸 TUI)", () => {
+	// L0 实际会写进 pendingHandoff 的全部取值,逐条抄自 machine.ts
+	const handoffs = [
+		null,
+		"advance to T3",
+		"plan rejected ×2",
+		"escalate L3",
+		"escalate L2 on T2",
+		"promote standard→complex on T12",
+		"spike T2 未产出结论",
+		"context-watermark 82%",
+		"人工主动换脑",
+	];
+	for (const width of [40, 48, 56, 72, 80, 100, 120, 200]) {
+		for (const phase of ["define", "plan", "do", "check", "act"] as const) {
+			for (const handoff of handoffs) {
+				const s = runningState();
+				s.phase = phase;
+				s.pendingHandoff = handoff;
+				if (phase === "define") {
+					s.currentTask = null;
+					s.taskOrder = [];
+					s.tasks = {};
+				}
+				const lines = renderWidgetCard(mockTheme, { ...plan, goal: LONG_GOAL }, s, Date.now(), width);
+				for (const [i, l] of lines.entries()) {
+					assert.ok(
+						visibleWidth(l) <= width,
+						`越界 w=${width} ${phase} handoff=${handoff} 行${i} 宽=${visibleWidth(l)}:${l}`,
+					);
+				}
+			}
+		}
+	}
 });
 
 test("widget:单任务(quick)不显示进度条,零成本/零时长不显示", () => {
@@ -90,7 +197,7 @@ test("widget:单任务(quick)不显示进度条,零成本/零时长不显示", (
 	assert.ok(!lines.some((l) => l.includes("$0")), "零成本不显示");
 	assert.ok(!lines.some((l) => l.includes("0min")), "零时长不显示");
 	assert.ok(lines[1].includes("本周天气如何呢"));
-	assert.ok(lines[1].includes("attempt 1/2"));
+	assert.ok(!lines.some((l) => l.includes("attempt")), "attempt 1/N 收起");
 });
 
 test("widget:右对齐时长/成本;换脑挂起警告色", () => {
@@ -248,5 +355,20 @@ test("widget:无结论预警的括号内容跟着成因走 —— 核验模型 4
 		const line = warnOf(stale);
 		assert.match(line, /证据没采到/, `stale=${stale}`);
 		assert.doesNotMatch(line, /undefined/, `stale=${stale}`);
+	}
+});
+
+test("widget:窄终端下卡片高度有上限 —— 常驻 chrome 不许无限长", () => {
+	const s = runningState();
+	const longTitle = "FirstScreen 双屏轨道:ScreenLayout 与 HomeLinkList 的分组拖拽坐标体系迁移";
+	const p: MissionPlan = {
+		...plan,
+		goal: LONG_GOAL,
+		milestones: [{ id: "M1", title: "m", tasks: [{ id: "T2", title: longTitle, verify: [] }] }],
+	};
+	s.pendingHandoff = "promote standard→complex on T12";
+	for (const width of [40, 48, 56, 72, 80, 120]) {
+		const lines = renderWidgetCard(mockTheme, p, s, Date.now(), width);
+		assert.ok(lines.length <= 5, `w=${width} 涨到了 ${lines.length} 行:\n${lines.join("\n")}`);
 	}
 });

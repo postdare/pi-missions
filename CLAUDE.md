@@ -16,7 +16,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ## 命令
 
 ```bash
-npm test                                           # 全部:core 单测 + runtime/UI 冒烟(366 个)
+npm test                                           # 全部:core 单测 + runtime/UI 冒烟(373 个)
 node --test src/core/__tests__/breaker.test.ts     # 单个文件
 node --test --test-name-pattern="熔断" src/core/__tests__/breaker.test.ts   # 单个用例(名字是中文)
 npx tsc --noEmit                                   # 类型检查(tsconfig 只 include src/)
@@ -34,6 +34,9 @@ COLUMNS=56 node --experimental-strip-types scripts/preview-plan-review.ts all
 
 # 问答页离线预览:default / open(开放式问题)/ done(已答两题)
 node --experimental-strip-types scripts/preview-ask-review.ts done
+
+# 常驻状态卡(输入框上方的 widget):do / check / warn(熔断临界 + 换脑挂起)
+COLUMNS=56 node --experimental-strip-types scripts/preview-widget.ts warn
 
 # 样式快照:观感变了(标签/间距/缩进)就红;确认是想要的改动后重新冻结
 UPDATE_SNAPSHOTS=1 node --test test/plan-review.snapshot.test.ts
@@ -94,7 +97,7 @@ skills/         随包分发的 pi skill(入场导览:该不该开 mission、选
 6. **`mission_submit` 不接受任何参数** —— 判定依据必须先于执行冻结(I2/I3)。
    任何让执行者事后补判定标准的改动都是在拆这套设计。
 
-## UI 层的三个坑(都有真实事故)
+## UI 层的四个坑(都有真实事故)
 
 - **主题色名写错会炸整个 pi 进程**,不是掉色 —— `theme.fg()` 遇到未知颜色名直接抛,
   而渲染在 TUI 主循环里。合法名单和严格主题在 `test/theme-colors.test.ts`,
@@ -105,6 +108,12 @@ skills/         随包分发的 pi skill(入场导览:该不该开 mission、选
 - **拼装时差一列不会报错,只会把盒子撕开** —— 盒顶右上角对不齐这个 bug 出现过三次。
   `test/render.test.ts` 是防线:它跑 `renderPanel`/`renderStatus` 的所有页面 × 宽度 ×
   选中态,断言每条盒行的可见宽度**恰好** = width。改 UI 后它必须还是绿的。
+- **选快捷键前先查三层占用,别只查 pi 键位表** —— `registerShortcut("ctrl+m")` 把回车键
+  劫持了:legacy 终端里 ctrl+字母的控制码是 `0x01`–`0x1A`,ctrl+m 就是 `\r`,用户每敲
+  一条命令按回车都会先命中快捷键。三层都要过:① pi + pi-tui 的键位表(26 个 ctrl
+  字母已全部被占);② 终端控制码雷区(ctrl+m=回车、ctrl+i=Tab、ctrl+h=退格);
+  ③ 绕开它们的组合键(如 ctrl+shift+*)值不值得引入新的肌肉记忆 —— 多数时候不值得,
+  用 `/命令` 提示代替。
 
 **UI 全部是纯函数**:`renderPanel()`(panel.ts)与 `renderStatus()`(status-view.ts)
 接一个描述当前视图的对象、返回行数组;`ctx.ui.custom` 的壳只负责持有状态和转发按键。

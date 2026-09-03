@@ -185,10 +185,41 @@ export function phaseBadge(t: LineTheme, phase: string): string {
 }
 
 /**
+ * id 的显示形态:只剥日期前缀。`2026-09-03-mission-mtl9aicc` → `mission-mtl9aicc`。
+ *
+ * **别改成取末段**(`split("-").pop()`)—— id 的构造是 `<日期>-<slugify(goal)>`
+ * (`runtime.ts` 的 newMission),拉丁 goal 的 id 本身就是 goal,取末段等于把它扔了:
+ * `2026-09-03-migrate-auth-to-jwt` 只剩 `jwt`,没有日期前缀的 `auth-refactor`
+ * 还会被砍成 `refactor`。中文 goal 才落到 `mission-<base36>` 那个无信息的兜底形态。
+ * 日期能从同一行的时长读出来,而 id 唯一的机器用途是拼 missions/state/<id>/ 的
+ * 路径 —— 前缀补回去就行。
+ */
+export function shortId(missionId: string): string {
+	return missionId.replace(/^\d{4}-\d{2}-\d{2}-/, "");
+}
+
+/**
+ * goal 上屏所需的最小列数(CJK 宽 2,约合 12 个汉字)。低于这个数就整条不显示:
+ * `首屏双…` 认不出是哪个 mission,还白占列。
+ */
+const GOAL_MIN = 24;
+
+/**
  * 主题化状态卡片(输入框上方)。结构:
- *   行1: ◆ id(accent 粗体) · 档位(dim) · 相位(带色) · 角色(dim) …… 时长+成本(右对齐)
- *   行2: ▶ 任务标题 · 进度条(多任务) · attempt(临界变警告色)
- *   行3+: 预警(熔断/环境漂移/换脑,警告色)
+ *   行1: 短id(accent 粗体) · 档位(dim) · 相位(带色)  goal(截断,占满剩余列) …… 时长+成本(右对齐)
+ *   行2: ▸ T2 任务标题(按实际宽度折行,续行悬挂到标题列) · 进度条(多任务) · attempt(≥2 才显示)
+ *   行3: 判定进度(CHECK 相位,缩进成任务行的子行)
+ *   行4+: 预警(熔断/无结论/换脑,警告色)
+ *
+ * **这张卡的高度是永久成本** —— 它不是一条消息,是常驻 chrome,多出来的每一行都从
+ * 聊天区永久扣掉。所以两条规矩:
+ *   ① goal 用 `clip` 截断,是全卡唯一允许截断的字段。它全程不变,只需要够认出
+ *     "这是哪个 mission";全文在 `/mission status` 的概览里按 `wrap` 折行显示。
+ *     曾经这里用过 `wrap`,结果 COLUMNS=56 + 一个正常长度的中文 goal → 12 行常驻。
+ *   ② 每一行出栈前都过 `clip(…, width)`。越界不是掉字,是炸 TUI 主循环
+ *     (CLAUDE.md「UI 层的四个坑」),而这里的 goal/标题/换脑原因都是外部输入。
+ *
+ * 相位图标是 `◆`(判定)时,不要在别处再放 `◆` —— 一屏三个同形字符三种含义。
  */
 export function renderWidgetCard(
 	theme: LineTheme,
@@ -200,22 +231,20 @@ export function renderWidgetCard(
 ): string[] {
 	const task = state.currentTask ? findTask(plan, state.currentTask) : undefined;
 	const t = state.currentTask ? state.tasks[state.currentTask] : undefined;
-	const role = ROLE_OF[state.phase];
 	const threshold = thresholdFor(state.tier);
 	const done = Object.values(state.tasks).filter((x) => x.status === "done").length;
 	const total = state.taskOrder.length;
 	const cost = costTotal(state);
 	const sep = theme.fg("dim", " · ");
 
-	// 行 1:左半 + 右对齐(时长/成本)
+	// 行 1:左半 + 右对齐(时长/成本)。角色不显示 —— ROLE_OF 是 phase 的纯函数,
+	// ● 执行 恒等于 executor,同一个事实说两遍。
+	// id 前不再放 ◆:CHECK 的相位图标就是 ◆,同一行两个 ◆ 是两个意思。
 	const left = [
-		theme.fg("accent", theme.bold(`◆ ${state.missionId}`)),
+		theme.fg("accent", theme.bold(shortId(state.missionId))),
 		theme.fg("dim", state.tier),
 		phaseBadge(theme, state.phase),
-		role ? theme.fg("dim", role) : null,
-	]
-		.filter(Boolean)
-		.join(sep);
+	].join(sep);
 
 	const rightBits: string[] = [];
 	const elapsed = plan.createdAt ? fmtDuration(plan.createdAt, now) : null;
@@ -230,21 +259,51 @@ export function renderWidgetCard(
 
 	const leftW = visibleWidth(left);
 	const rightW = visibleWidth(right);
-	const line1 =
-		rightW > 0 && leftW + rightW < width
-			? left + " ".repeat(width - leftW - rightW) + right
-			: left;
-	const lines = [clip(line1, width)];
+	const lines: string[] = [];
 
-	// 行 2:当前任务 + 进度 + attempt
-	const bits: string[] = [];
-	if (task) bits.push(`${theme.fg("accent", "▸")} ${task.id} ${clip(task.title, 28)}`);
-	if (total > 1) bits.push(`${miniBar(theme, done, total, 8)} ${theme.fg("dim", `${done}/${total}`)}`);
-	if (t && ["do", "check", "act"].includes(state.phase)) {
+	// goal 填左半与右侧账目之间的空当;预算 = 全宽 − 左半 − 一个空格 − 右侧 − 两格间隙。
+	// 装不下就整条不显示(见文件头 ①):goal 是常量字段,不值得用高度去换。
+	const goalBudget = width - leftW - 1 - rightW - (rightW > 0 ? 2 : 0);
+	const goal = plan.goal && goalBudget >= GOAL_MIN ? clip(plan.goal, goalBudget) : "";
+	const head = goal ? `${left} ${goal}` : left;
+	const headW = visibleWidth(head);
+	lines.push(rightW > 0 && headW + rightW < width ? pad(head, width - rightW) + right : clip(head, width));
+
+	// 行 2 的尾部固定位:进度条(多任务才有)+ attempt。
+	// attempt 在 1/N 时收起 —— 跑到 1 还什么都没失败,常显只会训练出选择性失明,
+	// 而真正该跳出来的临界另有警告行。
+	const tailBits: string[] = [];
+	if (total > 1) tailBits.push(`${miniBar(theme, done, total, 8)} ${theme.fg("dim", `${done}/${total}`)}`);
+	if (t && ["do", "check", "act"].includes(state.phase) && t.attempts >= 2) {
 		const near = nearThreshold(t, state.tier);
-		bits.push(theme.fg(near ? "warning" : "dim", `attempt ${t.attempts}/${threshold}`));
+		tailBits.push(theme.fg(near ? "warning" : "dim", `attempt ${t.attempts}/${threshold}`));
 	}
-	if (bits.length > 0) lines.push(clip(`  ${bits.join(sep)}`, width));
+	const tail = tailBits.join(sep);
+	const tailW = tail ? visibleWidth(tail) + visibleWidth(sep) : 0;
+
+	// 行 2:▸ T2 任务标题。标题按实际剩余宽度折行(CLAUDE.md:任务标题属于
+	// "一律折行"那一档),续行悬挂到标题列 —— 悬挂量必须等于 "  " + 前缀的实际宽度,
+	// 差一列不会报错,只会看着像另起了一段。
+	if (task) {
+		const prefix = `${theme.fg("accent", "▸")} ${task.id} `;
+		const prefixW = visibleWidth(prefix);
+		const titleBudget = Math.max(12, width - 2 - prefixW - tailW);
+		// 折两行封顶。标题该折不该截(CLAUDE.md),但这张卡的高度是永久成本:
+		// 56 列时预算只剩 18,一个正常标题能折出 4 行常驻。宽 ≥72 基本折不到第二行,
+		// 真折到第三行的窄终端里,全文在 /mission status 的任务区。
+		const titleParts = wrap(task.title, titleBudget, 2);
+		lines.push(clip(`  ${prefix}${titleParts[0]}${tail ? sep + tail : ""}`, width));
+		const hang = " ".repeat(2 + prefixW);
+		for (const part of titleParts.slice(1)) lines.push(clip(hang + part, width));
+	} else if (state.currentTask) {
+		// 计划里查不到这个任务(plan 与 state 漂移):id 照显,别把整行吞掉
+		lines.push(clip(`  ${theme.fg("accent", "▸")} ${state.currentTask}${tail ? sep + tail : ""}`, width));
+	} else if (tail) {
+		lines.push(clip(`  ${tail}`, width));
+	}
+
+	// 判定进度:缩进成任务行的子行。刻意不带图标 —— 相位徽标已经是 ◆ 判定,
+	// 这里再放一个 ◆ 就是一屏三个同形字符(见文件头)。
 	if (state.phase === "check" && checkState?.taskId === state.currentTask) {
 		const stage = STAGE_LABELS[checkState.stage];
 		const elapsed = fmtCheckDuration(now - checkState.startedAt);
@@ -252,27 +311,28 @@ export function renderWidgetCard(
 		const doneCount = checkState.completedBranches.length;
 		const completed = doneCount > 0 ? ` · 脚本 ${doneCount} 项` : "";
 		lines.push(
+			clip(`    ${theme.fg("accent", stage)} ${theme.fg("dim", `${elapsed}${completed}${current}`)}`, width),
+		);
+	}
+
+	// 预警行(警告色)。三条都必须过 clip:窄终端下 pendingHandoff 的
+	// "promote standard→complex on T12" 在 56 列就越界,而越界会炸 TUI。
+	if (t && nearThreshold(t, state.tier)) {
+		lines.push(clip(theme.fg("warning", `  ${nearBreakerWarn(t)}`), width));
+	}
+	if (t && t.inconclusiveStreak > 0) {
+		lines.push(
 			clip(
-				`  ${theme.fg("accent", "◆")} ${stage} ${theme.fg("dim", `${elapsed}${completed}${current}`)}`,
+				theme.fg(
+					"warning",
+					`  ⚠ 连续 ${t.inconclusiveStreak} 次无法判定(${inconclusiveHint(t.lastInconclusiveCause)})`,
+				),
 				width,
 			),
 		);
 	}
-
-	// 预警行(警告色)
-	if (t && nearThreshold(t, state.tier)) {
-		lines.push(theme.fg("warning", `  ${nearBreakerWarn(t)}`));
-	}
-	if (t && t.inconclusiveStreak > 0) {
-		lines.push(
-			theme.fg(
-				"warning",
-				`  ⚠ 连续 ${t.inconclusiveStreak} 次无法判定(${inconclusiveHint(t.lastInconclusiveCause)})`,
-			),
-		);
-	}
 	if (state.pendingHandoff) {
-		lines.push(theme.fg("warning", `  ⏸ 等待换脑:${clip(state.pendingHandoff, 40)} —— 执行 /mission next`));
+		lines.push(clip(theme.fg("warning", `  ⏸ 等待换脑 —— 执行 /mission next:${state.pendingHandoff}`), width));
 	}
 	return lines;
 }

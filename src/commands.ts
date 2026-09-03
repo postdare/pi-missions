@@ -164,19 +164,7 @@ export function registerCommands(pi: any, getRuntime: GetRuntime): void {
 				}
 
 				case "status": {
-					// 无 id = 当前活动 mission;带 id = 查看任意 mission(不接管会话)
-					const id = rest.trim() || rt.active?.state.missionId || null;
-					if (!id) return notifyUsage(ctx, `无活动 mission。/missions 查看历史,/mission resume <id> 恢复${rt.detachedHint() ?? ""}`);
-					const d = statusDataFor(rt, id);
-					if (!d) return notifyUsage(ctx, missionLoadError(rt, id));
-					if (ctx.hasUI) {
-						await openStatusView(ctx, () => statusDataFor(rt, id), statusViewOpts(pi, ctx, rt, id));
-					} else {
-						pi.appendEntry("missions-card", {
-							title: `${d.state.missionId} · ${d.state.tier} · ${d.state.phase}`,
-							body: statusFallbackText(d),
-						});
-					}
+					await openMissionStatus(pi, ctx, rt, rest.trim() || null);
 					return;
 				}
 
@@ -343,6 +331,36 @@ function planFallbackText(d: StatusViewData): string {
 		"",
 		`verify.sh 见 ${d.verifyScriptPath}(${(d.plan.verifyScript ?? "").split("\n").length} 行)`,
 	].join("\n");
+}
+
+/**
+ * 打开某个 mission 的状态页(不接管会话):TUI 走内联页,无 UI 退化成 entry 卡片。
+ * id 省略 = 当前活动 mission。
+ *
+ * 抽成独立函数是为了让"命令入口"和"退化路径"只有一份实现。**这里没有快捷键** ——
+ * 试过 `pi.registerShortcut`,26 个 ctrl+字母在 pi 与 pi-tui 的键位表里已全被占,
+ * 绕开占用的组合键(ctrl+shift+*)不值得为一个 `/mission status` 引入新肌肉记忆。
+ * 详见 CLAUDE.md「UI 层的四个坑」第四条(ctrl+m 把回车劫持了那次)。
+ */
+export async function openMissionStatus(pi: any, ctx: Ctx, rt: Runtime, id: string | null): Promise<void> {
+	const missionId = id || rt.active?.state.missionId || null;
+	if (!missionId) {
+		notifyUsage(ctx, `无活动 mission。/missions 查看历史,/mission resume <id> 恢复${rt.detachedHint() ?? ""}`);
+		return;
+	}
+	const d = statusDataFor(rt, missionId);
+	if (!d) {
+		notifyUsage(ctx, missionLoadError(rt, missionId));
+		return;
+	}
+	if (ctx.hasUI) {
+		await openStatusView(ctx, () => statusDataFor(rt, missionId), statusViewOpts(pi, ctx, rt, missionId));
+	} else {
+		pi.appendEntry("missions-card", {
+			title: `${d.state.missionId} · ${d.state.tier} · ${d.state.phase}`,
+			body: statusFallbackText(d),
+		});
+	}
 }
 
 function statusDataFor(rt: Runtime, missionId: string): StatusViewData | null {
