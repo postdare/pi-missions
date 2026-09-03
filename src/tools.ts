@@ -17,7 +17,24 @@ type GetRuntime = (ctx: any) => Runtime;
 const QuestionSchema = Type.Object({
 	id: Type.String({ description: "问题 id,如 Q1。用它在 settled 里指代已落定的决策" }),
 	text: Type.String({ description: "问题正文。措辞具体,别问\"能详细说说需求吗\"" }),
-	options: Type.Optional(Type.Array(Type.String(), { description: "可选项。给选项永远优于开放式提问" })),
+		options: Type.Optional(
+			Type.Array(
+				Type.Union([
+					Type.String({ description: "选项文案" }),
+					Type.Object({
+						label: Type.String({ description: "选项文案" }),
+						preview: Type.Optional(
+							Type.String({
+								description:
+									"ASCII 示意图(多行字符串,用 ┌─┐│└┘▶ 等字符画)。选中该选项时在问答页下半区展示。" +
+									"只在选项之间的差异用图才说得清时才画(如两个架构方案的对比);每行别超过 60 列。",
+							}),
+						),
+					}),
+				]),
+				{ description: "可选项。给选项永远优于开放式提问;选项可带 ASCII 示意图供选中预览" },
+			),
+		),
 	recommend: Type.String({
 		description:
 			"必填:你倾向的答案。没有推荐答案的问题会被直接拒绝 —— 你连倾向都没有,说明这个问题你自己还没想过。",

@@ -34,6 +34,7 @@ import {
 	wrap,
 } from "./chrome.ts";
 import type { LineTheme } from "./dashboard.ts";
+import { optionLabel, optionPreview, type AskOption } from "../core/define.ts";
 
 export interface AskView {
 	theme: LineTheme & { bg?(color: string, s: string): string };
@@ -73,20 +74,21 @@ function questionLines(view: AskView, qi: number, inner: number): { lines: strin
 	const selStart = lines.length;
 	const options = q.options ?? [];
 	// 没有选项的开放式问题:推荐项本身作为唯一可选行
-	const rows: Array<{ label: string; desc?: string; isCustom?: boolean }> = options.map((o) => ({
-		label: o,
-		desc: o === q.recommend ? "推荐" : undefined,
+	const rows: Array<{ label: string; preview?: string; isRecommended?: boolean; isCustom?: boolean }> = options.map((o) => ({
+		label: optionLabel(o),
+		preview: optionPreview(o),
+		isRecommended: optionLabel(o) === q.recommend,
 	}));
 	rows.push({ label: CUSTOM_LABEL, isCustom: true });
 
 	for (const [i, row] of rows.entries()) {
 		const selected = !view.editing && view.sel[qi] === i;
 		const cursor = selected ? "▸" : " ";
-		const mark = row.isCustom ? (view.draft[qi]?.trim() ? "·" : " ") : row.desc === "推荐" ? "★" : " ";
+		const mark = row.isCustom ? (view.draft[qi]?.trim() ? "·" : "▢") : row.isRecommended ? "★" : "▢";
 		const text =
 			`${cursor} ${mark} ${row.label}` +
 			(row.isCustom && view.draft[qi]?.trim() ? `:${view.draft[qi]}` : "") +
-			(row.desc && !row.isCustom ? `(${row.desc})` : "");
+			(row.isRecommended && !row.isCustom ? "(推荐)" : "");
 		const painted = row.isCustom ? t.fg("dim", text) : text;
 		lines.push(painted);
 	}
@@ -124,7 +126,24 @@ export function renderAskReview(view: AskView): AskRender {
 
 	const bodyStart = lines.length;
 	const q = questionLines(view, view.qi, inner);
-	const body = [...q.lines, "", ruleLabel(t as never, inner, `已确认 ${view.qi}/${view.questions.length}`)];
+
+	// 选中选项的 ASCII 示意图(可选):盒内下半区,ruleLabel 隔开。
+	// 字符画逐行 clip 不折行 —— 列对齐就是它的语义,折了就碎了。
+	// 没图(选项未带 preview / 自定义行 / 开放式问题)不画这个区,下半区保持空行。
+	const selRow = view.sel[view.qi];
+	const options = view.questions[view.qi].options ?? [];
+	const preview = selRow >= 0 && selRow < options.length ? optionPreview(options[selRow]) : undefined;
+	const previewLabel = preview ? `选中 preview · ${optionLabel(options[selRow])}` : "已确认";
+	const body = [
+		...q.lines,
+		"",
+		...(preview
+			? [ruleLabel(t as never, inner, previewLabel),
+				...preview.split("\n").map((l) => t.fg("dim", clip(l, inner)))]
+			: []),
+		"",
+		ruleLabel(t as never, inner, `已确认 ${view.qi}/${view.questions.length}`),
+	];
 	const height = Math.max(6, contentBudget(view.rows) - (lines.length - 1));
 	const anchorStart = bodyStart + q.selStart;
 	const anchorEnd = bodyStart + q.selEnd;
@@ -173,8 +192,12 @@ export async function openAskReview(ctx: any, questions: AskQuestion[]): Promise
 			done: (r: AskReviewResult) => void,
 		) => {
 			let qi = 0;
-			const sel: number[] = questions.map((q) => (q.options?.length ? Math.max(0, q.options.indexOf(q.recommend)) : 0));
-			// 推荐项不在 options 里时退回第一项 —— 默认不能落在自定义答案上,人没敲字就提交会落成空答案
+			const sel: number[] = questions.map((q) => {
+				if (!q.options?.length) return 0;
+				const i = q.options.findIndex((o) => optionLabel(o) === q.recommend);
+				// 推荐项不在 options 里时退回第一项 —— 默认不能落在自定义答案上,人没敲字就提交会落成空答案
+				return Math.max(0, i);
+			});
 			const draft: string[] = questions.map(() => "");
 			let editing = false;
 			let scroll = 0;
@@ -205,7 +228,7 @@ export async function openAskReview(ctx: any, questions: AskQuestion[]): Promise
 					if (sel[qi] === options.length) {
 						answers[qi] = draft[qi]?.trim() ? { kind: "custom", value: draft[qi] } : { kind: "none" };
 					} else {
-						answers[qi] = { kind: "option", value: options[sel[qi]] ?? q.recommend };
+						answers[qi] = { kind: "option", value: options[sel[qi]] !== undefined ? optionLabel(options[sel[qi]]) : q.recommend };
 					}
 				}
 				if (qi < questions.length - 1) {

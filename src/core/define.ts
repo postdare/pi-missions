@@ -40,11 +40,24 @@ export function roundCapFor(tier: Tier): number {
 	return ROUND_CAP[tier];
 }
 
+/** 一个选项:纯字符串(旧形状,无预览)或带 ASCII 示意图的对象 */
+export type AskOption = string | { label: string; preview?: string };
+
+/** 取选项的展示文案 —— 字符串即文案本身,对象取 label */
+export function optionLabel(o: AskOption): string {
+	return typeof o === "string" ? o : o.label;
+}
+
+/** 取选项的 ASCII 示意图(若有) */
+export function optionPreview(o: AskOption): string | undefined {
+	return typeof o === "string" ? undefined : o.preview?.trim() || undefined;
+}
+
 export interface AskQuestion {
 	id: string;
 	text: string;
-	/** 可选项。给选项永远优于开放式提问 */
-	options?: string[];
+	/** 可选项。给选项永远优于开放式提问;选项可带 ASCII 示意图,选中时在盒内下半区展示 */
+	options?: AskOption[];
 	/** 强制:你倾向的答案。人可以直接说"用你的",这是多轮付得起的前提 */
 	recommend: string;
 	/** 这个答案会改变什么(哪条完成条件、哪个方案分支) */
@@ -92,7 +105,17 @@ export function normalizeAskAnswers(questions: AskQuestion[], answers: (AskAnswe
 	});
 }
 
-/** 去掉空白项;text/recommend/impact 一并 trim */
+/** 去掉空白项;text/recommend/impact 一并 trim;选项的 label/preview 逐一 trim */
+function normalizeOption(o: AskOption): AskOption | undefined {
+	if (typeof o === "string") {
+		const s = o.trim();
+		return s || undefined;
+	}
+	const label = o.label?.trim();
+	if (!label) return undefined;
+	return { label, preview: o.preview?.trim() || undefined };
+}
+
 function normalize(questions: AskQuestion[]): AskQuestion[] {
 	return questions
 		.map((q) => ({
@@ -101,7 +124,7 @@ function normalize(questions: AskQuestion[]): AskQuestion[] {
 			text: (q.text ?? "").trim(),
 			recommend: (q.recommend ?? "").trim(),
 			impact: (q.impact ?? "").trim(),
-			options: q.options?.map((o) => o.trim()).filter(Boolean),
+			options: q.options?.map(normalizeOption).filter((o): o is AskOption => Boolean(o)),
 		}))
 		.filter((q) => q.text);
 }
