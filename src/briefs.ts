@@ -199,6 +199,50 @@ export function renderDoBrief(plan: MissionPlan, state: MissionState, spikeRepor
 	return lines.join("\n");
 }
 
+/**
+ * 相位停滞时的推动语(core/stall.ts 判定要不要发)。
+ *
+ * 克制是这段文案的第一要求:State Card 每轮都注入,额度、打回意见、已查明结论
+ * 全在里面 —— 这里再复述一遍是纯开销。只说两件卡片里没有的事:
+ * **你还在哪个相位**,以及**相位只由哪一次工具调用推进**。
+ *
+ * 最后半句("相位只由它推进")是这段话的全部作用:模型停摆时写的都是
+ * "我这就去设计验收标准"这类总结,它以为自己在推进。得告诉它散文推进不了任何东西。
+ */
+export function renderStallNudge(plan: MissionPlan, state: MissionState, spikeReportRel?: string | null): string {
+	// DO 已经有一份成熟的简报(带 spike / 无结论 / 上轮失败三种分支),直接复用
+	if (state.phase === "do") return renderDoBrief(plan, state, spikeReportRel);
+	if (state.phase === "plan") {
+		const tool = state.tier === "quick" ? "mission_criterion" : "mission_write_plan";
+		const what =
+			state.tier === "quick"
+				? "定一条能跑出退出码的判据"
+				: "写出验收标准与任务分解,起草 verify.sh";
+		return `[pi-missions] 你还在 PLAN 相位,上一轮没有推进。${what},然后调用 ${tool} —— 相位只由它推进,写总结推进不了。`;
+	}
+	return (
+		"[pi-missions] 你还在 DEFINE 相位,上一轮没有推进。" +
+		"信息够了就调用 mission_define 交出定义;不够就用 mission_ask 问一轮 —— " +
+		"相位只由 mission_define 推进,写总结推进不了。"
+	);
+}
+
+/** 推过一次仍然不动时报给人的那句话。终结动作要点名 —— 人接手时得知道卡在哪一步 */
+export function stallWarning(state: MissionState): string {
+	const tool =
+		state.phase === "do"
+			? "mission_submit"
+			: state.phase === "plan"
+				? state.tier === "quick"
+					? "mission_criterion"
+					: "mission_write_plan"
+				: "mission_define";
+	return (
+		`相位停在 ${state.phase}:推过一次仍然没有推进(终结动作是 ${tool})。` +
+		"模型可能判断自己卡住了 —— 去会话里问一句,或 /mission status 看现场。"
+	);
+}
+
 export function renderActBrief(plan: MissionPlan, state: MissionState): string {
 	const t = state.currentTask ? state.tasks[state.currentTask] : undefined;
 	// quick 的 ACT 工具集里没有 mission_escalate(toolsForPhase("act", "quick")),

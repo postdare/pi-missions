@@ -17,6 +17,7 @@ import { evaluatePromotion } from "./core/tier.ts";
 import { evaluateBaseline, shouldProbeBaseline, type BaselineProbe } from "./core/baseline.ts";
 import { evaluateAsk, needsScopeConfirm, normalizeAskAnswers, roundCapFor, type AskQuestion } from "./core/define.ts";
 import { evaluateScout, type ScoutFanoutProgress, type ScoutFinding, type ScoutQuestion } from "./core/scout.ts";
+import { nextStall, type StallState } from "./core/stall.ts";
 import { evaluateCoverage } from "./core/coverage.ts";
 import { openPlanReview } from "./ui/plan-review.ts";
 import { openDefineReview } from "./ui/define-review.ts";
@@ -41,6 +42,8 @@ import {
 	renderStateCard,
 	renderDoBrief,
 	renderActBrief,
+	renderStallNudge,
+	stallWarning,
 	renderHandoffBrief,
 	renderScoutEnvelope,
 } from "./briefs.ts";
@@ -100,6 +103,12 @@ export interface ActiveMission {
 	generation: number;
 	/** 待验证的换脑握手；必须与 state.pendingHandoff 同进同出 */
 	handoff: HandoffRecord | null;
+	/**
+	 * 相位停滞计数(core/stall.ts)。**只在内存里,不落盘** —— 与 liveScout 同一个理由:
+	 * 它描述的是"这个会话在这一轮里推过几次",进程一死这个语境本来就没了,
+	 * 新会话该重新给一次推动机会,而不是继承上一个会话的沉默。
+	 */
+	stall: StallState | null;
 }
 
 /** 换脑后给新会话的第一句推动语。按落点相位分流 —— 换脑不只发生在 DO */
@@ -198,6 +207,7 @@ export class Runtime {
 			revision: snapshot.revision,
 			generation: snapshot.artifacts.generation,
 			handoff: snapshot.handoff,
+			stall: null,
 		};
 		this.liveCheckState = null;
 		removeCheckState(statePaths(l, id).checkJson);
@@ -251,6 +261,7 @@ export class Runtime {
 			quickCriterion: criterion ?? undefined,
 			revision: 0,
 			generation: 0,
+			stall: null,
 			handoff: null,
 		};
 		this.liveCheckState = null;
@@ -704,6 +715,31 @@ export class Runtime {
 					await this.applyEvent({ type: "HANDOFF_REQUEST", at: Date.now(), reason: `context-watermark ${usage.percent}%` }, ctx);
 				}
 			}
+			// 水位守卫可能刚挂起换脑,重读一遍状态再判停滞 —— 那时该让 HANDOFF 去推
+			this.driveStalledPhase(ctx);
+		}
+	}
+
+	/**
+	 * 这三个相位的终结动作都是一次工具调用,模型却可以写段总结就结束回合 ——
+	 * 那样相位不动、磁盘不动,循环静默停摆(真机撞过,见 core/stall.ts 文件头)。
+	 * 推一次把它推回终结动作上;推过还是不动就交给人,不再推。判据在 core,这里只执行。
+	 */
+	private driveStalledPhase(ctx: any): void {
+		const a = this.active;
+		if (!a) return;
+		const r = nextStall(a.stall, {
+			phase: a.state.phase,
+			revision: a.revision,
+			pendingHandoff: !!a.state.pendingHandoff,
+		});
+		a.stall = r.state;
+		if (r.action === "nudge") {
+			this.pi.sendUserMessage(renderStallNudge(a.plan, a.state, this.currentSpikeReport()?.rel), {
+				deliverAs: "followUp",
+			});
+		} else if (r.action === "warn") {
+			this.warn(ctx, stallWarning(a.state));
 		}
 	}
 
@@ -1490,6 +1526,8 @@ export class Runtime {
 			revision: snapshot.revision,
 			generation: snapshot.artifacts.generation,
 			handoff: snapshot.handoff,
+			// 重附着 = 新会话:停滞计数从头开始,不继承上一个会话的沉默
+			stall: null,
 		};
 	}
 

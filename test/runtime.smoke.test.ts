@@ -2083,3 +2083,78 @@ test("scout:只在 PLAN 相位受理;DO 相位既拿不到工具,直接调也会
 
 	fs.rmSync(tmp, { recursive: true, force: true });
 });
+
+// ── 相位停滞的真实驱动(core/stall.ts 的接线)────────────────────────────────
+//
+// 真机事故:mission_define 返回「进入 PLAN 相位,现在设计验收标准…」,模型 12 秒后
+// 写了一段纯文本总结就结束回合,pi 停在提示符,5 分钟零工具调用,直到人工敲「继续」。
+// 相位没变、磁盘没动、屏幕上什么都看不出来。这两条锁住修法的两端:推得动,且推不疯。
+
+test("相位停滞:模型 settle 而相位没推进 → 推一次简报把它推回终结动作", async () => {
+	const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "pi-missions-stall-"));
+	const pi = mockPi();
+	const ctx = mockCtx(tmp);
+	const rt = new Runtime(pi, tmp);
+
+	await rt.startNew(ctx, "给待办加分页", "standard");
+	assert.equal(rt.active!.state.phase, "define");
+	const before = pi.calls.followUps.length;
+
+	await rt.onAgentSettled(ctx);
+
+	const pushed = pi.calls.followUps.slice(before);
+	assert.equal(pushed.length, 1, `该推且只推一条,实际:\n${pushed.join("\n---\n")}`);
+	assert.match(pushed[0], /DEFINE 相位/);
+	assert.match(pushed[0], /mission_define/, "得点名终结动作,否则模型不知道调什么");
+	assert.match(pushed[0], /写总结推进不了/, "停摆时模型以为自己在推进,这句是全部作用");
+});
+
+test("相位停滞:推过一次仍然不动 → 交给人,不再推(一直推会烧光预算)", async () => {
+	const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "pi-missions-stall2-"));
+	const pi = mockPi();
+	const ctx = mockCtx(tmp);
+	const rt = new Runtime(pi, tmp);
+
+	await rt.startNew(ctx, "给待办加分页", "standard");
+	const before = pi.calls.followUps.length;
+
+	await rt.onAgentSettled(ctx); // 第 1 次:推
+	const afterFirst = pi.calls.followUps.length;
+	assert.equal(afterFirst - before, 1);
+
+	await rt.onAgentSettled(ctx); // 第 2 次:不推,报给人
+	assert.equal(pi.calls.followUps.length, afterFirst, "第二次绝不能再推");
+	const warned = ctx.notifications.filter((m) => m.includes("相位停在"));
+	assert.equal(warned.length, 1, `该报一次给人,实际通知:\n${ctx.notifications.join("\n")}`);
+	assert.match(warned[0], /mission_define/, "人接手时得知道卡在哪一步");
+
+	await rt.onAgentSettled(ctx); // 第 3 次:彻底沉默
+	assert.equal(pi.calls.followUps.length, afterFirst, "报过之后不能再推");
+	assert.equal(
+		ctx.notifications.filter((m) => m.includes("相位停在")).length,
+		1,
+		"报过一次的事再报是刷屏",
+	);
+});
+
+test("相位停滞:相位推进之后重新给一次推动机会", async () => {
+	const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "pi-missions-stall3-"));
+	const pi = mockPi();
+	const ctx = mockCtx(tmp);
+	const rt = new Runtime(pi, tmp);
+
+	await rt.startNew(ctx, "给待办加分页", "standard");
+	await rt.onAgentSettled(ctx);
+	await rt.onAgentSettled(ctx); // 已经推过 + 报过,DEFINE 上彻底沉默
+
+	// 相位推进到 PLAN
+	await rt.applyEvent({ type: "DEFINE_DONE", at: Date.now() }, ctx);
+	assert.equal(rt.active!.state.phase, "plan", "前提:事件把相位推到了 PLAN");
+
+	const before = pi.calls.followUps.length;
+	await rt.onAgentSettled(ctx);
+	const pushed = pi.calls.followUps.slice(before);
+	assert.equal(pushed.length, 1, "换了相位就是有进展,该重新给一次机会");
+	assert.match(pushed[0], /PLAN 相位/);
+	assert.match(pushed[0], /mission_write_plan/, "standard 的终结动作不是 mission_criterion");
+});
