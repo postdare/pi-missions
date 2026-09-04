@@ -420,6 +420,14 @@ FAIL 时援引的那一句。现在由 `core/replan.ts` 的 `evaluateAcImmutabil
 和 `evaluateCoverage()` 在同一个 `errors` 数组里。**这两件事是绑在一起的**:
 跳过基线的前提就是 AC 没动过,少了守卫,L2 上改完的 AC 会永远不过红绿校验。
 
+**闸门的判别式是"因为什么回到 PLAN"(`state.replanCause`),不是"升级层级是几"。**
+第一版按 `escalation.level` 判,一天后就被真机推翻(E6,09-04):探针返回时层级仍是 1
+(spike 不进熔断、不进 ACT),于是掉进了为 L2 准备的那一档 —— 一个从头到尾没升过级的
+mission,量完基线回来重写阈值,AC2/AC3/AC4 三条改动全被退回,理由还指着 L3。
+而"带着实测结论重写计划"正是探针的设计终点(见 4.7.1)。`replanCause` 由
+`escalateTransition()`(L2 记 `"escalation"`)与 `spikeTransition()`(记 `"spike"`)写入,
+在 `PLAN_FROZEN` 清空 —— 因此计划评审打回后重交仍然锁着 AC(那期间没有冻结发生)。
+
 冻结后 AC 只读,由三道锁保护:
 
 1. **工具集** —— DO 相位没有 `mission_write_plan`
@@ -497,6 +505,10 @@ quick 与 spike 的身份分别固定为 `quick`、`spike`,调用者不能另传
 **额度**:每个 mission 最多一个 spike(`validateSpikePlan()`)。计数记在
 `state.spikesRun` 而不是扫 `tasks` —— 重写计划时 `PLAN_FROZEN` 只保留新 taskOrder 里的
 任务,跑过的 spike 会从 `tasks` 里消失,靠扫描会把额度还回来。
+
+重写包含 **AC 本身**:探针存在的理由就是不必把不确定性用一条含糊的 AC 带进 DO
+(阈值该是实测基线的函数,不是拍脑袋的数)。所以 `spikeTransition()` 把
+`state.replanCause` 记成 `"spike"`,AC 不可变闸门(4.6.1)据此放行。
 
 **为什么强制回 PLAN 而不是直接接着做**:spike 后面的任务是基于未知写的,本来就该重写;
 更重要的是,允许探针的产出直接进实现,等于给了一条"在没有 AC 的状态下改代码"的通路,

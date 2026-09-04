@@ -1315,9 +1315,11 @@ export class Runtime {
 		// AC 不可变:L2 的定义就是"改方案、AC 不变",而在此之前没有任何代码守这条 ——
 		// 被判定方升 L2 之后可以重写判它失败的那条 AC(真机实证见 core/replan.ts 文件头)。
 		// 比对基准是 a.plan(此刻还是上一次冻结的那份),不是刚合并出来的 plan。
+		// 传的是 replanCause 不是 escalation.level:探针返回时层级仍是 1,按层级判会把
+		// "带着实测结论重写计划"这个设计终点也拦掉(E6 真机撞过)。
 		errors.push(
 			...evaluateAcImmutability({
-				escalationLevel: a.state.escalation.level,
+				cause: a.state.replanCause,
 				frozen: a.plan.acceptanceCriteria,
 				submitted: plan.acceptanceCriteria,
 			}),

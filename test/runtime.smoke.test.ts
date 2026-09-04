@@ -1490,6 +1490,32 @@ test("spike:出结论 → 回 PLAN 重新规划,并强制换脑", async () => {
 	assert.match((again as any).error, /已经跑过一次 spike/);
 });
 
+test("spike:回 PLAN 之后可以改 AC —— 量回来的数字要能进判定标准(E6 回归)", async () => {
+	const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "pi-missions-smoke-"));
+	const { ctx, rt } = await spikeMission(tmp);
+	fs.writeFileSync(rt.currentSpikeReport()!.abs, SPIKE_REPORT, "utf8");
+
+	await rt.applyEvent({ type: "SUBMIT", at: Date.now() }, ctx);
+	await rt.runCheck(ctx);
+	await rt.applyEvent({ type: "HANDOFF_DONE", at: Date.now() }, ctx);
+
+	// 探针返回时阶梯一格没走 —— 第一版闸门按 escalation.level 判,就是栽在这里
+	assert.equal(rt.active!.state.escalation.level, 1);
+	assert.equal(rt.active!.state.replanCause, "spike");
+
+	const rewritten = await rt.writePlan(ctx, {
+		goal: "迁移到新 ORM",
+		// 正文、verify 分支全换掉:探针量完才知道该断言什么
+		acceptanceCriteria: [
+			{ id: "AC1", text: "hello.txt 存在,且内容为实测基线值", verify: "hello-exists", covers: ["DW1"] },
+		],
+		milestones: [{ id: "M1", title: "按结论实施", tasks: [{ id: "T2", title: "改造", verify: ["hello-exists"] }] }],
+		verifyScript: VERIFY_SH,
+	});
+	assert.ok("ok" in rewritten, JSON.stringify(rewritten));
+	assert.equal(rt.active!.state.replanCause, null, "冻结之后原因就消费掉了");
+});
+
 test("spike:没写结论就提交 → 判 fail,但同样回 PLAN 不重试", async () => {
 	const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "pi-missions-smoke-"));
 	const { ctx, rt } = await spikeMission(tmp);

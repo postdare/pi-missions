@@ -113,7 +113,7 @@ export class MissionRepository {
 			if (!fs.existsSync(sp.snapshotJson)) {
 				return { ok: false, code: "missing", error: `找不到 v2 mission "${missionId}"` };
 			}
-			const value: unknown = JSON.parse(fs.readFileSync(sp.snapshotJson, "utf8"));
+			const value: unknown = migrate(JSON.parse(fs.readFileSync(sp.snapshotJson, "utf8")));
 			if (!isSnapshot(value) || value.missionId !== missionId) {
 				return { ok: false, code: "corrupt", error: `mission "${missionId}" 的 SNAPSHOT.json 格式无效` };
 			}
@@ -416,6 +416,30 @@ function isPlan(value: unknown): value is MissionPlan {
  * 漏掉一条,坏快照就会被放进 core,然后在某个纯函数里以 `undefined is not
  * iterable` 的形态炸掉,离出错的地方隔着十几帧。加字段时同步加校验。
  */
+/**
+ * 就地补齐 v2 之后新增的 state 字段。
+ *
+ * `isState` 是严格的:少一个字段就判 corrupt(那是 I1 的防线 —— 内存不可信,
+ * 盘上的东西必须自证完整)。但严格校验遇上"给 MissionState 加字段"就会把
+ * **盘上所有既有 mission 一次性判死**,而它们只是写在这个字段存在之前。
+ *
+ * 所以新增字段走这里补缺省,不走放宽校验。补的值必须是"这个字段出现之前
+ * 系统实际的行为",而不是最方便的值:
+ *
+ * - `replanCause` —— 缺省 null(= 不锁 AC)。这个字段出现之前没有任何 AC 闸门,
+ *   null 就是当时的真实行为。代价是一份正卡在 L2 重规划中途的旧快照,升级后
+ *   那一次 AC 改动拦不住;窗口只有"升级瞬间恰好停在 L2 重规划"这一种,
+ *   而计划评审仍然会看到它。相比之下把所有 mission 判死要糟得多。
+ */
+function migrate(value: unknown): unknown {
+	if (!value || typeof value !== "object") return value;
+	const state = (value as { state?: Record<string, unknown> }).state;
+	if (state && typeof state === "object" && !("replanCause" in state)) {
+		state.replanCause = null;
+	}
+	return value;
+}
+
 function isState(value: unknown): value is MissionState {
 	if (!value || typeof value !== "object") return false;
 	const v = value as Partial<MissionState>;
@@ -440,6 +464,7 @@ function isState(value: unknown): value is MissionState {
 		!!v.planReview &&
 		Array.isArray(v.planReview.notes) &&
 		typeof v.spikesRun === "number" &&
+		(v.replanCause === null || v.replanCause === "escalation" || v.replanCause === "spike") &&
 		typeof v.scoutRounds === "number" &&
 		Array.isArray(v.scoutAsked) &&
 		Array.isArray(v.scoutFindings) &&

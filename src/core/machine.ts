@@ -262,6 +262,9 @@ export function transition(state: MissionState, event: MissionEvent): Transition
 					currentTask: first,
 					taskOrder: order,
 					tasks,
+					// 计划冻结了,"为什么回到 PLAN"就消费掉了。
+					// 在此之前(评审打回后重交)原因仍然有效,AC 闸门照旧生效。
+					replanCause: null,
 					baseCommit: event.baseCommit ?? state.baseCommit,
 					sessionMap,
 				},
@@ -676,6 +679,9 @@ function spikeTransition(state: MissionState, at: number, taskId: string, verdic
 			currentTask: null,
 			tasks,
 			spikesRun: state.spikesRun + 1,
+			// 探针返回:AC 允许改。这正是探针存在的理由 —— 不必把不确定性
+			// 用一条含糊的 AC 带进 DO,量回来的数字要能进判定标准。
+			replanCause: "spike" as const,
 			pendingHandoff: reason,
 		},
 		[
@@ -800,7 +806,15 @@ function escalateTransition(
 	// L2:重写方案,AC 不变。立刻换脑 —— 在被污染的上下文里重新规划毫无意义(I5)。
 	const tasks = setTask(state.tasks, taskId, resetAfterEscalation);
 	return ok(
-		{ ...state, phase: "plan" as const, tasks, escalation, pendingHandoff: `escalate L2 on ${taskId}` },
+		{
+			...state,
+			phase: "plan" as const,
+			tasks,
+			escalation,
+			// L2 的定义:改方案、AC 不变。闸门在 core/replan.ts,靠的就是这个标记。
+			replanCause: "escalation" as const,
+			pendingHandoff: `escalate L2 on ${taskId}`,
+		},
 		[log(line), { type: "HANDOFF", reason: `escalate L2 on ${taskId}` }, ...enter("plan")],
 		at,
 	);
@@ -959,6 +973,7 @@ export function initialState(params: {
 		defineAnswers: [],
 		planReview: { rejections: 0, notes: [] },
 		spikesRun: 0,
+		replanCause: null,
 		scoutRounds: 0,
 		scoutAsked: [],
 		scoutFindings: [],

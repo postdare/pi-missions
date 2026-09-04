@@ -77,7 +77,12 @@ test("v2 repository:state 少任何一个必填字段都要判 corrupt", () => {
 	const file = path.join(tmp, "missions", "state", missionId, "SNAPSHOT.json");
 	const pristine = JSON.parse(fs.readFileSync(file, "utf8"));
 
+	// migrate() 会给 v2 之后新增的字段补缺省 —— 那是故意的,否则加一个字段就把
+	// 盘上所有既有 mission 判死(理由见 repository.ts 的 migrate)。这些字段的
+	// 缺省值本身在别处有测试,这里只管"没被补过的字段一个都不能漏检"。
+	const MIGRATED = new Set(["replanCause"]);
 	for (const key of Object.keys(pristine.state)) {
+		if (MIGRATED.has(key)) continue;
 		const snapshot = JSON.parse(JSON.stringify(pristine));
 		delete snapshot.state[key];
 		fs.writeFileSync(file, JSON.stringify(snapshot));
@@ -89,6 +94,20 @@ test("v2 repository:state 少任何一个必填字段都要判 corrupt", () => {
 			assert.match(loaded.error, /格式无效|不一致/, `state.${key}`);
 		}
 	}
+});
+
+test("v2 repository:字段出现之前写的快照照样载入,replanCause 补成 null", () => {
+	// 加一个 state 字段不能把盘上所有既有 mission 判死。
+	const { tmp, repo, missionId, plan, state } = fixture();
+	repo.create(plan, state);
+	const file = path.join(tmp, "missions", "state", missionId, "SNAPSHOT.json");
+	const old = JSON.parse(fs.readFileSync(file, "utf8"));
+	delete old.state.replanCause;
+	fs.writeFileSync(file, JSON.stringify(old));
+
+	const loaded = repo.load(missionId);
+	assert.equal(loaded.ok, true, "旧快照必须还能载入");
+	if (loaded.ok) assert.equal(loaded.snapshot.state.replanCause, null, "补的是'字段出现之前的实际行为'");
 });
 
 test("v2 repository:snapshot plan 必须与 generation hash 一致", () => {

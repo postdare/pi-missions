@@ -124,6 +124,12 @@ export interface Verdict {
 
 // ─────────────────────────────── 任务与 Mission ───────────────────────────────
 
+/**
+ * 回到 PLAN 的原因。用 union 字面量,不用 enum —— 没有构建步骤,
+ * enum 需要代码生成,加载时才抛(CLAUDE.md「没有构建步骤」那条)。
+ */
+export type ReplanCause = "escalation" | "spike" | null;
+
 export type TaskStatus = "pending" | "running" | "done" | "blocked";
 
 export interface TaskState {
@@ -221,6 +227,18 @@ export interface MissionState {
 	 * 跑过的 spike 会从 tasks 里消失 —— 额度必须自己记账。
 	 */
 	spikesRun: number;
+	/**
+	 * 这一趟**是怎么回到 PLAN 的**;null = 没有待重写的计划(首次规划,或上一份已冻结)。
+	 *
+	 * AC 不可变闸门(core/replan.ts)判的就是它。判别式必须是"因为什么回来的",
+	 * 不能是"升级层级是几" —— 真机实证(E6,09-04):探针返回时 escalation.level
+	 * 仍是 1(spike 不进熔断、不进 ACT),按层级判会把探针也当成 L2 拦下,
+	 * 而探针的设计终点恰恰是"带着实测结论重写计划"。
+	 *
+	 * 在 PLAN_FROZEN 清空 —— 计划冻结了,这个"为什么回来"就消费掉了。
+	 * 因此计划评审打回后重交仍然看得到原因:那期间没有冻结发生。
+	 */
+	replanCause: ReplanCause;
 	/**
 	 * 已扇出的侦查轮数(core/scout.ts 的额度)。
 	 * 与 defineAsks 同性质:额度**先消耗后执行**,中途失败也算用掉 ——

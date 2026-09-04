@@ -653,6 +653,28 @@ test("spikesRun 是独立记账:重写计划丢掉旧任务也不会把额度还
 	assert.equal(replanned.spikesRun, 1, "额度还在");
 });
 
+test("replanCause:探针返回记 spike,L2 记 escalation,冻结后清空", () => {
+	// 这三条是 AC 不可变闸门(core/replan.ts)的全部输入。判别式是"因为什么回到 PLAN",
+	// 不是"层级是几" —— 探针返回时 escalation.level 仍然是 1(不进熔断、不进 ACT),
+	// 按层级判会把探针当成 L2 拦掉(E6 真机撞过)。
+	const afterSpike = transition(toSpikeCheck(), { type: "VERDICT", at: AT, verdict: pass }).state;
+	assert.equal(afterSpike.replanCause, "spike");
+	assert.equal(afterSpike.escalation.level, 1, "探针不动阶梯 —— 这正是不能按层级判的原因");
+
+	const frozen = transition({ ...afterSpike, pendingHandoff: null }, { type: "PLAN_FROZEN", at: AT }).state;
+	assert.equal(frozen.replanCause, null, "计划冻结了,'为什么回来'就消费掉了");
+
+	// 阶梯得先走过一格,手动 L2 才放行(evaluateManualEscalation)
+	let d = transition(toDo("standard"), { type: "SUBMIT", at: AT }).state;
+	d = transition(d, { type: "VERDICT", at: AT, verdict: failed("sig-r") }).state;
+	d = transition(d, { type: "ADJUST_DONE", at: AT }).state;
+	d = transition(d, { type: "SUBMIT", at: AT }).state;
+	d = transition(d, { type: "VERDICT", at: AT, verdict: failed("sig-r") }).state;
+	const afterL2 = transition(d, { type: "ESCALATE", at: AT, to: 2, reason: "换个方案" });
+	assert.ok(!afterL2.error, afterL2.error ?? "");
+	assert.equal(afterL2.state.replanCause, "escalation");
+});
+
 test("kind 随每次冻结重算:同一 id 可以从 spike 变回 impl", () => {
 	const asSpike = transition(toPlan(), { type: "PLAN_FROZEN", at: AT, spikes: ["T1"] }).state;
 	assert.equal(asSpike.tasks.T1.kind, "spike");

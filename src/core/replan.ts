@@ -24,6 +24,8 @@
  * 而让模型评价模型自己改的判据,就又回到自评了(同 core/criterion.ts 的立场)。
  */
 
+import type { ReplanCause } from "./types.ts";
+
 /** 只取比对需要的字段,不依赖 store/mission 的完整类型 */
 export interface AcSnapshot {
 	id: string;
@@ -34,8 +36,11 @@ export interface AcSnapshot {
 }
 
 export interface AcImmutabilityInput {
-	/** 当前升级层级。L3 允许改 AC,L2 不允许 */
-	escalationLevel: number;
+	/**
+	 * 这一趟是**怎么回到 PLAN 的**(`MissionState.replanCause`)。
+	 * 只有 `"escalation"`(L2)才锁 AC。
+	 */
+	cause: ReplanCause;
 	/** 上一次冻结的那份 AC。空数组 = 还没冻结过,无基准可比 */
 	frozen: AcSnapshot[];
 	/** 本次提交的 AC */
@@ -56,19 +61,28 @@ function coversOf(ac: AcSnapshot): string {
 /**
  * 纯函数:这次提交允不允许动 AC。返回错误信息数组,空数组 = 通过。
  *
- * 三条规则都机械可测:
- *   1. 没有冻结基准 —— 首次冻结,以及计划评审被打回后重交。无从比对,放行。
- *   2. L3 —— 它的定义就是可以改 AC(而且绕道 DEFINE,doneWhen 本身可能已经变了)。
- *   3. 其余(L2 且有基准)—— 逐条比对 id/text/verify/covers/baseline。
+ * 两条放行规则,都机械可测:
+ *   1. 没有冻结基准 —— 首次规划。无从比对。
+ *   2. `cause !== "escalation"` —— 不是 L2 回来的。包括:
+ *      探针返回(带着实测结论重写计划,那是它的设计终点)、
+ *      L3(绕道 DEFINE,`doneWhen` 本身可能已经变了)、
+ *      以及首次规划被评审打回后重交(`cause` 还是 null)。
+ *   其余(L2 且有基准)—— 逐条比对 id/text/verify/covers/baseline。
  *
  * **只比 id 等于没比**:E7 那次 id 一个没变,变的是 text。
+ *
+ * **判别式一定要问"因为什么回来的",不能问"层级是几"** —— 这是真机换来的:
+ * 第一版写成 `escalationLevel >= 3 放行、其余比对`,而探针返回时层级仍是 1
+ * (spike 不进熔断、不进 ACT),于是掉进为 L2 准备的那一档。E6(09-04)当场撞上:
+ * 探针量完回 PLAN,AC2/AC3/AC4 三条改动全被退回,理由还指着 L3 ——
+ * 而这个 mission 从头到尾没升过一次级。
  */
 export function evaluateAcImmutability(input: AcImmutabilityInput): string[] {
 	const frozen = input.frozen ?? [];
 	const submitted = input.submitted ?? [];
 
 	if (frozen.length === 0) return [];
-	if (input.escalationLevel >= 3) return [];
+	if (input.cause !== "escalation") return [];
 
 	const errors: string[] = [];
 	const byId = new Map(frozen.map((ac) => [ac.id, ac]));
