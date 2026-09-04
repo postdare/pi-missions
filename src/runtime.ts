@@ -1631,6 +1631,22 @@ export class Runtime {
 	}
 
 	refreshWidget(ctx: any): void {
+		// 整段吞异常。刷 widget 从来不是关键路径,而它的调用点里有一个是
+		// check-runner 的 finally —— 那里 ctx 可能刚被换脑作废(pi 会抛
+		// "extension ctx is stale after session replacement")。真机实证(E6,09-04):
+		// 探针判 FAIL → HANDOFF → newSession,finally 照跑,异常一路冒到
+		// startCheck 的兜底 catch,在 LOG 里只留一行 CHECK BACKGROUND ERROR。
+		//
+		// 吞不掉主题色/宽度那类崩溃 —— 那些发生在 setWidget 注册的渲染回调里,
+		// 由 TUI 主循环调用,不经过这里(CLAUDE.md「UI 层的四个坑」前两条依然成立)。
+		try {
+			this.refreshWidgetUnsafe(ctx);
+		} catch {
+			/* 会话可能已随换脑销毁 */
+		}
+	}
+
+	private refreshWidgetUnsafe(ctx: any): void {
 		const a = this.active;
 		if (!a || a.state.phase === "done" || a.state.phase === "halted") {
 			ctx.ui.setWidget("missions", undefined);
