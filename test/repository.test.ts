@@ -67,19 +67,27 @@ test("v2 repository:冻结文件被改后拒绝加载", () => {
 	}
 });
 
-test("v2 repository:snapshot 缺少必填状态字段时返回 typed corrupt", () => {
+// MissionState 的每一个字段都要被 isState 查到。逐个删过去而不是抽查一条:
+// 漏查的字段会让坏快照直接进 core,然后在某个纯函数里以 "undefined is not
+// iterable" 的形态炸掉 —— 离出错的地方隔着十几帧。给 state 加字段而忘了加校验,
+// 这条会当场变红。
+test("v2 repository:state 少任何一个必填字段都要判 corrupt", () => {
 	const { tmp, repo, missionId, plan, state } = fixture();
 	repo.create(plan, state);
 	const file = path.join(tmp, "missions", "state", missionId, "SNAPSHOT.json");
-	const snapshot = JSON.parse(fs.readFileSync(file, "utf8"));
-	delete snapshot.state.metrics;
-	fs.writeFileSync(file, JSON.stringify(snapshot));
+	const pristine = JSON.parse(fs.readFileSync(file, "utf8"));
 
-	const loaded = repo.load(missionId);
-	assert.equal(loaded.ok, false);
-	if (!loaded.ok) {
-		assert.equal(loaded.code, "corrupt");
-		assert.match(loaded.error, /格式无效/);
+	for (const key of Object.keys(pristine.state)) {
+		const snapshot = JSON.parse(JSON.stringify(pristine));
+		delete snapshot.state[key];
+		fs.writeFileSync(file, JSON.stringify(snapshot));
+
+		const loaded = repo.load(missionId);
+		assert.equal(loaded.ok, false, `删掉 state.${key} 之后仍然载入成功 —— isState 没查这个字段`);
+		if (!loaded.ok) {
+			assert.equal(loaded.code, "corrupt", `state.${key}`);
+			assert.match(loaded.error, /格式无效|不一致/, `state.${key}`);
+		}
 	}
 });
 

@@ -350,12 +350,10 @@ test("widget:无结论预警的括号内容跟着成因走 —— 核验模型 4
 	};
 	assert.match(warnOf("judge"), /核验裁判不可用/);
 	assert.match(warnOf("evidence"), /证据没采到/);
-	// 字段缺失(老快照),以及**取消环境指纹之前**落盘的 "env" —— 都不能渲染成 (undefined)
-	for (const stale of [undefined, "env"]) {
-		const line = warnOf(stale);
-		assert.match(line, /证据没采到/, `stale=${stale}`);
-		assert.doesNotMatch(line, /undefined/, `stale=${stale}`);
-	}
+	// 第一次无结论之前这个字段没有值 —— 那一格不能渲染成 (undefined)
+	const line = warnOf(undefined);
+	assert.match(line, /证据没采到/);
+	assert.doesNotMatch(line, /undefined/);
 });
 
 test("widget:窄终端下卡片高度有上限 —— 常驻 chrome 不许无限长", () => {

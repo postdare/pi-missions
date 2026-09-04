@@ -982,8 +982,8 @@ export class Runtime {
 
 		const verdict = evaluateScout({
 			tier: a.state.tier,
-			askedRounds: a.state.scoutRounds ?? 0,
-			asked: a.state.scoutAsked ?? [],
+			askedRounds: a.state.scoutRounds,
+			asked: a.state.scoutAsked,
 			questions,
 		});
 		if (!verdict.ok) return { error: verdict.reason };
@@ -1019,7 +1019,7 @@ export class Runtime {
 			ctx,
 		);
 		if (dispatched.error) return { error: dispatched.error };
-		const round = this.active!.state.scoutRounds ?? 1;
+		const round = this.active!.state.scoutRounds;
 		const sp = statePaths(this.layout, a.state.missionId);
 		if (!a.inMemory) {
 			appendLog(

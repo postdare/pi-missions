@@ -4,7 +4,6 @@
  * git 集成(Q5):
  * - MISSION.md 建议提交;missions/state/ 默认写 .git/info/exclude(不动用户 .gitignore)
  * - 非 git 仓库降级运行:AC 冻结只剩 L0 闸门,无 git log 审计链
- * - 环境指纹(I9):以 scaffold 的 env-fingerprint.sh 输出为准,sha256 之
  */
 
 import { createHash } from "node:crypto";

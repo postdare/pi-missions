@@ -802,9 +802,8 @@ followUp 发 DO brief 或 ACT brief,循环继续
 
 ```
 <repo>/missions/
-├── README.md                      工作流规则(脚手架铺设,已存在不覆盖)
+├── README.md                      工作流规则(脚手架铺设,每次按 templates/ 重铺)
 ├── phases/{define,plan,do,check,act}.md  相位提示词 ← 进哪个相位读哪个
-├── scripts/
 ├── models.json                    角色 → 模型映射(可选)
 ├── spikes/<id>/<taskId>.md        探针结论(执行者在 spike 任务里唯一能写的文件)
 └── state/
@@ -825,7 +824,11 @@ followUp 发 DO brief 或 ACT brief,循环继续
 CURRENT、SNAPSHOT、CHECK、LOG、profile、evidence 与 archive 默认写进
 `.git/info/exclude`(不动用户的 `.gitignore`);不可变 generations 建议提交,
 git 提供 AC 冻结的审计链。
-脚手架**已存在的文件不覆盖** —— 用户可以定制,仓库里的才是规范。
+脚手架里的 `README.md` 与 `phases/*.md` **每次都按 `templates/` 重铺**(内容一致就不碰)。
+这里原来是「已存在就不覆盖」,理由是用户可以定制;真实代价是相位提示词会无声地停在
+铺下去的那一天 —— 一个跑了两周的仓库,`plan.md` 落后主线 193 行 diff,缺的不只是新工具,
+还有基线红绿纪律、占位分支会被打回这些**判定相关**的告诫,而规划的模型只看得到磁盘上那份。
+提示词是扩展的一部分,不是用户数据;要改文案改 `templates/`,要改判定改 `core/`。
 
 ---
 

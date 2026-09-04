@@ -226,17 +226,17 @@ export interface MissionState {
 	 * 与 defineAsks 同性质:额度**先消耗后执行**,中途失败也算用掉 ——
 	 * 不然一轮扇出失败就能无限重来,额度形同不存在。
 	 */
-	scoutRounds?: number;
+	scoutRounds: number;
 	/**
 	 * 前几轮扇出问过的问题。查重与 follows 校验的输入(evaluateScout)。
 	 * 必须落盘:换脑之后新会话不知道上一轮查过什么,内存态不可信(I1)。
 	 */
-	scoutAsked?: { id: string; text: string }[];
+	scoutAsked: { id: string; text: string }[];
 	/**
 	 * 侦查结论。落盘的理由与 defineAnswers 逐字相同 ——
 	 * planner 照它写计划,只活在上下文里的话换脑即丢,而额度已经烧掉了。
 	 */
-	scoutFindings?: ScoutFinding[];
+	scoutFindings: ScoutFinding[];
 	/** 按角色分账的累计成本(美元),来自 message_end 的 usage.cost.total */
 	cost: Partial<Record<Role, number>>;
 	/**
@@ -244,7 +244,7 @@ export interface MissionState {
 	 * 自建网关常常不报价(usage.cost.total = 0),美元账是空的,
 	 * 但 token 账永远是真的 —— 成本优化只能看它。
 	 */
-	tokens?: Partial<Record<Role, RoleTokenUsage>>;
+	tokens: Partial<Record<Role, RoleTokenUsage>>;
 	metrics: MissionMetrics;
 	updatedAt: number;
 }

@@ -79,6 +79,7 @@ function modelsData(): ModelsPageData {
 		models: [{ provider: "anthropic", id: "opus" }],
 		sessionLabel: "anthropic/opus",
 		cost: { planner: 0.5 },
+		tokens: {},
 		activeRole: "planner",
 		dirName: "missions",
 	};

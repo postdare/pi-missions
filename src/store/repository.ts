@@ -411,6 +411,11 @@ function isPlan(value: unknown): value is MissionPlan {
 	);
 }
 
+/**
+ * MissionState 的结构校验。**类型里是必填的字段,这里就要逐条查到** ——
+ * 漏掉一条,坏快照就会被放进 core,然后在某个纯函数里以 `undefined is not
+ * iterable` 的形态炸掉,离出错的地方隔着十几帧。加字段时同步加校验。
+ */
 function isState(value: unknown): value is MissionState {
 	if (!value || typeof value !== "object") return false;
 	const v = value as Partial<MissionState>;
@@ -425,16 +430,23 @@ function isState(value: unknown): value is MissionState {
 		!!v.escalation &&
 		typeof v.escalation === "object" &&
 		Array.isArray(v.escalation.history) &&
+		(v.baseCommit === null || typeof v.baseCommit === "string") &&
 		(v.pendingHandoff === null || typeof v.pendingHandoff === "string") &&
 		!!v.sessionMap &&
 		typeof v.sessionMap === "object" &&
 		typeof v.defineAsks === "number" &&
 		Array.isArray(v.defineSettled) &&
+		Array.isArray(v.defineAnswers) &&
 		!!v.planReview &&
 		Array.isArray(v.planReview.notes) &&
 		typeof v.spikesRun === "number" &&
+		typeof v.scoutRounds === "number" &&
+		Array.isArray(v.scoutAsked) &&
+		Array.isArray(v.scoutFindings) &&
 		!!v.cost &&
 		typeof v.cost === "object" &&
+		!!v.tokens &&
+		typeof v.tokens === "object" &&
 		!!v.metrics &&
 		Array.isArray(v.metrics.touchedFiles) &&
 		typeof v.metrics.touchedPublicApi === "boolean" &&

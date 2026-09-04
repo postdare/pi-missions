@@ -240,7 +240,7 @@ export function registerCommands(pi: any, getRuntime: GetRuntime): void {
 					const rows = views.map((v) => {
 						const role = v.role;
 						const spent = a?.state.cost[role];
-						const tk = a?.state.tokens?.[role];
+						const tk = a?.state.tokens[role];
 						const tkSum = tk ? tk.input + tk.output + tk.cacheRead + tk.cacheWrite : 0;
 						const mark = STATE_ICON[v.state] ?? "?";
 						return `  ${mark} ${role.padEnd(10)} ${v.label}  · thinking=${v.thinking}${v.thinkingIsDefault ? "(默认)" : ""}${spent ? `  $${spent.toFixed(4)}` : ""}${tkSum > 0 ? `  ${formatTokens(tkSum)} tok` : ""}`;

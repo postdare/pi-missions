@@ -115,12 +115,12 @@ export function renderStateCard(
 	// 上一轮的对话,而额度已经烧掉了。查明的与未查明的**分开印** —— 混在一起的话,
 	// planner 会把自己的假设当成核实过的事实写进 AC,那正是 scout 想消除的东西。
 	if (state.phase === "plan") {
-		const used = state.scoutRounds ?? 0;
+		const used = state.scoutRounds;
 		const scap = scoutRoundCapFor(state.tier);
 		if (scap > 0 && used > 0) {
 			lines.push(`侦查轮次:已用 ${used}/${scap}(闸门细则见 mission_scout 的工具说明)。`);
 		}
-		const findings = state.scoutFindings ?? [];
+		const findings = state.scoutFindings;
 		for (const f of findings.filter((x) => x.status === "answered")) {
 			const cite = f.citations.length ? `(出处:${f.citations.join(", ")})` : "";
 			lines.push(`已查明 ${f.id}${f.surprised ? "(与假设有出入)" : ""}:${f.answer.replace(/\s+/g, " ")}${cite}`);

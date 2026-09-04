@@ -105,10 +105,10 @@ export function transition(state: MissionState, event: MissionEvent): Transition
 		// 与 DEFINE_ASKED / DEFINE_ANSWERED 的分工完全一致。
 		case "SCOUT_DISPATCHED": {
 			if (state.phase !== "plan") return reject(state, "SCOUT_DISPATCHED 只能在 plan 相位");
-			const asked = [...(state.scoutAsked ?? []), ...event.questions];
+			const asked = [...state.scoutAsked, ...event.questions];
 			return ok(
-				{ ...state, scoutRounds: (state.scoutRounds ?? 0) + 1, scoutAsked: asked },
-				[log(`SCOUT 第 ${(state.scoutRounds ?? 0) + 1} 轮扇出 ${event.questions.length} 路:${event.questions.map((q) => q.id).join(" ")}`)],
+				{ ...state, scoutRounds: state.scoutRounds + 1, scoutAsked: asked },
+				[log(`SCOUT 第 ${state.scoutRounds + 1} 轮扇出 ${event.questions.length} 路:${event.questions.map((q) => q.id).join(" ")}`)],
 				event.at,
 			);
 		}
@@ -117,7 +117,7 @@ export function transition(state: MissionState, event: MissionEvent): Transition
 			if (state.phase !== "plan") return reject(state, "SCOUT_FINDINGS 只能在 plan 相位");
 			// 同 id 以新结论覆盖:重规划(L2)后同一个问题可能被重新查证。
 			// 直接 push 会让 State Card 里出现两条相互矛盾的结论,而 planner 无从分辨新旧。
-			const merged = new Map((state.scoutFindings ?? []).map((f) => [f.id, f]));
+			const merged = new Map(state.scoutFindings.map((f) => [f.id, f]));
 			for (const f of event.findings) merged.set(f.id, f);
 			const answered = event.findings.filter((f) => f.status === "answered").length;
 			const surprises = event.findings.filter((f) => f.surprised).length;
@@ -134,7 +134,7 @@ export function transition(state: MissionState, event: MissionEvent): Transition
 			if (!Number.isFinite(event.amount) || event.amount < 0 || (event.amount === 0 && !hasTokens)) {
 				return reject(state, "RECORD_ROLE_COST 需要正数 amount,或携带非零 token 用量");
 			}
-			const prevTk = state.tokens?.[event.role];
+			const prevTk = state.tokens[event.role];
 			return ok(
 				{
 					...state,
@@ -950,6 +950,7 @@ export function initialState(params: {
 		scoutAsked: [],
 		scoutFindings: [],
 		cost: {},
+		tokens: {},
 		metrics: { touchedFiles: [], touchedPublicApi: false },
 		updatedAt: 0,
 	};

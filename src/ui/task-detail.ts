@@ -145,9 +145,8 @@ export function renderTaskDetail(
 	}
 	if (state?.inconclusiveStreak && state.inconclusiveStreak > 0) {
 		// 标签就是结论:说"环境漂移"人就去查环境。核验模型报错时这么写等于指错方向。
-		const cause = state.lastInconclusiveCause ?? "env";
-		// 未知成因一律按"证据缺口"说 —— 取消环境指纹之前的 snapshot 里存着已不存在的 "env"
-		const label = cause === "judge" ? "裁判不可用" : "证据缺口";
+		// 没记到成因时按"证据缺口"说 —— 它是两者里更常见、也更容易自查的那个。
+		const label = state.lastInconclusiveCause === "judge" ? "裁判不可用" : "证据缺口";
 		lines.push(field(t, label, t.fg("warning", `连续 ${state.inconclusiveStreak} 次无法判定`)));
 	}
 	if (state?.lastFailureReason) {

@@ -94,6 +94,7 @@ const MODELS: ModelsPageData = {
 	],
 	sessionLabel: "anthropic/claude-opus-5",
 	cost: { planner: 0.412, executor: 1.203 },
+	tokens: {},
 	activeRole: "executor",
 	dirName: "missions",
 };

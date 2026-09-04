@@ -21,8 +21,8 @@ import { clip, miniBar, pad, wrap } from "./chrome.ts";
  * 无结论成因 → 给人看的一句话。别用万能兜底:
  * 核验模型 400 时说"环境可能漂移",人就会去查 git 状态而不是去查 models.json(真实事故)。
  *
- * 查表要容错:这个成因是**落盘**的(TaskState.lastInconclusiveCause),而取消环境指纹
- * 之前的 snapshot 里存着已经不存在的 "env"。直接下标会渲染出 "(undefined)"。
+ * 成因是可选字段(第一次无结论之前没有值),所以留一条 undefined 的入口 ——
+ * 但它只兜 undefined,不兜"表里没有的成因":那种情况要在编译期就被 Record 挡住。
  */
 const INCONCLUSIVE_HINT: Record<InconclusiveCause, string> = {
 	evidence: "证据没采到",
@@ -30,7 +30,7 @@ const INCONCLUSIVE_HINT: Record<InconclusiveCause, string> = {
 };
 
 function inconclusiveHint(cause: InconclusiveCause | undefined): string {
-	return INCONCLUSIVE_HINT[cause as InconclusiveCause] ?? "证据没采到";
+	return cause ? INCONCLUSIVE_HINT[cause] : "证据没采到";
 }
 
 export interface EvidenceSummary {
@@ -94,7 +94,7 @@ export function costTotal(state: MissionState): number {
 
 /** 全角色 token 合计(个)。与美元账并列:网关不报价时只有它是真的 */
 export function tokenTotal(state: MissionState): number {
-	return Object.values(state.tokens ?? {}).reduce(
+	return Object.values(state.tokens).reduce(
 		(a, u) => a + (u ? u.input + u.output + u.cacheRead + u.cacheWrite : 0),
 		0,
 	);
@@ -435,7 +435,7 @@ export function overviewLines(plan: MissionPlan, state: MissionState, opts: Over
 
 	lines.push("");
 
-	// ④ 机制性的账:升级阶梯 / 花费 / 环境指纹
+	// ④ 机制性的账:升级阶梯 / 花费
 	const esc = state.escalation;
 	lines.push(
 		field(
@@ -450,7 +450,7 @@ export function overviewLines(plan: MissionPlan, state: MissionState, opts: Over
 
 	// 合计放最前面:这几行是次要信息,窄栏会被截掉,截掉的必须是分账明细而不是总额
 	const costEntries = Object.entries(state.cost).filter(([, v]) => (v ?? 0) > 0);
-	const tokMap = state.tokens ?? {};
+	const tokMap = state.tokens;
 	const tokSum = tokenTotal(state);
 	const costSummary = [
 		costEntries.length > 0 ? `$${costTotal(state).toFixed(3)}` : "",

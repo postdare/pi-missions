@@ -187,6 +187,7 @@ function fakeMission(id: string, goal: string, phase: string, tier = "standard")
 		taskOrder: ["T1", "T2"],
 		currentTask: "T1",
 		cost: {},
+		tokens: {},
 		escalation: { level: 1, history: [] },
 		sessionMap: {},
 		updatedAt: Date.now(),

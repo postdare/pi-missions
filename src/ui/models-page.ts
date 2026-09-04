@@ -44,7 +44,7 @@ export interface ModelsPageData {
 	/** 活动 mission 的按角色花费;无活动 mission 为空 */
 	cost: Partial<Record<Role, number>>;
 	/** 按角色 token 用量(网关不报价时美元恒 0,它是真实消耗) */
-	tokens?: Partial<Record<Role, RoleTokenUsage>>;
+	tokens: Partial<Record<Role, RoleTokenUsage>>;
 	/** 活动 mission 的相位角色(用于标出"当前正在用") */
 	activeRole: Role | null;
 	dirName: string;
@@ -128,7 +128,7 @@ export function modelRows(d: ModelsPageData, selected: number, t: Theme, width =
 			: t.fg("accent", v.thinking);
 		const thinking = pad(thinkingText, thinkingW);
 		const spent = d.cost[role];
-		const tokU = d.tokens?.[role];
+		const tokU = d.tokens[role];
 		const tokSum = tokU ? tokU.input + tokU.output + tokU.cacheRead + tokU.cacheWrite : 0;
 		// 美元优先;网关不报价(cost 恒 0)时显 token,两者都没有留空
 		const cellText = spent ? `$${spent.toFixed(4)}` : tokSum > 0 ? `${formatTokens(tokSum)} tok` : "";

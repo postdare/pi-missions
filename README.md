@@ -586,7 +586,7 @@ src/
 ├── roles/              # models.json 角色模型 + 进程内 Verifier AgentSession
 ├── hooks/              # tool_call 闸门 + 编辑级增量反馈
 └── ui/                 # 主面板 + 计划评审页 + 状态视图 + verdict/状态卡片
-templates/              # scaffold 进目标仓库的工作流文件
+templates/              # 相位提示词 + missions/README —— 每次 /mission new 按此重铺进目标仓库
 ```
 
 ## 测试

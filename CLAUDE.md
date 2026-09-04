@@ -89,7 +89,7 @@ src/hooks/      tool_call 闸门 + 编辑级增量反馈
 src/ui/         chrome(圆角盒框架)/ panel(/missions)/ plan-review(冻结前评审)/ ask-review(DEFINE 问答)/
                 scout-view(mission_scout 的工具块)/
                 human-review(quick 人工终审)/ status-view / dashboard / models-page
-templates/      scaffold 铺进目标仓库的工作流文件(standard/complex 的相位提示词、脚本)
+templates/      scaffold 铺进目标仓库的相位提示词 + missions/README —— 每次 /mission new 按此重铺
 skills/         随包分发的 pi skill(入场导览:该不该开 mission、选哪档)
 ```
 

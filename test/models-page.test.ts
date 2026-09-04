@@ -76,6 +76,7 @@ test("窄列宽时牺牲「配的是什么」,保住「实际用的是什么」"
 		models: [{ provider: "anthropic", id: "claude-opus-5" }],
 		sessionLabel: "anthropic/claude-opus-5",
 		cost: {},
+		tokens: {},
 		activeRole: null,
 		dirName: "missions",
 	};
@@ -102,6 +103,7 @@ test("模型名那一列不随面板变宽而拉长 —— thinking 要紧跟模
 		],
 		sessionLabel: "anthropic/claude-opus-5",
 		cost: {},
+		tokens: {},
 		activeRole: null,
 		dirName: "missions",
 	};

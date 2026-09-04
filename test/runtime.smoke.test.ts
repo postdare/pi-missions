@@ -2052,8 +2052,8 @@ test("scout:被闸门拒掉时不消耗额度 —— 否则写错一次参数就
 	const bad = await rt.scout(ctx, [{ ...Q1, assume: "" }]);
 	assert.ok("error" in bad, JSON.stringify(bad));
 	assert.match(bad.error, /当前假设/);
-	assert.equal(rt.active!.state.scoutRounds ?? 0, 0, "拒了就不该记账");
-	assert.deepEqual(rt.active!.state.scoutAsked ?? [], []);
+	assert.equal(rt.active!.state.scoutRounds, 0, "拒了就不该记账");
+	assert.deepEqual(rt.active!.state.scoutAsked, []);
 
 	fs.rmSync(tmp, { recursive: true, force: true });
 });

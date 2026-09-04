@@ -632,12 +632,12 @@ test("SCOUT_DISPATCHED:额度记账 + 问题落盘,相位不动", () => {
 	assert.equal(r.error, undefined);
 	assert.equal(r.state.phase, "plan", "侦查不是相位迁移,是 PLAN 内部的一次查证");
 	assert.equal(r.state.scoutRounds, 1);
-	assert.deepEqual(r.state.scoutAsked?.map((q) => q.id), ["S1", "S2"]);
+	assert.deepEqual(r.state.scoutAsked.map((q) => q.id), ["S1", "S2"]);
 
 	// 第二轮累加,前一轮问过的题目不能被覆盖 —— 查重和 follows 都要靠它
 	const r2 = transition(r.state, { type: "SCOUT_DISPATCHED", at: AT, questions: [{ id: "S3", text: "C" }] });
 	assert.equal(r2.state.scoutRounds, 2);
-	assert.deepEqual(r2.state.scoutAsked?.map((q) => q.id), ["S1", "S2", "S3"]);
+	assert.deepEqual(r2.state.scoutAsked.map((q) => q.id), ["S1", "S2", "S3"]);
 });
 
 test("SCOUT_* 只在 plan 相位受理 —— 别处发来说明状态坏了,不是静默忽略", () => {
@@ -660,7 +660,7 @@ test("SCOUT_FINDINGS:同 id 覆盖,不叠加 —— 重规划后不能留下两�
 	const first = transition(s, { type: "SCOUT_FINDINGS", at: AT, findings: [f("S1", "旧结论"), f("S2", "另一条")] }).state;
 	const second = transition(first, { type: "SCOUT_FINDINGS", at: AT, findings: [f("S1", "新结论")] }).state;
 
-	assert.equal(second.scoutFindings?.length, 2);
-	assert.equal(second.scoutFindings?.find((x) => x.id === "S1")?.answer, "新结论");
-	assert.equal(second.scoutFindings?.find((x) => x.id === "S2")?.answer, "另一条", "没被重查的那条要留着");
+	assert.equal(second.scoutFindings.length, 2);
+	assert.equal(second.scoutFindings.find((x) => x.id === "S1")?.answer, "新结论");
+	assert.equal(second.scoutFindings.find((x) => x.id === "S2")?.answer, "另一条", "没被重查的那条要留着");
 });
