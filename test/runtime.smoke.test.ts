@@ -519,6 +519,14 @@ test("有活跃 mission 就监听按键:↓ 选中常驻卡,↓↓ 展开看板,
 	listener!("\x1b[B");
 	assert.equal((rt as any).widgetNav.focus, "board");
 
+	// 弹出层关掉之后焦点必须收回输入框 —— 否则卡继续反白、↑ 翻不了历史。
+	// 这一刻没有按键,所以 decideWidgetNav 看不见它;收焦点的是 runtime 的 afterOverlay。
+	assert.equal((rt as any).widgetNav.focus, "board", "前置条件:焦点在看板上");
+	listener!("\r"); // ↵ 打开动作原文页(mock 的 ctx.ui.custom 立即 resolve)
+	await Promise.resolve();
+	await Promise.resolve();
+	assert.equal((rt as any).widgetNav.focus, "none", "页关掉之后焦点要回输入框");
+
 	// 核验结束 → 焦点收回常驻卡,监听器仍在(mission 还活着)
 	(rt as any).liveCheckState.verifier.status = "completed";
 	rt.refreshWidget(ctx);

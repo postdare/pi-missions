@@ -1712,6 +1712,23 @@ export class Runtime {
 		this.widgetNav = WIDGET_NAV_IDLE;
 	}
 
+	/**
+	 * 弹出层关闭之后把焦点收回输入框(这条链的出口承诺:任何一层 Esc 都一路收回)。
+	 * openStatus 的类型是 void | Promise<void>,所以必须过 Promise.resolve。
+	 */
+	private afterOverlay(uiCtx: any, opened: unknown): void {
+		void Promise.resolve(opened)
+			.catch(() => {})
+			.finally(() => {
+				this.widgetNav = WIDGET_NAV_IDLE;
+				try {
+					this.refreshWidget(uiCtx);
+				} catch {
+					/* 会话可能已经销毁,焦点已经清了,渲染失败不必上报 */
+				}
+			});
+	}
+
 	private bindWidgetKeys(ctx: any): void {
 		if (typeof ctx?.ui?.onTerminalInput !== "function") return;
 		this.widgetCtx = ctx;
@@ -1745,10 +1762,17 @@ export class Runtime {
 			});
 			this.widgetNav = decided.state;
 			if (!decided.consume) return;
-			if (decided.openStatus) void this.openStatus?.(uiCtx);
+			// 弹出层一关,焦点必须回到输入框。
+			//
+			// 焦点只在按键时经 decideWidgetNav 变,而"弹出层关闭"这个时刻**没有按键**
+			// (custom-depth 的 depth-- 在 promise 的 finally 里)。不在这里收,
+			// 卡就会继续反白、↑↓ 继续归 widget 管 —— 失灵的是输入框的 ↑ 历史回溯,
+			// 和 ctrl+m 劫持回车同级(CLAUDE.md「UI 层的四个坑」第四条)。
+			// 判定不进 widget-keys.ts:那个纯函数只在按键时被调用,看不见这一刻。
+			if (decided.openStatus) this.afterOverlay(uiCtx, this.openStatus?.(uiCtx));
 			if (decided.openDetail) {
 				const line = boardTrace(view)[decided.state.selected] ?? "";
-				void openBoardDetail(uiCtx, line);
+				this.afterOverlay(uiCtx, openBoardDetail(uiCtx, line));
 			}
 			this.refreshWidget(uiCtx);
 			return { consume: true };
