@@ -20,6 +20,7 @@ import { renderPlanReview, SECTION_IDS, type ReviewSection } from "../src/ui/pla
 import { renderAskReview } from "../src/ui/ask-review.ts";
 import { renderHumanReview } from "../src/ui/human-review.ts";
 import { renderScoutCall, renderScoutResult } from "../src/ui/scout-view.ts";
+import { renderBoard } from "../src/ui/board.ts";
 import type { ScoutFinding } from "../src/core/scout.ts";
 
 /** docs/themes.md 的前景色名(仅列本项目可能用到的部分) */
@@ -368,4 +369,45 @@ test("mission_scout 的工具块在 strictTheme 下颜色名均合法", () => {
 			details: { kind: "progress", progress: { done: 1, total: 3, activity: { S1: "已交回结论", S2: "读 a.ts", S3: "排队中" }, running: ["S2", "S3"] } },
 		}),
 	);
+});
+
+// 看板是新的渲染路径,而且它的两个形态(收起/展开)走的是不同分支 ——
+// 严格主题必须把两条都走一遍,否则写错颜色名只会在真机主循环里炸。
+test("子 agent 看板的所有形态都不会用到不存在的颜色名", () => {
+	const now = Date.now();
+	const check = {
+		taskId: "T1",
+		attempt: 1,
+		startedAt: now - 94_000,
+		updatedAt: now,
+		stage: "running_verifier" as const,
+		completedBranches: [],
+		verifier: {
+			status: "running" as const,
+			startedAt: now - 88_000,
+			turns: 11,
+			toolCalls: 22,
+			trace: ["初始化独立 AgentSession", "读取 /a/b/c.go", "完成第 5 轮核验"],
+		},
+	};
+	const scout = {
+		startedAt: now - 32_000,
+		progress: { done: 1, total: 4, running: ["S2"], activity: { S1: "已交回结论", S2: "读 a.go" } },
+	};
+	for (const width of [40, 56, 96, 200]) {
+		for (const expanded of [false, true]) {
+			assert.doesNotThrow(
+				() => renderBoard({ expanded, selected: -1, scroll: 0, check, now, width }, strictTheme as never),
+				`verifier expanded=${expanded} width=${width}`,
+			);
+			assert.doesNotThrow(
+				() =>
+					renderBoard(
+						{ expanded, selected: 0, scroll: 0, check: null, scout, now, width },
+						strictTheme as never,
+					),
+				`scout expanded=${expanded} width=${width}`,
+			);
+		}
+	}
 });
