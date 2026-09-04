@@ -285,7 +285,13 @@ export function registerMissionTools(pi: any, getRuntime: GetRuntime): void {
 		description:
 			"[PLAN 相位] 并行扇出只读侦查:把几个卡住你写计划的**事实问题**各交给一个独立的只读子 agent 去查," +
 			"结论带出处一起回来。阻塞调用,几路同时跑,所以一轮的耗时约等于最慢的那一路。\n" +
-			"一轮最多 4 路;轮次上限由档位定(standard 1 轮、complex 2 轮)—— 系统强制,不是建议。" +
+			// 「一轮最多 4 路」原来只说了上限,没说代价 —— 而真机里模型把整个 standard
+			// 额度(1 轮)花在了一个问题上,剩下三件卡住计划的事实一路都不剩。
+			// 它把"一轮"读成了"一次工具调用",而不是"一份配额"。所以这里要写的不是
+			// 上限,是**经济学**:同样一轮,问 1 个和问 4 个花的钱一模一样。
+			"**额度按轮计,不按路**:一轮里问 1 个问题和问 4 个问题,花掉的额度一样多。" +
+			"所以别省着问 —— 一次把所有卡住你的事实问题都列上。" +
+			"一轮最多 4 路;轮次上限由档位定(standard 只有 1 轮、complex 2 轮)—— 系统强制,不是建议。" +
 			"每个问题必须写清 why(改变计划里的什么)和 assume(你现在的假设);第二轮起还要用 follows " +
 			"指明它追的是上一轮哪个问题 —— 挂不上的问题本来就该在第一轮问。前面查过的问题换个措辞再问会被直接拒绝。\n" +
 			"子 agent 只有 read/grep/find/ls,**没有 shell,也不能改任何文件** —— 所以它只能回答" +
@@ -298,7 +304,8 @@ export function registerMissionTools(pi: any, getRuntime: GetRuntime): void {
 				maxItems: 4,
 				description:
 					"互相独立的事实问题 —— 它们会同时跑,后一个问题看不到前一个的答案。" +
-					"有依赖关系的问题拆到下一轮(complex 才有第二轮)。",
+					"有依赖关系的问题拆到下一轮(complex 才有第二轮)。" +
+					"**只填一个问题基本上是浪费**:这一路跑完,整轮额度就没了,而并行是免费的。",
 			}),
 		}),
 		async execute(_id: string, params: any, _signal: any, onUpdate: any, ctx: any) {
