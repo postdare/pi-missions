@@ -470,7 +470,7 @@ export function statusViewOpts(pi: any, ctx: Ctx, rt: Runtime, id: string) {
 
 const BOOL_FLAGS = new Set(["edit"]);
 
-function parseArgs(args: string): { sub: string; rest: string; flags: Record<string, string> } {
+export function parseArgs(args: string): { sub: string; rest: string; flags: Record<string, string> } {
 	const flags: Record<string, string> = {};
 	// --key=value 与 --key value / --key "quoted value"
 	let rest = args.replace(/--([\w-]+)=("[^"]*"|'[^']*'|\S+)/g, (_m, k, v) => {
@@ -490,5 +490,33 @@ function parseArgs(args: string): { sub: string; rest: string; flags: Record<str
 	});
 	const parts = rest.trim().split(/\s+/).filter(Boolean);
 	const sub = parts.shift() ?? "";
-	return { sub, rest: parts.join(" "), flags };
+	return { sub, rest: unquote(parts.join(" ")), flags };
+}
+
+/**
+ * 剥掉整段参数外面的一层配对引号。
+ *
+ * 全部文档教的都是 `/mission new "目标"`,而这里原来一个字符都不剥 ——
+ * 于是那对引号跟着 goal 走完全程:MISSION.md、计划评审页、State Card、
+ * 常驻卡、喂给模型的开场白,每个界面都带着它。
+ *
+ * 只剥**整段被同一种引号包住**的情况。`他说 "算了" 就走了` 里的引号不动 ——
+ * 那是正文的一部分,剥掉会改变意思。中文文档里复制出来的弯引号一并认,
+ * 它是粘贴时最常见的一种。
+ */
+function unquote(text: string): string {
+	const pairs: Array<[string, string]> = [
+		['"', '"'],
+		["'", "'"],
+		["\u201c", "\u201d"],
+		["\u2018", "\u2019"],
+	];
+	for (const [open, close] of pairs) {
+		if (text.length >= 2 && text.startsWith(open) && text.endsWith(close)) {
+			const inner = text.slice(open.length, text.length - close.length);
+			// 里面还有同种引号说明这不是"整段被包住",别乱剥:`"a" 和 "b"`
+			if (!inner.includes(open) && !inner.includes(close)) return inner.trim();
+		}
+	}
+	return text;
 }

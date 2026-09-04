@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import { registerCommands, statusViewOpts } from "../src/commands.ts";
+import { parseArgs, registerCommands, statusViewOpts } from "../src/commands.ts";
 import { initialState } from "../src/core/machine.ts";
 import { layout } from "../src/store/paths.ts";
 import { MissionRepository } from "../src/store/repository.ts";
@@ -132,4 +132,36 @@ test("/mission status:从 v2 snapshot 展示冻结前 mission", async () => {
 	assert.equal(notifications.length, 0);
 	assert.equal(entries.length, 1);
 	assert.match(entries[0]!.data.body, /验证 v2 状态读取/);
+});
+
+// 全部文档教的都是 /mission new "目标"。剥不掉的话,那对引号会跟着 goal
+// 走完全程:MISSION.md、计划评审页、State Card、常驻卡、喂给模型的开场白。
+test("parseArgs:整段被引号包住时剥掉一层 —— 文档教的就是这个写法", () => {
+	const cases: Array<[string, string]> = [
+		['new "把登录鉴权从 session 迁移到 JWT"', "把登录鉴权从 session 迁移到 JWT"],
+		["new '把登录鉴权从 session 迁移到 JWT'", "把登录鉴权从 session 迁移到 JWT"],
+		["new \u201c从文档里粘出来的弯引号\u201d", "从文档里粘出来的弯引号"],
+		["new 不加引号也一样", "不加引号也一样"],
+	];
+	for (const [input, goal] of cases) {
+		assert.equal(parseArgs(input).rest, goal, input);
+	}
+});
+
+test("parseArgs:正文里的引号不动 —— 剥掉会改变意思", () => {
+	assert.equal(parseArgs('new 他说 "算了" 就走了').rest, '他说 "算了" 就走了');
+	assert.equal(parseArgs('new "先做 A" 再做 "B"').rest, '"先做 A" 再做 "B"');
+	assert.equal(parseArgs('new 只有右边有引号"').rest, '只有右边有引号"');
+});
+
+test("parseArgs:剥引号不影响 flag 解析", () => {
+	const r = parseArgs('new "重构鉴权" --tier=complex');
+	assert.equal(r.sub, "new");
+	assert.equal(r.rest, "重构鉴权");
+	assert.equal(r.flags.tier, "complex");
+});
+
+// 目标文本里出现 --xxx 时不该被当成开关吃掉(BOOL_FLAGS 白名单的理由)
+test("parseArgs:非白名单的 --xxx 留在目标正文里", () => {
+	assert.equal(parseArgs("new 重构 --legacy 模块").rest, "重构 --legacy 模块");
 });

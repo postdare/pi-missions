@@ -12,19 +12,24 @@
 
 ## 跑一道题
 
+**① 复位考场**(每道题之前都要做,一行粘完):
+
 ```bash
-# 1. 回到基线(每道题之前都要做)
-cd ~/Projects/todo-list
-git reset --hard d049f42 && git clean -fd
-rm -rf missions/state          # 保留 phases/ 与 README(脚手架会自己重铺)
-
-# 2. 装载扩展并开题
-pi -e /Users/kim/Postdare/pi-missions
-/mission new "<题面原样粘进来>"
-
-# 3. 观测(另一个会话里)
-tail -f missions/state/*/LOG.md
+cd ~/Projects/todo-list && git reset --hard d049f42 && git clean -fd && rm -rf missions/state && go test ./... >/dev/null && echo "考场就绪"
 ```
+
+`phases/` 与 `README.md` 不用管 —— 脚手架每次开题都会按 `templates/` 重铺。
+
+**② 装载扩展**:
+
+```bash
+pi -e /Users/kim/Postdare/pi-missions
+```
+
+**③ 开题** —— 每道题下面的「题面」代码块整块粘进 pi 就行,已经带上了 `/mission new` 和档位。
+
+**④ 观测**:监视器盯着 LOG.md,有事件自动叫醒。手动看用
+`tail -f ~/Projects/todo-list/missions/state/*/LOG.md`。
 
 角色模型已配在 `missions/models.json`:verifier 与 scout 走 `deepseek-v4-flash`
 (会话是 `glm-5.3-flash`)—— **异源是 I3 独立性的前提**,同族自核等于没核。
@@ -33,8 +38,11 @@ tail -f missions/state/*/LOG.md
 
 ## E2 · scout 扇出
 
-> 给 REST API 加上分页与按状态过滤:`GET /api/v1/todos?status=&limit=&offset=`,
-> 返回体带上总数。TUI 与 Web 页面都不改。
+**题面**(整块粘进 pi):
+
+```
+/mission new 给 REST API 加上分页与按状态过滤:GET /api/v1/todos 支持 status、limit、offset 三个查询参数,响应体里带上符合条件的总数。TUI 与 Web 页面都不改。 --tier=standard
+```
 
 **档**:standard · **成本**:低 · **优先级**:最高
 
@@ -53,7 +61,11 @@ handler 现在怎么解析 query、storage 接口能不能带条件取、现有 
 
 ## E1 · quick 档与判据路径
 
-> TUI 底部的帮助行写着 `q 退出`,但现在按 q 是进退出确认态。把这一行改对。
+**题面**(整块粘进 pi —— 注意是 `/mission quick`,不是 `new`):
+
+```
+/mission quick TUI 底部帮助行写着 q 退出,但现在按 q 是进退出确认态、要再按 Enter 才退。把这一行文案改成与实际行为一致。
+```
 
 **档**:quick · **成本**:最低 · **优先级**:高
 
@@ -70,8 +82,11 @@ handler 现在怎么解析 query、storage 接口能不能带条件取、现有 
 
 ## E3 · verifier 的独立性
 
-> 给 `GET /api/v1/todos` 和 `GET /api/v1/todos/{id}` 加 ETag 支持:
-> 响应带 `ETag`,请求带 `If-None-Match` 且匹配时返回 304 且不带 body。
+**题面**(整块粘进 pi):
+
+```
+/mission new 给 GET /api/v1/todos 和 GET /api/v1/todos/{id} 加 ETag 支持:响应带 ETag 头;请求带 If-None-Match 且与当前内容匹配时返回 304 且响应体为空;不匹配时正常返回 200 与完整内容。 --tier=standard
+```
 
 **档**:standard · **成本**:中 · **优先级**:高
 
@@ -91,7 +106,11 @@ AC 写松时它指出覆盖缺口而不是跟着盖章。
 
 ## E4 · 基线红绿(挡空壳 AC)
 
-> 保证并发调用 storage 写入时 `todos.json` 不会被写坏或写丢。
+**题面**(整块粘进 pi):
+
+```
+/mission new 保证多个 goroutine 并发调用 storage 写入时,todos.json 不会被写成损坏的 JSON,也不会丢掉已提交的记录。 --tier=standard
+```
 
 **档**:standard · **成本**:中
 
@@ -109,7 +128,11 @@ AC 写松时它指出覆盖缺口而不是跟着盖章。
 
 ## E7 · DEFINE 提问与覆盖校验
 
-> 给待办加提醒功能。
+**题面**(整块粘进 pi —— **就这么短,含糊是故意的**):
+
+```
+/mission new 给待办加提醒功能。 --tier=standard
+```
 
 **档**:standard · **成本**:中
 
@@ -129,7 +152,11 @@ AC 写松时它指出覆盖缺口而不是跟着盖章。
 
 ## E6 · spike(要动手量才知道)
 
-> 待办数量到一千条时 TUI 明显变卡。定位瓶颈并修掉,给出修前修后的量化对比。
+**题面**(整块粘进 pi):
+
+```
+/mission new 待办数量到一千条时 TUI 明显变卡。先定位真正的瓶颈在哪,再修掉它,并给出修前修后的量化对比数据。 --tier=complex
+```
 
 **档**:complex · **成本**:高
 
@@ -147,7 +174,11 @@ AC 写松时它指出覆盖缺口而不是跟着盖章。
 
 ## E5 · 熔断与升级阶梯(故意做不到)
 
-> 让 `go test ./...` 的总耗时降到 1 秒以内,现有测试一条都不许删、不许跳过。
+**题面**(整块粘进 pi —— **这题是故意做不到的,别手动帮它**):
+
+```
+/mission new 让 go test ./... 的总耗时降到 1 秒以内。现有测试一条都不许删除、不许跳过、不许改成短路返回。 --tier=standard
+```
 
 **档**:standard · **成本**:最高 · **放最后跑**
 
