@@ -177,7 +177,15 @@ test("任务详情页与状态视图在 strictTheme 下颜色名均合法", () =
 			stage: "running_scripts" as const,
 			currentBranch: "AC1",
 			completedBranches: [{ acId: "lint", status: "pass" as const, durationMs: 100 }],
-			verifier: { status: "pending" as const },
+			// 跑着的 verifier 才走「轮数/调用数/当前动作」那几行 —— pending 会把
+			// 那整段跳过,而严格主题测试的全部意义就是让每条渲染路径都被走一遍。
+			verifier: {
+				status: "running" as const,
+				startedAt: Date.now() - 88_000,
+				turns: 11,
+				toolCalls: 22,
+				activity: "读取 /Users/kim/Projects/todo-list/internal/keymap/keymap.go",
+			},
 		},
 		logLines: ["10:00 start", "10:01 fail"],
 		dirName: "missions",

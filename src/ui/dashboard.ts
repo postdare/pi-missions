@@ -13,7 +13,7 @@ import type { LiveScoutState } from "../core/scout.ts";
 import { ROLE_OF } from "../core/machine.ts";
 import { nearThreshold, thresholdFor } from "../core/breaker.ts";
 import type { EvidenceRecord } from "../store/evidence.ts";
-import type { CheckStage, CheckState } from "../store/check.ts";
+import type { CheckStage, CheckState, VerifierStatus } from "../store/check.ts";
 import { findTask, type MissionPlan } from "../store/mission.ts";
 import { clip, miniBar, pad, wrap } from "./chrome.ts";
 
@@ -88,6 +88,35 @@ const STAGE_LABELS: Record<CheckStage, string> = {
 	error: "异常",
 };
 
+/**
+ * 独立核验的状态标签。这里原来直接把枚举值印出去,于是 widget 上是一行
+ * `独立核验 running · 1m34s` —— 界面其余部分全是中文,只有这一格漏出英文。
+ */
+const VERIFIER_LABELS: Record<VerifierStatus, string> = {
+	pending: "待启动",
+	running: "核验中",
+	completed: "已完成",
+	skipped: "已跳过",
+	timeout: "超时",
+	degraded: "已降级",
+	failed: "失败",
+};
+
+/**
+ * 把 activity 里的绝对路径压成尾部两段。
+ *
+ * verifier 报的是 `读取 /Users/kim/Projects/todo-list/internal/keymap/keymap.go`,
+ * 而 widget 只有几十列 —— 整条印出去,真正有信息的文件名恰好被挤掉。
+ * 前缀对读的人是零信息(他就在这个仓库里),尾部两段才是。
+ */
+export function shortenActivity(activity: string): string {
+	return activity.replace(/(^|\s)(\/[^\s]+)/g, (_m, lead: string, abs: string) => {
+		const parts = abs.split("/").filter(Boolean);
+		if (parts.length <= 2) return `${lead}${abs}`;
+		return `${lead}…/${parts.slice(-2).join("/")}`;
+	});
+}
+
 export function costTotal(state: MissionState): number {
 	return Object.values(state.cost).reduce((a, b) => a + (b ?? 0), 0);
 }
@@ -151,8 +180,21 @@ export function checkProgressLines(
 		lines.push(...fieldWrapped(t, "已完成", completed, width, 3));
 	}
 	if (check.verifier && check.verifier.status !== "pending") {
-		const duration = check.verifier.durationMs == null ? "" : ` · ${fmtCheckDuration(check.verifier.durationMs)}`;
-		lines.push(field(t, "独立核验", `${check.verifier.status}${t.fg("dim", duration)}`));
+		const v = check.verifier;
+		// 跑起来之后 durationMs 还没有值(它只在结束时写),那时用 startedAt 现算 ——
+		// 否则一个跑了两分钟的核验在卡上是没有时长的,看不出它是在干活还是卡住了。
+		const ms = v.durationMs ?? (v.startedAt == null ? null : now - v.startedAt);
+		const bits = [VERIFIER_LABELS[v.status] ?? v.status];
+		if (ms != null) bits.push(fmtCheckDuration(ms));
+		// 轮数与调用数是"它真的在干活"的唯一证据 —— 一个 0 调用的核验和一个
+		// 22 次调用的核验都显示 running,但前者是降级前兆,后者是正常工作。
+		if (v.turns) bits.push(`${v.turns} 轮`);
+		if (v.toolCalls) bits.push(`${v.toolCalls} 次调用`);
+		lines.push(field(t, "独立核验", `${t.fg("accent", bits[0])}${t.fg("dim", ` · ${bits.slice(1).join(" · ")}`)}`));
+		// 当前动作只在跑着的时候有意义;结束了再印一条"读取 xx.go"是误导。
+		if (v.status === "running" && v.activity) {
+			lines.push(...fieldWrapped(t, "", shortenActivity(v.activity), width, 3, "dim"));
+		}
 	}
 	if (check.error) lines.push(...fieldWrapped(t, "异常", check.error, width, 3, "error"));
 	return lines.map((line) => clip(line, width));

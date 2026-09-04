@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { visibleWidth } from "@earendil-works/pi-tui";
-import { overviewLines, PHASE_STYLE, renderWidgetCard, renderStatusDashboard, shortId, taskBlocks, taskLines } from "../src/ui/dashboard.ts";
+import { PHASE_STYLE, checkProgressLines, overviewLines, renderStatusDashboard, renderWidgetCard, shortId, shortenActivity, taskBlocks, taskLines } from "../src/ui/dashboard.ts";
 import { initialState } from "../src/core/machine.ts";
 import type { MissionPlan } from "../src/store/mission.ts";
 
@@ -445,4 +445,89 @@ test("widget:全部回来之后不再点名,只剩 4/4", () => {
 	)!;
 	assert.ok(line.includes("4/4"));
 	assert.ok(!line.includes("S1"), "没有还在跑的就别点名");
+});
+
+// 用户在真机上的原话:「我现在完全看不到独立核验的进展」。
+// 当时 widget 上是一行 `独立核验 running · 1m34s`,两分多钟一动不动,
+// 而同一时刻 CHECK.json 里 activity 是「读取 …/keymap.go」、turns 11、toolCalls 22。
+// 数据一直都在,只是一个字段都没渲染。
+test("check 进度:核验跑着的时候要看得出它在干什么", () => {
+	const now = Date.now();
+	const lines = checkProgressLines(
+		{
+			taskId: "T1",
+			attempt: 1,
+			startedAt: now - 94_000,
+			updatedAt: now,
+			stage: "running_verifier",
+			completedBranches: [],
+			verifier: {
+				status: "running",
+				startedAt: now - 88_000,
+				turns: 11,
+				toolCalls: 22,
+				activity: "读取 /Users/kim/Projects/todo-list/internal/keymap/keymap.go",
+			},
+		},
+		now,
+		mockTheme,
+		56,
+	).join("\n");
+	assert.match(lines, /核验中/, "状态要说人话,不是 running");
+	assert.doesNotMatch(lines, /running/, "英文枚举不该漏到界面上");
+	assert.match(lines, /11 轮/);
+	assert.match(lines, /22 次调用/, "调用数是「它真的在干活」的唯一证据");
+	assert.match(lines, /keymap\.go/, "当前动作要看得见");
+	assert.match(lines, /1m2[0-9]s/, "跑着的时候 durationMs 还没有值,得用 startedAt 现算");
+});
+
+// 0 次调用的 degraded 和 22 次调用的 running 在旧版里都只显示状态词,
+// 而前者意味着独立核验根本没发生(I3 当轮是空的)。这两种必须一眼可分。
+test("check 进度:降级且零调用要和真干活的区分得开", () => {
+	const now = Date.now();
+	const lines = checkProgressLines(
+		{
+			taskId: "T1",
+			attempt: 1,
+			startedAt: now - 3000,
+			updatedAt: now,
+			stage: "judging",
+			completedBranches: [],
+			verifier: { status: "degraded", durationMs: 1228, turns: 1, toolCalls: 0 },
+		},
+		now,
+		mockTheme,
+		56,
+	).join("\n");
+	assert.match(lines, /已降级/);
+	assert.doesNotMatch(lines, /次调用/, "0 次调用不该印出来,空着本身就是信号");
+});
+
+test("check 进度:核验结束后不再印当前动作 —— 那会读成它还在跑", () => {
+	const now = Date.now();
+	const lines = checkProgressLines(
+		{
+			taskId: "T1",
+			attempt: 1,
+			startedAt: now - 3000,
+			updatedAt: now,
+			stage: "completed",
+			completedBranches: [],
+			verifier: { status: "completed", durationMs: 5000, turns: 6, toolCalls: 8, activity: "读取 /a/b/c.go" },
+		},
+		now,
+		mockTheme,
+		56,
+	).join("\n");
+	assert.match(lines, /已完成/);
+	assert.doesNotMatch(lines, /c\.go/);
+});
+
+test("shortenActivity:绝对路径压成尾部两段 —— 前缀对读的人是零信息", () => {
+	assert.equal(
+		shortenActivity("读取 /Users/kim/Projects/todo-list/internal/keymap/keymap.go"),
+		"读取 …/keymap/keymap.go",
+	);
+	assert.equal(shortenActivity("搜索 TestFoo|TestBar"), "搜索 TestFoo|TestBar", "没有路径就别动它");
+	assert.equal(shortenActivity("浏览 /tmp"), "浏览 /tmp", "本来就短的不加省略号");
 });
