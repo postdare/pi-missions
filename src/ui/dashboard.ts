@@ -15,7 +15,7 @@ import { nearThreshold, thresholdFor } from "../core/breaker.ts";
 import type { EvidenceRecord } from "../store/evidence.ts";
 import type { CheckStage, CheckState, VerifierStatus } from "../store/check.ts";
 import { findTask, type MissionPlan } from "../store/mission.ts";
-import { clip, miniBar, pad, wrap } from "./chrome.ts";
+import { clip, miniBar, packLine, pad, wrap } from "./chrome.ts";
 
 /**
  * 无结论成因 → 给人看的一句话。别用万能兜底:
@@ -45,6 +45,8 @@ export interface EvidenceSummary {
 export interface LineTheme {
 	fg(color: string, s: string): string;
 	bold(s: string): string;
+	/** 背景色。只有选中态用得上,非 TUI 的 entry 卡片没有 */
+	bg?(color: string, s: string): string;
 }
 
 /** 无主题时的恒等着色器 —— 让下面的代码不必到处写 t ? ... : ... */
@@ -251,19 +253,61 @@ export function shortId(missionId: string): string {
 const GOAL_MIN = 24;
 
 /**
- * 主题化状态卡片(输入框上方)。结构:
- *   行1: 短id(accent 粗体) · 档位(dim) · 相位(带色)  goal(截断,占满剩余列) …… 时长+成本(右对齐)
- *   行2: ▸ T2 任务标题(按实际宽度折行,续行悬挂到标题列) · 进度条(多任务) · attempt(≥2 才显示)
- *   行3: 判定进度(CHECK 相位,缩进成任务行的子行)
- *   行4+: 预警(熔断/无结论/换脑,警告色)
+ * 任务标题的「标题头」:在第一个结构断点(`:：(（,,`)之前截。
  *
- * **这张卡的高度是永久成本** —— 它不是一条消息,是常驻 chrome,多出来的每一行都从
- * 聊天区永久扣掉。所以两条规矩:
- *   ① goal 用 `clip` 截断,是全卡唯一允许截断的字段。它全程不变,只需要够认出
- *     "这是哪个 mission";全文在 `/mission status` 的概览里按 `wrap` 折行显示。
- *     曾经这里用过 `wrap`,结果 COLUMNS=56 + 一个正常长度的中文 goal → 12 行常驻。
- *   ② 每一行出栈前都过 `clip(…, width)`。越界不是掉字,是炸 TUI 主循环
- *     (CLAUDE.md「UI 层的四个坑」),而这里的 goal/标题/换脑原因都是外部输入。
+ * `title` 没有任何长度约束(`store/mission.ts` 的 Task,提示词里也没提),
+ * LLM 写出来的几乎都是 `<短名>:<长规格>` 这个形状 ——
+ * 真机上见过 130 列的:「领域模型与 NextDue 纯函数: Todo 增加 Recurrence/DueAt/
+ * 锚点字段与 json tag, IsValidRecurrence、NextDue(anchor,current,recurrence) 含…」。
+ * 冒号后面是规格说明,不是标识;常驻位上要的只是"这是哪个任务"。
+ * 全文在 `/mission status` 的任务区与任务详情页,那儿的高度不是永久成本。
+ *
+ * 截出来太短就退回全文 —— `迁移:` 这种断点认不出任务,不如让 packLine 去截。
+ */
+/**
+ * 焦点落在常驻卡上时的选中态。
+ *
+ * 整行铺 `selectedBg`(CLAUDE.md 的视觉约定:选中态靠背景,不靠字形),但**只铺到
+ * 内容右边一列**,不铺满全宽 —— widget 的 width 被 runtime 按 120 封顶,铺满会在
+ * 200 列的终端上留下一条到 120 就断掉的色带,看着像渲染坏了。
+ *
+ * 主题没给 bg 时退化成行光标 `▸`。这时整行右移两列,是唯一会让版面跳一下的路径 ——
+ * 但"选中了"这件事看不出来比跳两列糟得多,而且真实的 pi 主题都有 bg。
+ *
+ * **不挂按键提示。** 这一行是永久占位,而 ↵/Esc 是人按 ↓ 落焦点时顺手就试出来的;
+ * 把它们常年钉在最显眼的高亮行右边,买到的东西配不上那几列。
+ */
+function highlightRow(t: LineTheme, line: string, width: number): string {
+	if (!t.bg) return clip(`${t.fg("accent", "▸")} ${line}`, width);
+	return t.bg("selectedBg", pad(clip(line, width), Math.min(visibleWidth(line) + 1, width)));
+}
+
+export function taskHeadline(title: string): string {
+	const m = title.match(/^(.{4,}?)\s*[:：(（,，]/);
+	const head = m ? m[1].trim() : title;
+	return visibleWidth(head) >= 12 ? head : title;
+}
+
+/**
+ * 主题化状态卡片(输入框**下方**,`placement: "belowEditor"`)。结构:
+ *   行1: ● 执行 2/6 · T1 标题头 a=2/3 · 16min $0.76 · 短id     ← 恒在,单行密排
+ *   行2: 判定进度(仅 CHECK)/ 侦查扇出(仅扇出中)—— 临时的,跑完就收
+ *   行3+: 预警(熔断临界/无结论/换脑,警告色)—— 只在真要人看的时候出
+ *
+ * **这张卡的高度是永久成本**,而且它现在夹在 pi 自己的 statusline 中间。所以:
+ *   ① 常态**只有一行**,而且是密排(`packLine`),不是卡片 —— 折行、悬挂缩进、
+ *     右对齐出一列账,那些是聊天区卡片的语言,跟隔壁 pi 的状态行撞在一起就是一坨。
+ *     隔壁 `board.ts` 的收起态先立的规矩,这里照抄:一行说完,说不完就少说。
+ *   ② 常量字段不占常驻位:档位不显示(`/missions` 有),goal 只在还没有任务时
+ *     顶上那个位置(DEFINE/PLAN),任务标题只显示标题头。
+ *   ③ 进度不画条,只留 `2/6` —— 8 列的条说的是同一件事,而且 0/N 时整条是横线,
+ *     紧挨着别的文字会被读成"分隔线断了"。
+ *   ④ 每一行出栈前都过 `clip(…, width)`。越界不是掉字,是炸 TUI 主循环
+ *     (CLAUDE.md「UI 层的四个坑」),而 goal/标题/换脑原因都是外部输入。
+ *
+ * `selected` = 焦点落在这一行上(空输入框按 ↓,见 `ui/widget-keys.ts` 的焦点链)。
+ * 只有这时才画选中态 —— 平时画就是在邀请人去按上下键,
+ * 而那时焦点还在输入框里(`test/render.test.ts` 卡着这条)。
  *
  * 相位图标是 `◆`(判定)时,不要在别处再放 `◆` —— 一屏三个同形字符三种含义。
  */
@@ -275,6 +319,7 @@ export function renderWidgetCard(
 	width = 120,
 	checkState?: CheckState | null,
 	scout?: LiveScoutState | null,
+	selected = false,
 ): string[] {
 	const task = state.currentTask ? findTask(plan, state.currentTask) : undefined;
 	const t = state.currentTask ? state.tasks[state.currentTask] : undefined;
@@ -282,103 +327,101 @@ export function renderWidgetCard(
 	const done = Object.values(state.tasks).filter((x) => x.status === "done").length;
 	const total = state.taskOrder.length;
 	const cost = costTotal(state);
-	const sep = theme.fg("dim", " · ");
-
-	// 行 1:左半 + 右对齐(时长/成本)。角色不显示 —— ROLE_OF 是 phase 的纯函数,
-	// ● 执行 恒等于 executor,同一个事实说两遍。
-	// id 前不再放 ◆:CHECK 的相位图标就是 ◆,同一行两个 ◆ 是两个意思。
-	const left = [
-		theme.fg("accent", theme.bold(shortId(state.missionId))),
-		theme.fg("dim", state.tier),
-		phaseBadge(theme, state.phase),
-	].join(sep);
-
-	const rightBits: string[] = [];
-	const elapsed = plan.createdAt ? fmtDuration(plan.createdAt, now) : null;
-	if (elapsed && elapsed !== "0min") rightBits.push(theme.fg("dim", elapsed));
-	if (cost >= 0.005) rightBits.push(theme.fg("accent", `$${cost.toFixed(2)}`));
-	else {
-		// 网关不报价时美元恒 0,token 才是真实消耗
-		const tok = tokenTotal(state);
-		if (tok > 0) rightBits.push(theme.fg("accent", `${formatTokens(tok)} tok`));
-	}
-	const right = rightBits.join(" ");
-
-	const leftW = visibleWidth(left);
-	const rightW = visibleWidth(right);
 	const lines: string[] = [];
 
-	// goal 填左半与右侧账目之间的空当;预算 = 全宽 − 左半 − 一个空格 − 右侧 − 两格间隙。
-	// 装不下就整条不显示(见文件头 ①):goal 是常量字段,不值得用高度去换。
-	const goalBudget = width - leftW - 1 - rightW - (rightW > 0 ? 2 : 0);
-	const goal = plan.goal && goalBudget >= GOAL_MIN ? clip(plan.goal, goalBudget) : "";
-	const head = goal ? `${left} ${goal}` : left;
-	const headW = visibleWidth(head);
-	lines.push(rightW > 0 && headW + rightW < width ? pad(head, width - rightW) + right : clip(head, width));
+	// ── 行 1(恒在,单行密排)。左起即优先级,窄了从右往左丢 ──
 
-	// 行 2 的尾部固定位:进度条(多任务才有)+ attempt。
-	// attempt 在 1/N 时收起 —— 跑到 1 还什么都没失败,常显只会训练出选择性失明,
-	// 而真正该跳出来的临界另有警告行。
-	const tailBits: string[] = [];
-	if (total > 1) tailBits.push(`${miniBar(theme, done, total, 8)} ${theme.fg("dim", `${done}/${total}`)}`);
-	if (t && ["do", "check", "act"].includes(state.phase) && t.attempts >= 2) {
-		const near = nearThreshold(t, state.tier);
-		tailBits.push(theme.fg(near ? "warning" : "dim", `attempt ${t.attempts}/${threshold}`));
-	}
-	const tail = tailBits.join(sep);
-	const tailW = tail ? visibleWidth(tail) + visibleWidth(sep) : 0;
+	// 锚:相位 + 进度。「还活着吗 / 到哪了」,任何宽度下都不丢。
+	// 角色不显示 —— ROLE_OF 是 phase 的纯函数,● 执行 恒等于 executor,同一事实说两遍。
+	// 进度只留数字不画条(见文件头 ③);单任务(quick)连数字也不要,1/1 是废话。
+	const anchor = phaseBadge(theme, state.phase) + (total > 1 ? theme.fg("dim", ` ${done}/${total}`) : "");
 
-	// 行 2:· T2 任务标题。标题按实际剩余宽度折行(CLAUDE.md:任务标题属于
-	// "一律折行"那一档),续行悬挂到标题列 —— 悬挂量必须等于 "  " + 前缀的实际宽度,
-	// 差一列不会报错,只会看着像另起了一段。
-	//
-	// **这里刻意不用 chrome.ts 的 CURSOR(▸)**:那个字形在 panel / ask-review /
+	// 当前任务:accent 的 id + 标题头。attempt 在 1/N 时收起 —— 跑到 1 还什么都没失败,
+	// 常显只会训练出选择性失明,而真正该跳出来的临界另有警告行。
+	// **刻意不用 chrome.ts 的 CURSOR(▸)**:那个字形在 panel / ask-review /
 	// human-review 里的含义是"这一行被选中了",而常驻卡收不了任何按键
 	// (setWidget 的组件从不进 pi-tui 的 focus 链)。用它去标当前任务,就是在
 	// 邀请人去按上下键 —— 真机上有人这么试过,那是界面在骗人。
-	if (task) {
-		const prefix = `${theme.fg("accent", "·")} ${task.id} `;
-		const prefixW = visibleWidth(prefix);
-		const titleBudget = Math.max(12, width - 2 - prefixW - tailW);
-		// 折两行封顶。标题该折不该截(CLAUDE.md),但这张卡的高度是永久成本:
-		// 56 列时预算只剩 18,一个正常标题能折出 4 行常驻。宽 ≥72 基本折不到第二行,
-		// 真折到第三行的窄终端里,全文在 /mission status 的任务区。
-		const titleParts = wrap(task.title, titleBudget, 2);
-		lines.push(clip(`  ${prefix}${titleParts[0]}${tail ? sep + tail : ""}`, width));
-		const hang = " ".repeat(2 + prefixW);
-		for (const part of titleParts.slice(1)) lines.push(clip(hang + part, width));
-	} else if (state.currentTask) {
-		// 计划里查不到这个任务(plan 与 state 漂移):id 照显,别把整行吞掉
-		lines.push(clip(`  ${theme.fg("accent", "·")} ${state.currentTask}${tail ? sep + tail : ""}`, width));
-	} else if (tail) {
-		lines.push(clip(`  ${tail}`, width));
+	let attempt = "";
+	if (t && ["do", "check", "act"].includes(state.phase) && t.attempts >= 2) {
+		const near = nearThreshold(t, state.tier);
+		attempt = " " + theme.fg(near ? "warning" : "dim", `a=${t.attempts}/${threshold}`);
+	}
+	let focus = "";
+	if (task) focus = `${theme.fg("accent", task.id)} ${taskHeadline(task.title)}${attempt}`;
+	// 计划里查不到这个任务(plan 与 state 漂移):id 照显,别把整段吞掉
+	else if (state.currentTask) focus = theme.fg("accent", state.currentTask) + attempt;
+	// 还没有任务(DEFINE/PLAN):那个位置给 goal。一旦进 DO,人要看的是"在干哪个任务",
+	// 不是"这个 mission 总目标是什么" —— 后者不变,全文在 /mission status。
+	else if (plan.goal && width >= GOAL_MIN) focus = theme.fg("dim", plan.goal);
+
+	// 账:时长 + 花费。两者绑成一截,要丢一起丢。
+	const acct: string[] = [];
+	const elapsed = plan.createdAt ? fmtDuration(plan.createdAt, now) : null;
+	if (elapsed && elapsed !== "0min") acct.push(elapsed);
+	if (cost >= 0.005) acct.push(`$${cost.toFixed(2)}`);
+	else {
+		// 网关不报价时美元恒 0,token 才是真实消耗
+		const tok = tokenTotal(state);
+		if (tok > 0) acct.push(`${formatTokens(tok)} tok`);
 	}
 
-	// 判定进度:缩进成任务行的子行。刻意不带图标 —— 相位徽标已经是 ◆ 判定,
+	const head = packLine(
+		theme,
+		[
+			anchor,
+			focus,
+			acct.length > 0 ? theme.fg("dim", acct.join(" ")) : "",
+			// id 排最后:同时只有一个活跃 mission(CURRENT 是单指针),它是全行最贵的
+			// 常量(17 列起)。留着是为了认出"这块属于哪个 mission",窄了第一个丢。
+			theme.fg("dim", shortId(state.missionId)),
+		],
+		width,
+		focus ? 1 : -1,
+	);
+	lines.push(selected ? highlightRow(theme, head, width) : head);
+
+	// 判定进度:行 1 的子行,缩进 2。刻意不带图标 —— 相位徽标已经是 ◆ 判定,
 	// 这里再放一个 ◆ 就是一屏三个同形字符(见文件头)。
+	// 它只在 CHECK 期间在,跑完就收,所以这一行的高度是临时的,可以出。
 	if (state.phase === "check" && checkState?.taskId === state.currentTask) {
-		const stage = STAGE_LABELS[checkState.stage];
 		const elapsed = fmtCheckDuration(now - checkState.startedAt);
-		const current = checkState.currentBranch ? ` · ${checkState.currentBranch}` : "";
 		const doneCount = checkState.completedBranches.length;
-		const completed = doneCount > 0 ? ` · 脚本 ${doneCount} 项` : "";
 		lines.push(
-			clip(`    ${theme.fg("accent", stage)} ${theme.fg("dim", `${elapsed}${completed}${current}`)}`, width),
+			"  " +
+				packLine(
+					theme,
+					[
+						theme.fg("accent", STAGE_LABELS[checkState.stage]) + " " + theme.fg("dim", elapsed),
+						checkState.currentBranch ? theme.fg("dim", checkState.currentBranch) : "",
+						doneCount > 0 ? theme.fg("dim", `脚本 ${doneCount} 项`) : "",
+					],
+					Math.max(1, width - 2),
+				),
 		);
 	}
 
-	// 侦查扇出进度:与判定进度同一个位置、同一个形状(缩进 4、无图标)。
+	// 侦查扇出进度:与判定进度同一个位置、同一个形状(缩进 2、无图标、不画条)。
 	// **只占一行** —— 每路一行的话 4 路就是 4 行常驻,而这张卡的高度是永久成本;
 	// 逐路的明细在工具调用块里(ui/scout-view.ts),那儿的高度是临时的。
 	if (scout && scout.progress.total > 0) {
 		const p = scout.progress;
-		const bar = miniBar(theme, p.done, p.total, 8);
 		const el = fmtCheckDuration(now - scout.startedAt);
-		// 点名一路仍在跑的 —— 只报 x/y 的话,卡住的时候看不出卡在哪
+		// 点名一路仍在跑的 —— 只报 x/y 的话,卡住的时候看不出卡在哪。
+		// 它排在账(耗时)前面:卡在哪比跑了多久重要,窄了先丢耗时。
 		const first = p.running[0];
-		const who = first ? ` · ${first} ${p.activity[first] ?? ""}`.trimEnd() : "";
 		lines.push(
-			clip(`    ${theme.fg("accent", "侦查扇出")} ${bar} ${theme.fg("dim", `${p.done}/${p.total} · ${el}${who}`)}`, width),
+			"  " +
+				packLine(
+					theme,
+					[
+						theme.fg("accent", "侦查扇出") + " " + theme.fg("dim", `${p.done}/${p.total}`),
+						first ? theme.fg("dim", `${first} ${p.activity[first] ?? ""}`.trimEnd()) : "",
+						theme.fg("dim", el),
+					],
+					Math.max(1, width - 2),
+					1,
+				),
 		);
 	}
 

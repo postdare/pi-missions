@@ -12,8 +12,9 @@
  * 1. **widget 有 10 行硬上限**(pi 的 `MAX_WIDGET_LINES`,超出会被截断成
  *    "... (widget truncated)")。所以看板必须自己分页,不能靠内容自然长度。
  * 2. **widget 收不了按键**(`setWidget` 的组件从不进 pi-tui 的 focus 链)。
- *    按键要靠 `ctx.ui.onTerminalInput` 在外面截,而那是另一个文件的事 ——
- *    这里只是纯函数:接一个描述"当前该显示什么"的对象,返回行数组。
+ *    按键判定在 `widget-keys.ts`(整个 widget 栈共用一个焦点链:输入框 → 常驻卡
+ *    → 看板),由 runtime 经 `onTerminalInput` 截;这里只是纯函数:接一个描述
+ *    "当前该显示什么"的对象,返回行数组。
  *
  * 所以这个模块不知道按键、不持有状态。展开与否、选中第几行,都由调用方传进来。
  */
@@ -168,8 +169,12 @@ export function renderBoard(v: BoardView, t: LineTheme): string[] {
 	const win = windowLines(rows, v.scroll, BOARD_BODY_LINES, { start: sel, end: sel + 1 });
 
 	const pos = trace.length > BOARD_BODY_LINES ? `${win.start + 1}-${win.end}/${trace.length}` : `${trace.length} 条`;
+	const hints =
+		v.scout && v.scout.progress.total > 0
+			? ["↑↓ 选 · ↵ 详情", "↑↓ · ↵"]
+			: ["↑↓ 选 · ↵ 详情 · esc 收起", "↑↓ · ↵ · esc"];
 	return [
-		fit(t, head, ["↑↓ 选 · ↵ 详情 · esc 收起", "↑↓ · ↵ · esc"], v.width),
+		fit(t, head, hints, v.width),
 		...win.lines,
 		clip(`  ${t.fg("dim", pos)}`, v.width),
 	];

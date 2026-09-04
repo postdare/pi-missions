@@ -25,6 +25,7 @@ import { renderAskReview } from "../src/ui/ask-review.ts";
 import { renderHumanReview } from "../src/ui/human-review.ts";
 import type { ModelsPageData } from "../src/ui/models-page.ts";
 import { renderWidgetCard } from "../src/ui/dashboard.ts";
+import { renderBoardDetail } from "../src/ui/board-detail.ts";
 import { CURSOR } from "../src/ui/chrome.ts";
 
 const theme = {
@@ -719,9 +720,10 @@ test("renderHumanReview:两态 × 各宽度 × 各选中态都恰好铺满,且�
 });
 
 // ▸ 在 chrome.ts 是 CURSOR —— panel / ask-review / human-review 用它标「这一行被选中」。
-// 而常驻卡收不了任何按键(setWidget 的组件从不进 pi-tui 的 focus 链),
-// 用它去标当前任务就是在邀请人按上下键。真机上有人这么试过。
-test("常驻卡不使用选中光标的字形 —— 它不可选中,别给假信号", () => {
+// 常驻卡现在**可以**被选中了(空输入框 ↓ 落焦点,见 ui/widget-keys.ts),
+// 但那是一个显式的状态。没被选中时出现 CURSOR 仍然是在骗人:
+// 邀请人去按上下键,而此刻焦点还在输入框里。真机上有人这么试过。
+test("常驻卡未被选中时不出现选中光标 —— 焦点不在它身上,别给假信号", () => {
 	const st = initialState({ missionId: "m", tier: "standard", taskOrder: ["T1", "T2"] });
 	st.phase = "do" as never;
 	st.currentTask = "T1";
@@ -735,4 +737,37 @@ test("常驻卡不使用选中光标的字形 —— 它不可选中,别给假�
 		!renderWidgetCard(theme as never, REVIEW_PLAN, drift, NOW, 80).join("\n").includes(CURSOR),
 		"漂移分支也不能用 CURSOR",
 	);
+});
+
+test("常驻卡被选中时必须看得出来,而且不越界、不把行顶掉", () => {
+	const st = initialState({ missionId: "m", tier: "standard", taskOrder: ["T1", "T2"] });
+	st.phase = "do" as never;
+	st.currentTask = "T1";
+	for (const width of WIDTHS) {
+		const plain = renderWidgetCard(theme as never, REVIEW_PLAN, st, NOW, width);
+		const picked = renderWidgetCard(theme as never, REVIEW_PLAN, st, NOW, width, null, null, true);
+		assert.equal(picked.length, plain.length, `w=${width} 选中不许改变行数`);
+		assert.notEqual(picked[0], plain[0], `w=${width} 选中态必须和平常不一样`);
+		for (const l of picked) {
+			assert.ok(visibleWidth(l) <= width, `w=${width} 选中态越界(会炸 TUI):${visibleWidth(l)}`);
+		}
+	}
+	// 主题没给 bg 的退化路径:改用行光标,同样不许越界
+	const noBg = { fg: theme.fg, bold: theme.bold };
+	for (const width of WIDTHS) {
+		const picked = renderWidgetCard(noBg as never, REVIEW_PLAN, st, NOW, width, null, null, true);
+		assert.ok(picked[0].includes(CURSOR), `w=${width} 没有 bg 就得靠 CURSOR 标出来`);
+		assert.ok(visibleWidth(picked[0]) <= width, `w=${width} 退化路径越界`);
+	}
+});
+
+test("动作详情页盒行恰好铺满", () => {
+	const line = "读取 /Users/kim/Projects/todo-list/internal/keymap/keymap.go";
+	for (const width of WIDTHS) {
+		assertWidths(
+			renderBoardDetail({ theme, width, rows: 24, line }).lines,
+			Math.max(40, width),
+			`board-detail w=${width}`,
+		);
+	}
 });

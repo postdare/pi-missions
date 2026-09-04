@@ -21,6 +21,7 @@ import { renderAskReview } from "../src/ui/ask-review.ts";
 import { renderHumanReview } from "../src/ui/human-review.ts";
 import { renderScoutCall, renderScoutResult } from "../src/ui/scout-view.ts";
 import { renderBoard } from "../src/ui/board.ts";
+import { renderBoardDetail } from "../src/ui/board-detail.ts";
 import type { ScoutFinding } from "../src/core/scout.ts";
 
 /** docs/themes.md 的前景色名(仅列本项目可能用到的部分) */
@@ -102,6 +103,15 @@ test("状态面板与 widget 的颜色名都合法(含 spike / define 相位)", 
 		s.currentTask = phase === "done" ? null : "T2";
 		s.tasks.T2 = { ...s.tasks.T2, kind: "spike", status: "running", attempts: 1 };
 		assert.doesNotThrow(() => renderWidgetCard(strictTheme, plan, s, Date.now(), 100), `widget @${phase}`);
+		// 选中态走 bg("selectedBg") —— 背景色名写错和前景一样是整个 pi 进程崩掉
+		assert.doesNotThrow(
+			() => renderWidgetCard(strictTheme, plan, s, Date.now(), 100, null, null, true),
+			`widget(选中) @${phase}`,
+		);
+		assert.doesNotThrow(
+			() => renderWidgetCard({ ...strictTheme, bg: undefined }, plan, s, Date.now(), 100, null, null, true),
+			`widget(选中·无 bg 的退化路径) @${phase}`,
+		);
 		assert.doesNotThrow(
 			() =>
 				renderWidgetCard(strictTheme, plan, s, Date.now(), 100, null, {
@@ -409,5 +419,20 @@ test("子 agent 看板的所有形态都不会用到不存在的颜色名", () =
 				`scout expanded=${expanded} width=${width}`,
 			);
 		}
+	}
+});
+
+test("动作详情页在 strictTheme 下颜色名合法", () => {
+	for (const width of [40, 56, 96]) {
+		assert.doesNotThrow(
+			() =>
+				renderBoardDetail({
+					theme: strictTheme,
+					width,
+					rows: 24,
+					line: "读取 /Users/kim/Projects/todo-list/internal/keymap/keymap.go",
+				}),
+			`board-detail width=${width}`,
+		);
 	}
 });

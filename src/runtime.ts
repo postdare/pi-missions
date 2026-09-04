@@ -9,7 +9,7 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
 import * as crypto from "node:crypto";
-import { truncateToWidth } from "@earendil-works/pi-tui";
+import { isKeyRelease, truncateToWidth } from "@earendil-works/pi-tui";
 import type { Effect, MissionEvent, MissionState, Phase, Role, Tier, TransitionResult } from "./core/types.ts";
 import { initialState, transition, ROLE_OF } from "./core/machine.ts";
 import { evaluateCriterion } from "./core/criterion.ts";
@@ -37,6 +37,10 @@ import { appendLog } from "./store/log.ts";
 import { computeGitTreeFingerprint, ensureInfoExclude, isGitRepo } from "./store/git.ts";
 import { loadCheckState, removeCheckState, type CheckState } from "./store/check.ts";
 import { renderWidgetCard } from "./ui/dashboard.ts";
+import { boardActive, boardTrace, renderBoard } from "./ui/board.ts";
+import { WIDGET_NAV_IDLE, classifyWidgetKey, decideWidgetNav, type WidgetNavState } from "./ui/widget-keys.ts";
+import { openBoardDetail } from "./ui/board-detail.ts";
+import { customUiOpen, wrapUiForBoard } from "./ui/custom-depth.ts";
 import type { LiveScoutState } from "./core/scout.ts";
 import {
 	renderStateCard,
@@ -144,6 +148,14 @@ export class Runtime {
 	activeVerifierControl: VerifierControl | null = null;
 	private checkPromises = new WeakMap<ActiveMission, Promise<void>>();
 	private stagedPlan: StagedPlan | null = null;
+	private widgetUnsub: (() => void) | null = null;
+	private widgetNav: WidgetNavState = WIDGET_NAV_IDLE;
+	private widgetCtx: any = null;
+	/**
+	 * 常驻卡上按 ↵ 打开 /mission status。由 index.ts 装配 ——
+	 * 状态页在 commands.ts,而 commands.ts 依赖 Runtime,反向 import 会成环。
+	 */
+	openStatus: ((ctx: any) => void | Promise<void>) | null = null;
 
 	// internal:pi/cwd 是 Runtime 的注入面,CheckRunner 经此调用 exec/notify
 	readonly pi: any;
@@ -1608,23 +1620,126 @@ export class Runtime {
 		const a = this.active;
 		if (!a || a.state.phase === "done" || a.state.phase === "halted") {
 			ctx.ui.setWidget("missions", undefined);
+			ctx.ui.setWidget("missions-board", undefined);
+			this.unbindWidgetKeys();
 			return;
 		}
 		const checkState =
 			this.liveCheckState ?? (a.inMemory ? null : loadCheckState(statePaths(this.layout, a.state.missionId).checkJson));
-		// 主题化状态卡片(颜色/对齐/右对齐时长成本);widget width 不可信,再按 120 封顶
-		ctx.ui.setWidget("missions", (tui: any, theme: any) => {
-			const ticking = checkState && checkState.stage !== "completed" && checkState.stage !== "error";
-			const timer = ticking ? setInterval(() => tui.requestRender(), 500) : null;
-			timer?.unref();
-			return {
-				render: (width: number) =>
-					renderWidgetCard(theme, a.plan, a.state, Date.now(), Math.min(width, 120), checkState, this.liveScout),
-				invalidate: () => {},
-				dispose: () => {
-					if (timer) clearInterval(timer);
-				},
-			};
+		// 有活跃 mission 就挂键 —— 常驻卡本身也是可选中的一行(焦点链的第一站),
+		// 不再等到有子 agent 在跑。监听器因此常驻,三层守卫的正确性就更要紧:
+		// 拦错了是输入框方向键失灵,判定全在 ui/widget-keys.ts 的纯函数里。
+		this.bindWidgetKeys(ctx);
+		// 主题化状态卡片;widget width 不可信,再按 120 封顶
+		ctx.ui.setWidget(
+			"missions",
+			(tui: any, theme: any) => {
+				const ticking = checkState && checkState.stage !== "completed" && checkState.stage !== "error";
+				const timer = ticking ? setInterval(() => tui.requestRender(), 500) : null;
+				timer?.unref();
+				return {
+					render: (width: number) =>
+						renderWidgetCard(
+							theme,
+							a.plan,
+							a.state,
+							Date.now(),
+							Math.min(width, 120),
+							checkState,
+							this.liveScout,
+							this.widgetNav.focus === "card",
+						),
+					invalidate: () => {},
+					dispose: () => {
+						if (timer) clearInterval(timer);
+					},
+				};
+			},
+			{ placement: "belowEditor" },
+		);
+		this.refreshBoardWidget(ctx, checkState);
+	}
+
+	private refreshBoardWidget(ctx: any, checkState: CheckState | null): void {
+		const view = { check: checkState, scout: this.liveScout };
+		if (!boardActive(view)) {
+			ctx.ui.setWidget("missions-board", undefined);
+			return;
+		}
+		ctx.ui.setWidget(
+			"missions-board",
+			(tui: any, theme: any) => {
+				const timer = setInterval(() => tui.requestRender(), 500);
+				timer.unref();
+				return {
+					render: (width: number) =>
+						renderBoard(
+							{
+								expanded: this.widgetNav.focus === "board",
+								selected: this.widgetNav.selected,
+								scroll: this.widgetNav.scroll,
+								check: checkState,
+								scout: this.liveScout,
+								now: Date.now(),
+								width: Math.min(width, 120),
+							},
+							theme,
+						),
+					invalidate: () => {},
+					dispose: () => clearInterval(timer),
+				};
+			},
+			{ placement: "belowEditor" },
+		);
+	}
+
+	private unbindWidgetKeys(): void {
+		this.widgetUnsub?.();
+		this.widgetUnsub = null;
+		this.widgetCtx = null;
+		this.widgetNav = WIDGET_NAV_IDLE;
+	}
+
+	private bindWidgetKeys(ctx: any): void {
+		if (typeof ctx?.ui?.onTerminalInput !== "function") return;
+		this.widgetCtx = ctx;
+		wrapUiForBoard(ctx.ui);
+		if (this.widgetUnsub) return;
+		this.widgetUnsub = ctx.ui.onTerminalInput((data: string) => {
+			if (isKeyRelease(data)) return;
+			const uiCtx = this.widgetCtx;
+			if (!uiCtx) return;
+			const a = this.active;
+			const checkState =
+				this.liveCheckState ??
+				(a && !a.inMemory ? loadCheckState(statePaths(this.layout, a.state.missionId).checkJson) : null);
+			const view = { check: checkState, scout: this.liveScout };
+			let editorEmpty = false;
+			try {
+				const text = uiCtx.ui.getEditorText?.();
+				editorEmpty = typeof text === "string" && text.length === 0;
+			} catch {
+				editorEmpty = false;
+			}
+			const decided = decideWidgetNav({
+				key: classifyWidgetKey(data),
+				editorEmpty,
+				customUiOpen: customUiOpen(),
+				hasCard: !!a && a.state.phase !== "done" && a.state.phase !== "halted",
+				boardActive: boardActive(view),
+				allowEscape: !this.liveScout,
+				traceLen: boardTrace(view).length,
+				state: this.widgetNav,
+			});
+			this.widgetNav = decided.state;
+			if (!decided.consume) return;
+			if (decided.openStatus) void this.openStatus?.(uiCtx);
+			if (decided.openDetail) {
+				const line = boardTrace(view)[decided.state.selected] ?? "";
+				void openBoardDetail(uiCtx, line);
+			}
+			this.refreshWidget(uiCtx);
+			return { consume: true };
 		});
 	}
 

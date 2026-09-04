@@ -147,6 +147,7 @@ test("侦查扇出走同一块看板,标题与轨迹都换成扇出口径", () =
 	assert.match(out, /1\/4/);
 	assert.match(out, /S2 读 a\.go/);
 	assert.deepEqual(boardTrace(v), ["S1 已交回结论", "S2 读 a.go"]);
+	assert.doesNotMatch(out, /esc 收起/, "scout 运行时 Esc 留给宿主中断,不能提示成收起");
 });
 
 // ── 滚动位置 ──────────────────────────────────────────────────

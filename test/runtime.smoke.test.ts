@@ -412,12 +412,37 @@ test("startCheck 吸收后台异常并允许重试", async () => {
 	assert.ok(ctx.notifications.some((message) => message.includes("background failed")));
 });
 
+test("状态卡与子 agent 看板都固定在编辑器下方", async () => {
+	const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "pi-missions-smoke-"));
+	const { ctx, rt } = await newMission(tmp);
+	const placements = new Map<string, unknown>();
+	(ctx.ui as any).setWidget = (key: string, _content: unknown, options: unknown) => {
+		placements.set(key, options);
+	};
+
+	rt.refreshWidget(ctx);
+	assert.deepEqual(placements.get("missions"), { placement: "belowEditor" });
+
+	(rt as any).liveCheckState = {
+		taskId: "T1",
+		attempt: 1,
+		startedAt: Date.now(),
+		updatedAt: Date.now(),
+		stage: "running_verifier",
+		completedBranches: [],
+		verifier: { status: "running", startedAt: Date.now(), trace: ["读取 a.ts"] },
+		summary: "核验中",
+	};
+	rt.refreshWidget(ctx);
+	assert.deepEqual(placements.get("missions-board"), { placement: "belowEditor" });
+});
+
 test("CHECK widget 运行时刷新计时,销毁后停止", async () => {
 	const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "pi-missions-smoke-"));
 	const { ctx, rt } = await newMission(tmp);
 	let factory: ((tui: any, theme: any) => { dispose?: () => void }) | undefined;
-	(ctx.ui as any).setWidget = (_key: string, content: typeof factory) => {
-		factory = content;
+	(ctx.ui as any).setWidget = (key: string, content: typeof factory) => {
+		if (key === "missions") factory = content;
 	};
 	rt.active!.state.phase = "check";
 	(rt as any).liveCheckState = {
@@ -445,6 +470,64 @@ test("CHECK widget 运行时刷新计时,销毁后停止", async () => {
 	const stoppedAt = renders;
 	await new Promise((resolve) => setTimeout(resolve, 550));
 	assert.equal(renders, stoppedAt);
+});
+
+test("有活跃 mission 就监听按键:↓ 选中常驻卡,↓↓ 展开看板,↵ 开状态页", async () => {
+	const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "pi-missions-smoke-"));
+	const { ctx, rt } = await newMission(tmp);
+	let listener: ((data: string) => { consume: true } | undefined) | undefined;
+	let unsubs = 0;
+	let statusOpened = 0;
+	rt.openStatus = () => void (statusOpened += 1);
+	(ctx.ui as any).getEditorText = () => "";
+	(ctx.ui as any).onTerminalInput = (fn: typeof listener) => {
+		listener = fn;
+		return () => {
+			listener = undefined;
+			unsubs += 1;
+		};
+	};
+
+	// 没有任何子 agent 在跑 —— 监听器照样要挂上,常驻卡本身就是焦点链的第一站
+	rt.refreshWidget(ctx);
+	assert.ok(listener, "有活跃 mission 就要挂按键监听");
+	assert.deepEqual(listener!("\x1b[B"), { consume: true });
+	assert.equal((rt as any).widgetNav.focus, "card");
+	// 卡上按 ↵ 开状态页
+	listener!("\r");
+	assert.equal(statusOpened, 1);
+	// 没有看板时再按 ↓ 停在卡上
+	listener!("\x1b[B");
+	assert.equal((rt as any).widgetNav.focus, "card");
+
+	// 核验跑起来 → 再按 ↓ 才进看板
+	(rt as any).liveCheckState = {
+		taskId: "T1",
+		attempt: 1,
+		startedAt: Date.now(),
+		updatedAt: Date.now(),
+		stage: "running_verifier",
+		completedBranches: [],
+		verifier: { status: "running", startedAt: Date.now(), trace: ["第一步", "第二步"] },
+		summary: "核验中",
+	};
+	rt.refreshWidget(ctx);
+	listener!("\x1b[B");
+	assert.equal((rt as any).widgetNav.focus, "board");
+
+	// 核验结束 → 焦点收回常驻卡,监听器仍在(mission 还活着)
+	(rt as any).liveCheckState.verifier.status = "completed";
+	rt.refreshWidget(ctx);
+	listener!("\x1b[A");
+	assert.equal((rt as any).widgetNav.focus, "none", "看板没了,↑ 从卡上直接交还输入框");
+	assert.ok(listener, "mission 还活着,监听器不摘");
+
+	// mission 收尾 → 解绑,焦点清空
+	rt.active!.state.phase = "done";
+	rt.refreshWidget(ctx);
+	assert.equal(listener, undefined);
+	assert.equal(unsubs, 1);
+	assert.deepEqual((rt as any).widgetNav, { focus: "none", selected: -1, scroll: 0 });
 });
 
 test("计划不合法时被 writePlan 拒绝", async () => {

@@ -1,5 +1,7 @@
 /**
  * widget 离线预览:不起 pi,直接把常驻状态卡渲染到 stdout。
+ * 卡是单行密排的(placement: "belowEditor",夹在 pi 自己的 statusline 中间),
+ * 所以这里主要看的是「窄了先丢什么」——从右往左:id → 账 → 进度。
  * 这是唯一没有真机交互的渲染路径,改 dashboard.ts 的 renderWidgetCard 后先看这里。
  *
  * 用法:
@@ -7,6 +9,7 @@
  *   COLUMNS=56 node --experimental-strip-types scripts/preview-widget.ts  # 窄终端
  *   node --experimental-strip-types scripts/preview-widget.ts check      # 判定相位
  *   node --experimental-strip-types scripts/preview-widget.ts warn       # 熔断临界 + 换脑挂起
+ *   node --experimental-strip-types scripts/preview-widget.ts sel        # 焦点落在卡上(空输入框按 ↓)
  */
 import { renderWidgetCard } from "../src/ui/dashboard.ts";
 import { initialState } from "../src/core/machine.ts";
@@ -16,6 +19,7 @@ import type { MissionPlan } from "../src/store/mission.ts";
 const theme = {
 	fg: (_c: string, s: string) => `\x1b[90m${s}\x1b[0m`,
 	bold: (s: string) => `\x1b[1m${s}\x1b[0m`,
+	bg: (_c: string, s: string) => `\x1b[44m${s}\x1b[49m`,
 };
 
 const width = Number(process.env.COLUMNS) || 120;
@@ -34,7 +38,9 @@ const plan: MissionPlan = {
 				{ id: "T1", title: "引入 JwtProvider 与密钥轮换", verify: ["compile"] },
 				{
 					id: "T2",
-					title: "FirstScreen 双屏轨道:ScreenLayout 与 HomeLinkList 的分组拖拽坐标体系迁移",
+					// 真机上那条把常驻卡撑成三行的标题(130 列),留作最坏情况的样板
+					title:
+						"领域模型与 NextDue 纯函数: Todo 增加 Recurrence/DueAt/锚点字段与 json tag,IsValidRecurrence、NextDue(anchor,current,recurrence) 含每周锚点回绕",
 					verify: ["auth-integration"],
 				},
 			],
@@ -77,6 +83,6 @@ if (mode === "warn") {
 	s.pendingHandoff = "executor 模型连续同签名失败,建议 escalate L2";
 }
 
-const lines = renderWidgetCard(theme, plan, s, Date.now(), width, check);
+const lines = renderWidgetCard(theme, plan, s, Date.now(), width, check, null, mode === "sel");
 console.log(`── width=${width} mode=${mode} ──`);
 console.log(lines.join("\n"));

@@ -137,6 +137,34 @@ export function miniBar(t: ChromeTheme, done: number, total: number, width: numb
 }
 
 /**
+ * 单行密排:` · ` 连接,放不下就按优先级从右往左丢。
+ *
+ * 常驻 chrome(输入框下方那几行)用的排版语言 —— 它和聊天区的卡片不是一回事:
+ * 那里可以折行、可以悬挂缩进、可以右对齐出一列账;这里每一行都是**永久成本**,
+ * 只能一行说完,说不完就少说。`board.ts` 的收起态先立的规矩,常驻状态卡照抄。
+ *
+ * parts 从最重要排到最次要,parts[0] 是锚、永远保留(放不下由 clip 兜)。
+ * `clipIndex` 指定一项在被丢掉之前先试着截一截:那通常是"现在在干什么",
+ * 它比排在后面的账目重要得多,半截也比没有强。
+ */
+export function packLine(t: ChromeTheme, parts: string[], width: number, clipIndex = -1): string {
+	const list = parts.filter(Boolean);
+	const sep = t.fg("dim", " · ");
+	for (let keep = list.length; keep > 1; keep--) {
+		const line = list.slice(0, keep).join(sep);
+		if (visibleWidth(line) <= width) return line;
+	}
+	const anchor = clip(list[0] ?? "", width);
+	const focus = clipIndex > 0 ? list[clipIndex] : undefined;
+	if (focus) {
+		// 截到认不出就别截了 —— `T1 领域模…` 帮不上忙,还白占列(与 GOAL_MIN 同一条道理)
+		const budget = width - visibleWidth(anchor) - 3;
+		if (budget >= 12) return `${anchor}${sep}${clip(focus, budget)}`;
+	}
+	return anchor;
+}
+
+/**
  * 按可见宽度折行。拉丁文优先在空格处断,中文没有空格就硬断:目标/失败原因这类
  * 长句截断等于把最重要的信息丢掉,折行才是对的。断行规则(含 CJK 与字素簇)由
  * pi-tui 统一维护,这里只补一个 maxLines 夹取。

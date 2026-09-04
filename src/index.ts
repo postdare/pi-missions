@@ -11,7 +11,7 @@
 import { Runtime } from "./runtime.ts";
 import { renderStateCard } from "./briefs.ts";
 import { registerMissionTools } from "./tools.ts";
-import { registerCommands } from "./commands.ts";
+import { openMissionStatus, registerCommands } from "./commands.ts";
 import { TextCard, renderLogCard, renderVerdictCard, type VerdictCardData } from "./ui/renderer.ts";
 import { phasePromptFor } from "./phase-prompts.ts";
 
@@ -19,7 +19,12 @@ export default function (pi: any) {
 	let rt: Runtime | null = null;
 
 	const runtime = (cwd: string): Runtime => {
-		if (!rt) rt = new Runtime(pi, cwd);
+		if (!rt) {
+			rt = new Runtime(pi, cwd);
+			// 常驻卡被选中时按 ↵ 开状态页。装配在这里而不是 Runtime 内部 ——
+			// 状态页在 commands.ts,而 commands.ts 依赖 Runtime,反向 import 会成环。
+			rt.openStatus = (ctx: any) => openMissionStatus(pi, ctx, rt!, null);
+		}
 		return rt;
 	};
 	const getRuntime = (ctx: any): Runtime => runtime(ctx.cwd);

@@ -40,7 +40,7 @@ COLUMNS=56 node --experimental-strip-types scripts/preview-plan-review.ts all
 # 问答页离线预览:default / open(开放式问题)/ done(已答两题)
 node --experimental-strip-types scripts/preview-ask-review.ts done
 
-# 常驻状态卡(输入框上方的 widget):do / check / warn(熔断临界 + 换脑挂起)
+# 常驻状态卡(输入框下方的 widget,单行密排):do / check / warn(熔断临界 + 换脑挂起)/ sel(被选中)
 COLUMNS=56 node --experimental-strip-types scripts/preview-widget.ts warn
 
 # 人工终审页(quick 档 judge=human):empty(未选)/ pass / reason
@@ -87,6 +87,7 @@ src/store/      v2 Repository、generation 投影、log/evidence/git/scaffold
 src/roles/      models.json 角色模型 + 进程内 Verifier / Scout AgentSession(都是只读,见下)
 src/hooks/      tool_call 闸门 + 编辑级增量反馈
 src/ui/         chrome(圆角盒框架)/ panel(/missions)/ plan-review(冻结前评审)/ ask-review(DEFINE 问答)/
+                widget-keys(输入框下方那几行的焦点链)/ board(子 agent 执行看板)/
                 scout-view(mission_scout 的工具块)/
                 human-review(quick 人工终审)/ status-view / dashboard / models-page
 templates/      scaffold 铺进目标仓库的相位提示词 + missions/README —— 每次 /mission new 按此重铺
@@ -132,7 +133,11 @@ skills/         随包分发的 pi skill(入场导览:该不该开 mission、选
   一条命令按回车都会先命中快捷键。三层都要过:① pi + pi-tui 的键位表(26 个 ctrl
   字母已全部被占);② 终端控制码雷区(ctrl+m=回车、ctrl+i=Tab、ctrl+h=退格);
   ③ 绕开它们的组合键(如 ctrl+shift+*)值不值得引入新的肌肉记忆 —— 多数时候不值得,
-  用 `/命令` 提示代替。
+  用 `/命令` 提示代替。**输入框下方那几行是例外**:它们靠 `ui.onTerminalInput` 在编辑器
+  之前截方向键,不占全局快捷键。代价是监听器常驻、跑在 focus 组件之前,所以判定必须留在
+  `ui/widget-keys.ts` 的纯函数里并有单测 —— 拦错了就是输入框方向键失灵,和 ctrl+m 同级。
+  三条守卫一条都不能少:没有活跃 mission / 有 custom UI 盖着 / 输入框有字,都得放行;
+  焦点还在输入框时**只截 ↓**,↑ 是 pi 的历史回溯。
 
 **UI 全部是纯函数**:`renderPanel()`(panel.ts)与 `renderStatus()`(status-view.ts)
 接一个描述当前视图的对象、返回行数组;`ctx.ui.custom` 的壳只负责持有状态和转发按键。
@@ -151,6 +156,13 @@ skills/         随包分发的 pi skill(入场导览:该不该开 mission、选
 折行 + 悬挂缩进 —— 截断等于把最该看的信息丢掉。次要的账目行(阶梯/成本/指纹)才允许
 截断,而且要把最重要的部分排在最左边(所以成本行是「合计 → 分账」而不是反过来)。内容行构造器接一个可选的
 `LineTheme`:传了就上色(TUI),不传出纯文本(非 TUI 的 entry 卡片走这条)。
+
+**这条规矩到常驻 chrome 为止**(输入框下方的 `renderWidgetCard` 与 `renderBoard`)。
+那几行不是消息,是永久占位,而且现在夹在 pi 自己的 statusline 中间 —— 折行、悬挂缩进、
+补空格右对齐都是聊天区卡片的语言,跟隔壁撞在一起就是一坨。那里一律 `chrome.packLine()`
+单行密排:`parts` 从最重要排到最次要,放不下就从右往左丢,`parts[0]` 是锚。
+长字段先在语义断点处收短(`dashboard.taskHeadline` 取冒号前的标题头),再交给 packLine,
+全文去 `/mission status`。
 
 `ctx.ui.custom` 用的是非 overlay 的圆角盒内联页(替换编辑器区域),需要 `hasUI` 守卫。
 
