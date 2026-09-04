@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { normalize, failureSignature, decide, applyFailure, nearThreshold } from "../breaker.ts";
+import { normalize, failureSignature, decide, applyFailure, evaluateManualEscalation, nearThreshold } from "../breaker.ts";
 import type { Evidence, TaskState } from "../types.ts";
 
 const fail = (raw: string, acId = "AC1"): Evidence => ({
@@ -276,4 +276,36 @@ test("人工终审签名固定,所以人连说两次不行必然出栈 —— �
   const s2 = failureSignature([hf("还是不行,布局全乱了")]);
   const d = decide({ tier: "quick", task: t1, signature: s2, level: 1 });
   assert.equal(d.action, "promote", "人说了两次不行就该换档,不该让人陪着试第三次");
+});
+
+// ─────────────── 手动升级的守卫 ───────────────
+
+test("首次失败就手动 L2 —— 拒绝,并给出正确动作", () => {
+  const r = evaluateManualEscalation({ task: task({ attempts: 1, sameSignatureCount: 1 }), to: 2 });
+  assert.equal(r.ok, false);
+  // 打回只说"不行"会让模型再想一个别的姿势;要直接告诉它该做什么
+  assert.match(r.ok === false ? r.reason : "", /直接结束本轮/);
+});
+
+test("同一失败第二次 —— 放行:'再修也没用'这句话有机械依据了", () => {
+  assert.equal(evaluateManualEscalation({ task: task({ attempts: 1, sameSignatureCount: 2 }), to: 2 }).ok, true);
+});
+
+test("试过两次 —— 放行,哪怕每次的失败签名都不一样", () => {
+  assert.equal(evaluateManualEscalation({ task: task({ attempts: 2, sameSignatureCount: 1 }), to: 2 }).ok, true);
+});
+
+test("卡在 INCONCLUSIVE 上 —— 必须放行,否则守卫自己变成死锁", () => {
+  // INCONCLUSIVE 不走 applyFailure,签名计数永远是 0:按签名拦就再也升不上去了
+  const t = task({ attempts: 1, sameSignatureCount: 0, inconclusiveStreak: 1 });
+  assert.equal(evaluateManualEscalation({ task: t, to: 2 }).ok, true);
+});
+
+test("待补证据 —— 同理放行", () => {
+  const t = task({ attempts: 1, sameSignatureCount: 0, awaitingEvidence: { reason: "缺 AC2", acIds: ["AC2"], treeFp: null } });
+  assert.equal(evaluateManualEscalation({ task: t, to: 2 }).ok, true);
+});
+
+test("L3 不归这道守卫管 —— 它自己要人工确认", () => {
+  assert.equal(evaluateManualEscalation({ task: task({ attempts: 1, sameSignatureCount: 0 }), to: 3 }).ok, true);
 });

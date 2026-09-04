@@ -1098,6 +1098,16 @@ test("L2 重规划不被基线锁死:已经做完的部分变绿也能重新冻�
 	const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "pi-missions-smoke-"));
 	const { ctx, rt } = await newMission(tmp);
 
+	// 手动 L2 现在要阶梯先走过一格(core/breaker.evaluateManualEscalation),
+	// 所以先真失败两轮把同一签名撞够次数 —— 直接 ESCALATE 会被拒,而那是对的。
+	await rt.applyEvent({ type: "SUBMIT", at: Date.now() }, ctx);
+	await rt.runCheck(ctx);
+	assert.equal(rt.active!.state.phase, "act", "第一轮必须是失败的");
+	await rt.applyEvent({ type: "ADJUST_DONE", at: Date.now() }, ctx);
+	await rt.applyEvent({ type: "SUBMIT", at: Date.now() }, ctx);
+	await rt.runCheck(ctx);
+	assert.equal(rt.active!.state.tasks.T1.sameSignatureCount, 2, "前置条件:同签名撞够两次");
+
 	// 执行者已经把 AC1 做绿了(T1 完成),但 mission 因为别的原因走到 L2
 	fs.writeFileSync(path.join(tmp, "hello.txt"), "hello\n");
 	await rt.applyEvent({ type: "ESCALATE", at: Date.now(), to: 2, reason: "方案错了" }, ctx);

@@ -317,15 +317,60 @@ test("quick 不能手动升级 —— 那条路的终点是执行者重写判定
 	assert.ok(transition(s, { type: "ESCALATE", at: AT, to: 3, reason: "问题定义不对" }).error);
 });
 
-test("standard/complex 的手动升级不受影响 —— 拦的是 quick,不是这条逃生口", () => {
+test("阶梯走过一格之后,standard/complex 的手动 L2 照常放行", () => {
 	for (const tier of ["standard", "complex"] as const) {
 		let s = toDo(tier);
 		s = transition(s, { type: "SUBMIT", at: AT }).state;
+		// 第一次失败:阶梯的处置是 fix-impl,此刻手动 L2 会被拦(见下一条)
+		s = transition(s, { type: "VERDICT", at: AT, verdict: failed("sig-y") }).state;
+		s = transition(s, { type: "ADJUST_DONE", at: AT }).state;
+		s = transition(s, { type: "SUBMIT", at: AT }).state;
+		// 同一个签名再来一次 —— "再修实现也没用"这句话现在有机械依据了
 		s = transition(s, { type: "VERDICT", at: AT, verdict: failed("sig-y") }).state;
 		const r = transition(s, { type: "ESCALATE", at: AT, to: 2, reason: "方案错误" });
 		assert.ok(!r.error, tier);
 		assert.equal(r.state.phase, "plan", tier);
 	}
+});
+
+test("阶梯还没走到那一格,手动 L2 被拦 —— 换脑与熔断计数不能为一次误判买单", () => {
+	// 真机原型(E7 T5,09-04):核验判 FAIL,处置是 act=fix-impl(同签名 1 次),
+	// 模型却调了 L2,而它在 reason 里写着"本应直接结束本轮、不调用升级"。
+	// 代价全付了:换脑、回 PLAN 重分解、sameSignatureCount 清零、
+	// escalation.history 记一条(再来一次就自动升 complex),而失败只需要改 4 行测试。
+	let s = toDo();
+	s = transition(s, { type: "SUBMIT", at: AT }).state;
+	s = transition(s, { type: "VERDICT", at: AT, verdict: failed("sig-once") }).state;
+	assert.equal(s.phase, "act");
+	assert.equal(s.tasks.T1.attempts, 1);
+	assert.equal(s.tasks.T1.sameSignatureCount, 1);
+
+	const r = transition(s, { type: "ESCALATE", at: AT, to: 2, reason: "我觉得方案不对" });
+	assert.ok(r.error, "同一失败只出现一次时,手动 L2 必须被拒");
+	assert.match(r.error ?? "", /直接结束本轮/, "打回要给出正确动作,不是只说不行");
+	assert.equal(r.state.phase, "act", "被拒时状态不动");
+	assert.equal(r.state.escalation.level, 1, "升级级别也不许动");
+	assert.equal(r.state.escalation.history.length, 0, "更不能留下一条升级记录");
+	assert.equal(r.effects.length, 0, "拒绝不产生任何 effect —— 别把换脑挂起来");
+});
+
+test("判不了的时候手动 L2 必须放行 —— 否则守卫自己变成死锁", () => {
+	// INCONCLUSIVE 与待补证据都不产生失败签名(applyFailure 只在 FAIL 时走),
+	// sameSignatureCount 永远是 0。若按签名计数拦,这条逃生口就被自己的守卫堵死了。
+	let s = toDo();
+	s = transition(s, { type: "SUBMIT", at: AT }).state;
+	// 不带 cause 的无结论 = 环境漂移那一类:回 DO、不计 attempts、不进熔断
+	s = transition(s, {
+		type: "VERDICT",
+		at: AT,
+		verdict: { outcome: "inconclusive", failing: [], reason: "构建环境漂移" },
+	}).state;
+	assert.equal(s.tasks.T1.sameSignatureCount, 0, "inconclusive 不累积签名");
+	assert.equal(s.tasks.T1.inconclusiveStreak, 1);
+
+	const r = transition(s, { type: "ESCALATE", at: AT, to: 2, reason: "AC 分解有误" });
+	assert.ok(!r.error, "卡在判不了上时,手动 L2 是唯一的出路");
+	assert.equal(r.state.phase, "plan");
 });
 
 test("裁判不可用首轮即停机 —— 拿同一个坏裁判再空转两轮毫无意义", () => {
@@ -385,6 +430,12 @@ test("连续 INCONCLUSIVE 达上限停机(环境漂移防死循环)", () => {
 
 test("L3 升级挂起等人工确认,确认后归档并换脑回 plan", () => {
 	let s = toDo();
+	// 先把阶梯走到 L2 允许的那一格(同签名两次)—— 手动 L2 不再是随叫随到的
+	s = transition(s, { type: "SUBMIT", at: AT }).state;
+	s = transition(s, { type: "VERDICT", at: AT, verdict: failed("sig-setup") }).state;
+	s = transition(s, { type: "ADJUST_DONE", at: AT }).state;
+	s = transition(s, { type: "SUBMIT", at: AT }).state;
+	s = transition(s, { type: "VERDICT", at: AT, verdict: failed("sig-setup") }).state;
 	s = transition(s, { type: "ESCALATE", at: AT, to: 2, reason: "方案错误" }).state;
 	assert.equal(s.phase, "plan");
 	// L2 后重新规划冻结,回到 do,再失败到阈值 → L3
@@ -421,9 +472,30 @@ test("L3 被拒绝则停机", () => {
 
 test("不允许降级升级", () => {
 	let s = toDo();
+	// 先合法地走到 L2 —— 否则第二次 ESCALATE 会被"阶梯还没走到那一格"拦下,
+	// 断言照样绿,而降级检查一次都没被走到(这条测试曾经就是这么假绿的)。
+	s = transition(s, { type: "SUBMIT", at: AT }).state;
+	s = transition(s, { type: "VERDICT", at: AT, verdict: failed("sig-d") }).state;
+	s = transition(s, { type: "ADJUST_DONE", at: AT }).state;
+	s = transition(s, { type: "SUBMIT", at: AT }).state;
+	s = transition(s, { type: "VERDICT", at: AT, verdict: failed("sig-d") }).state;
 	s = transition(s, { type: "ESCALATE", at: AT, to: 2, reason: "x" }).state;
+	assert.equal(s.escalation.level, 2, "前置条件:已经在 L2");
+
+	// L2 之后 phase 是 plan,而 ESCALATE 只在 do/act 受理 —— 不回到 do,
+	// 拦它的就是相位检查而不是降级检查(这条测试在补上这几行之前一直是这么假绿的)。
+	s = { ...s, pendingHandoff: null };
+	s = transition(s, { type: "PLAN_FROZEN", at: AT }).state;
+	s = transition(s, { type: "SUBMIT", at: AT }).state;
+	s = transition(s, { type: "VERDICT", at: AT, verdict: failed("sig-d2") }).state;
+	s = transition(s, { type: "ADJUST_DONE", at: AT }).state;
+	s = transition(s, { type: "SUBMIT", at: AT }).state;
+	s = transition(s, { type: "VERDICT", at: AT, verdict: failed("sig-d2") }).state;
+	assert.equal(s.phase, "act", "前置条件:回到了受理 ESCALATE 的相位");
+
 	const r = transition(s, { type: "ESCALATE", at: AT, to: 2, reason: "y" });
 	assert.ok(r.error);
+	assert.match(r.error ?? "", /降级/, "拦它的必须是降级检查,不是相位检查也不是阶梯守卫");
 });
 
 // ─────────────── 换脑硬阻断(Q10) ───────────────

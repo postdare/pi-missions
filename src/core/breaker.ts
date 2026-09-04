@@ -266,3 +266,47 @@ export function applyFailure(task: TaskState, signature: string): TaskState {
 export function resetAfterEscalation(task: TaskState): TaskState {
   return { ...task, lastSignature: undefined, sameSignatureCount: 0 };
 }
+
+/**
+ * 手动升级(`mission_escalate`)的守卫。
+ *
+ * 阶梯的三级里,L2 原本是个空档:L1 与自动升档由上面 decide() 的机械信号驱动,
+ * L3 要人工确认,**只有手动 L2 是被判定方一句话就生效** —— 而它的代价比 L1 大得多:
+ * 强制换脑(丢会话上下文)、回 PLAN 重分解、sameSignatureCount 清零,
+ * 而且 escalation.history 每记一条就离「2 次 L2 自动升 complex」近一格。
+ *
+ * 真机实证(E7,09-04):核验判 FAIL,处置是 act=fix-impl(同签名 1 次、再 2 次才升级),
+ * 模型却调了 L2,reason 里写的是「更正:本应直接结束本轮交由系统进入下一次尝试,
+ * 不调用升级」—— 它在参数里说自己不该调,调用照样生效。代价全付了,而失败只需要改 4 行测试。
+ *
+ * 这里**不读 reason**。那是自评,读了就回到「让模型判断模型自己」——
+ * 判定只看机械信号:同一失败重复过没有、这个任务试过几次。
+ * 工具说明里那句「当你判断继续修实现不会通过时使用」不需要改:
+ * 真到那一步,同签名计数自然会到。
+ */
+export function evaluateManualEscalation(input: {
+  task: TaskState;
+  to: 2 | 3;
+}): { ok: true } | { ok: false; reason: string } {
+  // L3 不拦:它本来就要人工确认(ESCALATION_CONFIRMED),那是另一道锁。
+  if (input.to !== 2) return { ok: true };
+
+  const t = input.task;
+
+  // 阶梯已经走过一格,或者同一个失败重复过 —— 执行者说"再修也没用"是可信的
+  if (t.attempts >= 2 || t.sameSignatureCount >= 2) return { ok: true };
+
+  // 卡在"判不了"上时必须放行,否则这道守卫会变成死锁:
+  // INCONCLUSIVE 与待补证据**根本不产生失败签名**(applyFailure 只在 FAIL 时走),
+  // sameSignatureCount 永远是 0,阶梯自己走不到那一格。逃生口不能被守卫堵死。
+  if (t.inconclusiveStreak >= 1 || t.awaitingEvidence) return { ok: true };
+
+  return {
+    ok: false,
+    reason:
+      `同一失败只出现 ${t.sameSignatureCount || 1} 次、这个任务才试了 ${t.attempts} 次,阶梯还在 L1(修实现)。` +
+      "L2 要换脑、回 PLAN 重分解、清空熔断计数,现在付这个代价太早 —— " +
+      "**直接结束本轮就行**,系统会自动进入下一次尝试。" +
+      "真到修不动那一步,同一个失败签名会自己累积到阈值,L2 会自动来,不需要你调用。",
+  };
+}

@@ -43,7 +43,7 @@ import type {
 	Tier,
 	Verdict,
 } from "./types.ts";
-import { applyFailure, decide, resetAfterEscalation } from "./breaker.ts";
+import { applyFailure, decide, evaluateManualEscalation, resetAfterEscalation } from "./breaker.ts";
 import { tierRank } from "./tier.ts";
 import { evaluatePlanReview, PLAN_REJECT_CAP } from "./review.ts";
 
@@ -474,6 +474,14 @@ export function transition(state: MissionState, event: MissionEvent): Transition
 			if (event.to <= state.escalation.level) {
 				return reject(state, `不能从 L${state.escalation.level} 降级到 L${event.to}`);
 			}
+			// 阶梯还没走到那一格就不许手动 L2 —— 判定只看机械信号,不读 event.reason(那是自评)。
+			// 见 breaker.evaluateManualEscalation 的文件内注释:真机上出现过模型在 reason 里
+			// 写"本应直接结束本轮、不调用升级",而调用照样生效、代价照样付。
+			const manual = evaluateManualEscalation({
+				task: state.tasks[taskId] ?? { id: taskId, status: "running", attempts: 1, sameSignatureCount: 0, inconclusiveStreak: 0 },
+				to: event.to,
+			});
+			if (!manual.ok) return reject(state, manual.reason);
 			return escalateTransition(state, event.at, taskId, event.to, event.reason);
 		}
 
