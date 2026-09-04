@@ -467,6 +467,9 @@ mission 一旦会话重建就永久失联。
 `createAgentSession` + `SessionManager.inMemory` 起一个 in-memory 会话,
 只给只读工具(read/grep/find/ls + 结构化 `mission_verdict`,没有 edit/write/bash),
 喂 git diff + 冻结的 AC + hard 结果,逐条核对后调 `mission_verdict` 返回结论。
+调用者只提交判别联合 `VerifierSubject`;`runVerifier()` 在 module 内从同一 subject
+一次生成简报与合法身份集合。standard/complex 的唯一身份源是 `verify.sh` 分支名,
+quick 与 spike 的身份分别固定为 `quick`、`spike`,调用者不能另传任意 brief 或身份。
 它**不能写文件** —— `templates/phases/check.md` 写明理由:
 "验证者一旦能改代码,就会顺手修一下然后判自己通过"。Verifier 不写盘、不挂 pi
 扩展(`ResourceLoader` 显式置空),结论只通过工具参数回到 L0,判定权仍在
@@ -488,7 +491,7 @@ mission 一旦会话重建就永久失联。
 **判定**复用现有证据分级,不引入第四种证据:
 
 - **hard** —— `reportIsSubstantive()`:结论文件 ≥ 80 字(挡 `TODO` 与空文件),零模型成本
-- **semi** —— `renderSpikeVerifierBrief()`:独立验证者核对结论是否**正面回答了 `question`**,
+- **semi** —— `runVerifier()` 内部按 spike subject 生成简报:独立验证者核对结论是否**正面回答了 `question`**,
   并抽查它引用的事实;答非所问、只有"需要进一步调研"、或探针改了实现,判 fail
 
 **额度**:每个 mission 最多一个 spike(`validateSpikePlan()`)。计数记在

@@ -11,5 +11,5 @@
 判完之后:通过则推进到下一个任务,失败进 ACT 诊断一轮,无结论回 DO 补证据。
 
 > 独立验证者**不读这个文件**。它跑在一个不加载任何扩展与脚手架的独立会话里,
-> 提示词由本扩展内联提供(`src/roles/verifier.ts` 的 `verifierSystemPrompt()` 与
-> `renderVerifierBrief()`)。改这里不会改变它的行为 —— 要调它得改那两个函数。
+> 提示词与合法提交身份由 `src/roles/verifier.ts` 的 `runVerifier()` 根据 `VerifierSubject`
+> 在 module 内一次生成。改这里不会改变它的行为 —— 要调它得改 Verifier implementation。

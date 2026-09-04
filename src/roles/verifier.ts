@@ -25,17 +25,64 @@ const VERDICT_RESULTS = new Set(["pass", "fail", "inconclusive"]);
 /** 失败类别。熔断签名用它算 —— 见 core/types.ts 的 FailureCategory */
 const FAILURE_TAGS = new Set<FailureCategory>(["missing", "incorrect", "regression"]);
 
+export interface VerifierChanges {
+	diff: string;
+	files: readonly string[];
+}
+
+export interface VerifierHardResult {
+	acId: string;
+	pass: boolean;
+	outputTail: string;
+}
+
+/**
+ * Verifier 的核验对象。调用者只描述任务事实,身份集合与简报由 module 内部一起编译。
+ * 这样 mission_verdict 的合法身份不可能和 prompt 里展示的身份各自取数。
+ */
+export type VerifierSubject =
+	| {
+			kind: "frozen-ac";
+			goal: string;
+			task: { id: string; title: string };
+			/** 唯一身份源:verify.sh 分支名 */
+			verifyBranches: readonly string[];
+			/** 只提供正文,计划 AC id 不参与提交身份 */
+			acceptanceCriteria: ReadonlyArray<{
+				id: string;
+				text: string;
+				verify: string;
+			}>;
+			hardResults: readonly VerifierHardResult[];
+			changes: VerifierChanges;
+	  }
+	| {
+			kind: "quick-ai";
+			goal: string;
+			taskId: string;
+			criterion: string;
+			changes: VerifierChanges;
+			/** 合法身份由 implementation 固定为 quick */
+	  }
+	| {
+			kind: "spike";
+			goal: string;
+			taskId: string;
+			question: string;
+			report: string;
+			diff: string;
+			/** 合法身份由 implementation 固定为 spike */
+	  };
+
 export interface VerifierOptions {
 	cwd: string;
 	/** 已解析的实际模型。配置缺失或不可用时由 Runtime 传当前会话模型 */
 	model: any;
 	thinkingLevel: string;
-	brief: string;
+	subject: VerifierSubject;
 	/** 静默/总时长两条预算,判定在 core/verifier-budget.ts */
 	budget: VerifierBudget;
 	signal?: AbortSignal;
-	/** 本轮必须逐条提交且只能提交这些 AC */
-	expectedAcIds: string[];
 	onProgress?: (progress: VerifierProgress) => void;
 	onControl?: (control: VerifierControl | null) => void;
 }
@@ -88,6 +135,11 @@ interface CreateVerifierSessionInput {
 	options: VerifierOptions;
 	systemPrompt: string;
 	onVerdict(verdicts: unknown): void;
+}
+
+interface CompiledVerifierSubject {
+	brief: string;
+	expectedAcIds: readonly string[];
 }
 
 type CreateVerifierSession = (input: CreateVerifierSessionInput) => Promise<AgentSessionLike>;
@@ -179,11 +231,24 @@ export async function runVerifier(
 	opts: VerifierOptions,
 	createSession: CreateVerifierSession = createSdkVerifierSession,
 ): Promise<VerifierRunResult> {
-	const first = await runVerifierOnce(opts, createSession);
+	let compiled: CompiledVerifierSubject;
+	try {
+		// 一次调用只编译一次。provider 要求切 thinking 重试时复用同一份身份与简报。
+		compiled = compileVerifierSubject(opts.subject);
+	} catch (error) {
+		return {
+			status: "failed",
+			evidences: null,
+			message: error instanceof Error ? error.message : String(error),
+			usage: { ...ZERO_USAGE },
+			trace: [],
+		};
+	}
+	const first = await runVerifierOnce(opts, compiled, createSession);
 	if (first.status === "completed") return first;
 	const retryThinking = thinkingRetryLevel(opts.thinkingLevel, first.providerError);
 	if (!retryThinking) return first;
-	const second = await runVerifierOnce({ ...opts, thinkingLevel: retryThinking }, createSession);
+	const second = await runVerifierOnce({ ...opts, thinkingLevel: retryThinking }, compiled, createSession);
 	const usage = mergeUsage(first.usage, second.usage);
 	const trace = [`thinking=${opts.thinkingLevel} 被 provider 拒绝,改用 ${retryThinking} 重试`, ...second.trace];
 	if (second.status === "completed") return { ...second, usage, trace };
@@ -226,6 +291,7 @@ function mergeUsage(a: VerifierUsage, b: VerifierUsage): VerifierUsage {
  */
 async function runVerifierOnce(
 	opts: VerifierOptions,
+	compiled: CompiledVerifierSubject,
 	createSession: CreateVerifierSession,
 ): Promise<VerifierRunResult> {
 	let submitted: unknown = null;
@@ -301,7 +367,7 @@ async function runVerifierOnce(
 			await abort();
 		} else {
 			emit("分析冻结验收标准");
-			await session.prompt(opts.brief);
+			await session.prompt(compiled.brief);
 		}
 	} catch (error) {
 		return {
@@ -331,7 +397,7 @@ async function runVerifierOnce(
 		};
 	}
 	try {
-		const verdicts = validateVerdicts(submitted, opts.expectedAcIds);
+		const verdicts = validateVerdicts(submitted, compiled.expectedAcIds);
 		return {
 			status: "completed",
 			evidences: verdicts.map((v) => ({
@@ -380,7 +446,7 @@ function providerErrorOf(event: AgentSessionEvent): string | undefined {
  * 所以 `missions/phases/check.md` 对它完全无效 —— 那是注入**主会话**的。
  * 迁到进程内 AgentSession 之前,验证者是个独立 pi 进程、确实读得到脚手架;
  * check.md 里那段"如果你是独立验证者……"就是那个时代的遗留,已经删掉。
- * 要调验证者的行为,改这里和 renderVerifierBrief(),不要去改 check.md。
+ * 要调验证者的行为,改这里和 compileVerifierSubject(),不要去改 check.md。
  */
 function verifierSystemPrompt(): string {
 	// 提问方向是刻意反过来的:「找出不满足的理由,找不到才判 pass」。
@@ -399,7 +465,7 @@ function verifierSystemPrompt(): string {
 核对完成后必须调用 mission_verdict 一次提交逐条结论,然后结束。`;
 }
 
-function validateVerdicts(value: unknown, expectedAcIds: string[]): Array<{
+function validateVerdicts(value: unknown, expectedAcIds: readonly string[]): Array<{
 	acId: string;
 	result: "pass" | "fail" | "inconclusive";
 	rationale: string;
@@ -476,47 +542,104 @@ function describeTool(name: string, args: any): string {
 }
 
 /**
- * 核验简报。
+ * 把调用者提供的任务事实一次编译成核验简报与合法身份集合。
  *
- * **列表由 expectedAcIds 生成,而不是由 plan.acceptanceCriteria 生成** —— 这两处
- * 一旦各自取数就会漂,而漂了是静默的:validateVerdicts 抛错 → 整份核验被丢弃 →
- * 降级 hard-only → mission 照常 PASS。真实事故:简报列的是 AC1..AC5(计划里的
- * AC id),校验要的是 copy/edit/small(verify 分支名,I9 说它才是 AC 的可执行 id),
- * 验证者老老实实交了 "AC3",被判"提交了未知 AC",连着三个任务的 semi 证据全丢,
- * 整条 I3(判定权外置)在账面上存在、实际从未生效。
- *
- * 所以这里只认一个 id 命名空间:**expectedAcIds**。正文从计划里按 verify 分支反查,
- * 查不到也照样列出这一条 —— 宁可正文缺失,也不能让 id 集合对不上。
+ * frozen-ac 的唯一身份源是 verifyBranches,计划 AC 只用于按 verify 反查正文。
+ * quick-ai / spike 的身份固定在 implementation 内。这里返回的同一份 compiled scope
+ * 同时喂 prompt 与 validateVerdicts(),杜绝两套身份源再次漂移。
  */
-export function renderVerifierBrief(input: {
+function compileVerifierSubject(subject: VerifierSubject): CompiledVerifierSubject {
+	if (subject.kind === "quick-ai") {
+		const expectedAcIds = ["quick"] as const;
+		return {
+			expectedAcIds,
+			brief: renderCodeVerifierBrief({
+				goal: subject.goal,
+				task: { id: subject.taskId, title: subject.goal },
+				criteria: [{ acId: "quick", text: subject.criterion }],
+				hardResults: [],
+				changes: subject.changes,
+				expectedAcIds,
+			}),
+		};
+	}
+	if (subject.kind === "spike") {
+		return {
+			expectedAcIds: ["spike"],
+			brief: renderSpikeVerifierBrief(subject),
+		};
+	}
+	if (subject.kind !== "frozen-ac") {
+		throw new Error("Verifier subject 输入无效:未知 kind");
+	}
+
+	validateFrozenSubject(subject);
+	const expectedAcIds = [...subject.verifyBranches];
+	const criteria = expectedAcIds.map((acId) => {
+		const matched = subject.acceptanceCriteria.filter((ac) => ac.verify === acId);
+		const text = matched.map((ac) => ac.text).join(" / ");
+		const planIds = matched.map((ac) => ac.id).join("/");
+		return {
+			acId,
+			text: text || "(计划中没有对应正文,按目标与任务标题核对)",
+			planIds,
+		};
+	});
+	return {
+		expectedAcIds,
+		brief: renderCodeVerifierBrief({
+			goal: subject.goal,
+			task: subject.task,
+			criteria,
+			hardResults: subject.hardResults,
+			changes: subject.changes,
+			expectedAcIds,
+		}),
+	};
+}
+
+function validateFrozenSubject(subject: Extract<VerifierSubject, { kind: "frozen-ac" }>): void {
+	if (subject.verifyBranches.length === 0) {
+		throw new Error("Verifier subject 输入无效:verifyBranches 不能为空");
+	}
+	const branches = new Set<string>();
+	for (const branch of subject.verifyBranches) {
+		if (typeof branch !== "string" || !branch.trim()) {
+			throw new Error("Verifier subject 输入无效:verifyBranches 含空分支");
+		}
+		if (branch !== branch.trim()) {
+			throw new Error(`Verifier subject 输入无效:分支名含首尾空格:${JSON.stringify(branch)}`);
+		}
+		if (branches.has(branch)) {
+			throw new Error(`Verifier subject 输入无效:重复分支:${branch}`);
+		}
+		branches.add(branch);
+	}
+
+	const hardIds = new Set<string>();
+	for (const result of subject.hardResults) {
+		if (!branches.has(result.acId)) {
+			throw new Error(`Verifier subject 输入无效:hardResults 身份越界:${result.acId}`);
+		}
+		if (hardIds.has(result.acId)) {
+			throw new Error(`Verifier subject 输入无效:hardResults 身份重复:${result.acId}`);
+		}
+		hardIds.add(result.acId);
+	}
+}
+
+function renderCodeVerifierBrief(input: {
 	goal: string;
-	taskId: string;
-	taskTitle: string;
-	acceptanceCriteria: Array<{ id: string; text: string; verify: string }>;
-	/** 本轮必须逐条提交、且只能提交这些 id。与 runVerifier 的 expectedAcIds 同源 */
-	expectedAcIds: string[];
-	hardResults: Array<{ acId: string; pass: boolean; outputTail: string }>;
-	diff: string;
-	/**
-	 * 本轮改动涉及的文件全名单(`git diff --name-status` 的产物)。
-	 *
-	 * 它存在的唯一理由是 diff 会被截断:`DIFF_TAIL` 是 12000 字符,一次动了
-	 * 十来个文件、新建几个包就超了。截断之后验证者只能靠 `浏览/查找` 自己重新
-	 * 发现改了哪些文件 —— 真机上那一次(11 个文件、四个新包)正是调用最多、
-	 * 唯一超时的一次。清单不截断:几十个文件也就几百字符,比让它重新摸一遍便宜得多。
-	 *
-	 * **不要拿 state.metrics.touchedFiles 来填这里** —— 那个是整个 mission 累计的、
-	 * 任务切换不清零,塞进来会把前几个任务的文件一起混进"本轮改动"。
-	 */
-	changedFiles: string[];
+	task: { id: string; title: string };
+	criteria: ReadonlyArray<{ acId: string; text: string; planIds?: string }>;
+	hardResults: readonly VerifierHardResult[];
+	changes: VerifierChanges;
+	expectedAcIds: readonly string[];
 }): string {
-	const acs = input.expectedAcIds
-		.map((acId) => {
-			const matched = input.acceptanceCriteria.filter((ac) => ac.verify === acId);
-			const text = matched.map((ac) => ac.text).join(" / ");
-			const planIds = matched.map((ac) => ac.id).join("/");
-			return `- ${acId}${planIds ? ` (计划里的 ${planIds})` : ""}: ${text || "(计划中没有对应正文,按目标与任务标题核对)"}`;
-		})
+	const acs = input.criteria
+		.map((criterion) =>
+			`- ${criterion.acId}${criterion.planIds ? ` (计划里的 ${criterion.planIds})` : ""}: ${criterion.text}`,
+		)
 		.join("\n");
 	// hardResults 为空是 quick 档的常态(那一档没有 verify.sh)。留一个空标题最糟:
 	// 「自动化验证结果」下面什么都没有,既可能被读成"跑过了没问题",也可能被读成
@@ -534,7 +657,7 @@ export function renderVerifierBrief(input: {
 ${input.goal}
 
 # 当前任务
-${input.taskId}: ${input.taskTitle}
+${input.task.id}: ${input.task.title}
 
 # 冻结的验收标准(逐条核对)
 ${acs}
@@ -547,10 +670,10 @@ ${acs}
 ${hard}
 
 # 本轮改动涉及的文件(完整清单,未截断)
-${input.changedFiles.length > 0 ? input.changedFiles.map((f) => `- ${f}`).join("\n") : "(git 报告没有文件改动)"}
+${input.changes.files.length > 0 ? input.changes.files.map((f) => `- ${f}`).join("\n") : "(git 报告没有文件改动)"}
 
 # 当前改动(git diff)
-${input.diff}
+${input.changes.diff}
 
 （上面这段 diff 可能因过长被截断,**但文件清单是完整的** —— 清单里出现、diff 里没有的
 文件,直接读它,不必先去搜索有哪些文件被改过。)
@@ -565,7 +688,7 @@ ${input.diff}
  * 探针的核对简报。判的不是"改动对不对"(探针不该有改动),
  * 而是"这份结论有没有真的回答那个问题"。
  */
-export function renderSpikeVerifierBrief(input: {
+function renderSpikeVerifierBrief(input: {
 	goal: string;
 	taskId: string;
 	question: string;

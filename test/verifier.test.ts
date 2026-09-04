@@ -1,20 +1,35 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import {
-	renderVerifierBrief,
 	runVerifier,
 	VERIFIER_TOOLS,
 	type VerifierControl,
 	type VerifierProgress,
+	type VerifierSubject,
 } from "../src/roles/verifier.ts";
+
+function frozenSubject(verifyBranches: readonly string[] = ["AC1"]): Extract<VerifierSubject, { kind: "frozen-ac" }> {
+	return {
+		kind: "frozen-ac",
+		goal: "verify",
+		task: { id: "T1", title: "核验任务" },
+		verifyBranches,
+		acceptanceCriteria: verifyBranches.map((verify, index) => ({
+			id: `PLAN-${index + 1}`,
+			text: `${verify} 的验收正文`,
+			verify,
+		})),
+		hardResults: [],
+		changes: { diff: "", files: [] },
+	};
+}
 
 const options = {
 	cwd: "/tmp",
 	model: { provider: "test", id: "verifier" },
 	thinkingLevel: "off",
-	brief: "verify",
+	subject: frozenSubject(),
 	budget: { idleMs: 1000, ceilingMs: 10_000 },
-	expectedAcIds: ["AC1"],
 };
 
 function submitVerdicts(verdicts: unknown) {
@@ -98,7 +113,7 @@ test("runVerifier:verdict 必须与预期 AC 集合精确一致", async () => {
 	if (duplicate.status === "failed") assert.match(duplicate.message, /重复提交 AC:AC1/);
 
 	const missing = await runVerifier(
-		{ ...options, expectedAcIds: ["AC1", "AC2"] },
+		{ ...options, subject: frozenSubject(["AC1", "AC2"]) },
 		submitVerdicts([{ acId: "AC1", result: "pass", rationale: "x" }]),
 	);
 	assert.equal(missing.status, "failed");
@@ -274,7 +289,7 @@ test("runVerifier:暴露 steer/abort 控制并记录人工指令", async () => {
 // ─────────────── 简报与校验必须同一个 id 命名空间 ───────────────
 //
 // 真实事故(new-tab 仓库,2026-09-02):简报列的是计划里的 AC1..AC5,
-// expectedAcIds 是 verify 分支名 copy/edit/small/drag/regression。
+// 校验集合却是 verify 分支名 copy/edit/small/drag/regression。
 // 验证者交了 "AC3" → validateVerdicts 抛「提交了未知 AC」→ 整份核验丢弃 →
 // 降级 hard-only → 三个任务全 PASS,mission done。
 // semi 层从未生效,而 LOG 里只有一行 "verifier AgentSession unavailable"。
@@ -286,60 +301,149 @@ const AC_PLAN = [
 	{ id: "AC5", text: "yarn lint 与 yarn build 通过", verify: "regression" },
 ];
 
-const brief = (expectedAcIds: string[]) =>
-	renderVerifierBrief({
+function planSubject(verifyBranches: readonly string[]): VerifierSubject {
+	return {
+		kind: "frozen-ac",
 		goal: "todo 支持行内编辑与复制",
-		taskId: "T3",
-		taskTitle: "small 档与回归",
+		task: { id: "T3", title: "small 档与回归" },
+		verifyBranches,
 		acceptanceCriteria: AC_PLAN,
-		expectedAcIds,
 		hardResults: [],
-		diff: "",
-		changedFiles: [],
+		changes: { diff: "", files: [] },
+	};
+}
+
+function idsFromFrozenPrompt(prompt: string): string[] {
+	const criteria = prompt.match(/# 冻结的验收标准\(逐条核对\)\n([\s\S]*?)\n\n提交 mission_verdict/)?.[1] ?? "";
+	return criteria.split("\n").flatMap((line) => {
+		const match = line.match(/^- ([^\s:]+)(?: \(计划里的 [^)]+\))?:/);
+		return match ? [match[1]] : [];
 	});
+}
 
-test("简报里要提交的 id 就是 expectedAcIds,不是计划里的 AC 编号", () => {
-	const text = brief(["small", "regression"]);
-	assert.ok(text.includes("- small"), "列表项以 verify 分支名开头");
-	assert.ok(text.includes("- regression"));
-	assert.ok(!/^- AC\d/m.test(text), "绝不能把 AC3 这种计划编号当成要提交的 id");
+async function exerciseSubject(
+	subject: VerifierSubject,
+	verdictsFromPrompt: (prompt: string) => unknown = (prompt) =>
+		idsFromFrozenPrompt(prompt).map((acId) => ({ acId, result: "pass", rationale: `已核对 ${acId}` })),
+) {
+	let captured = "";
+	const result = await runVerifier({ ...options, subject }, async ({ onVerdict }) => ({
+		subscribe: () => () => {},
+		prompt: async (prompt) => {
+			captured = prompt;
+			onVerdict(verdictsFromPrompt(prompt));
+		},
+		steer: async () => {},
+		abort: async () => {},
+		dispose: () => {},
+	}));
+	return { prompt: captured, result };
+}
+
+test("runVerifier interface:prompt 的 verify 分支原样成为最终 evidence 身份", async () => {
+	// fake 只从真实 prompt 读身份再原样提交;测试没有第二份 expectedAcIds。
+	const { prompt, result } = await exerciseSubject(planSubject(["small", "regression"]));
+	assert.deepEqual(idsFromFrozenPrompt(prompt), ["small", "regression"]);
+	assert.ok(!/^- AC\d/m.test(prompt), "计划 AC 编号绝不能成为提交身份");
+	assert.match(prompt, /本轮共 2 条:small、regression/);
+	assert.equal(result.status, "completed");
+	if (result.status === "completed") {
+		assert.deepEqual(result.evidences.map((e) => e.acId), ["small", "regression"]);
+	}
 });
 
-test("简报只列本轮范围内的判据 —— 多列出来会导致'提交了未知 AC'", () => {
-	const text = brief(["small", "regression"]);
-	assert.ok(!text.includes("复制为 markdown"), "不该出现别的任务的 AC 正文");
-	assert.ok(!text.includes("行内编辑支持 Enter"));
-	assert.ok(text.includes("small 档形态不变"));
-});
-
-test("简报明确告知本轮要交几条、分别是什么", () => {
-	const text = brief(["small", "regression"]);
-	assert.ok(text.includes("本轮共 2 条"), text.slice(0, 400));
-	assert.ok(text.includes("small、regression"));
-});
-
-test("计划里查不到正文也照样列出该 id —— 宁可正文缺失,也不能让 id 集合对不上", () => {
-	const text = brief(["small", "brand-new-branch"]);
-	assert.ok(text.includes("- brand-new-branch"));
-	assert.ok(text.includes("计划中没有对应正文"));
-});
-
-test("一个分支被多条 AC 覆盖时,正文合并,id 仍只有一个", () => {
-	const text = renderVerifierBrief({
+test("runVerifier interface:prompt 只合并本轮分支正文,缺正文也保留身份", async () => {
+	const merged: VerifierSubject = {
+		kind: "frozen-ac",
 		goal: "g",
-		taskId: "T1",
-		taskTitle: "t",
+		task: { id: "T1", title: "t" },
+		verifyBranches: ["copy", "brand-new-branch"],
 		acceptanceCriteria: [
-			{ id: "AC1", text: "第一条要求", verify: "copy" },
-			{ id: "AC2", text: "第二条要求", verify: "copy" },
+			...AC_PLAN,
+			{ id: "AC6", text: "复制后保留层级", verify: "copy" },
 		],
-		expectedAcIds: ["copy"],
 		hardResults: [],
+		changes: { diff: "", files: [] },
+	};
+	const { prompt } = await exerciseSubject(merged);
+	assert.match(prompt, /复制为 markdown 任务列表 \/ 复制后保留层级/);
+	assert.equal((prompt.match(/^- copy/gm) ?? []).length, 1);
+	assert.match(prompt, /- brand-new-branch: \(计划中没有对应正文/);
+	assert.ok(!prompt.includes("行内编辑支持 Enter"), "不能混入本轮之外的正文");
+});
+
+test("runVerifier interface:frozen scope 输入无效时不创建 AgentSession", async () => {
+	const hard = (acId: string) => ({ acId, pass: true, outputTail: "ok" });
+	const cases: Array<{ subject: VerifierSubject; message: RegExp }> = [
+		{ subject: frozenSubject([]), message: /verifyBranches 不能为空/ },
+		{ subject: frozenSubject([""]), message: /含空分支/ },
+		{ subject: frozenSubject([" copy"]), message: /首尾空格/ },
+		{ subject: frozenSubject(["copy", "copy"]), message: /重复分支:copy/ },
+		{
+			subject: { ...frozenSubject(["copy"]), hardResults: [hard("other")] },
+			message: /hardResults 身份越界:other/,
+		},
+		{
+			subject: { ...frozenSubject(["copy"]), hardResults: [hard("copy"), hard("copy")] },
+			message: /hardResults 身份重复:copy/,
+		},
+	];
+	let sessions = 0;
+	for (const entry of cases) {
+		const result = await runVerifier({ ...options, subject: entry.subject }, async () => {
+			sessions += 1;
+			throw new Error("不应创建会话");
+		});
+		assert.equal(result.status, "failed");
+		if (result.status === "failed") assert.match(result.message, entry.message);
+		assert.deepEqual(result.usage, {
+			turns: 0,
+			toolCalls: 0,
+			input: 0,
+			output: 0,
+			cacheRead: 0,
+			cacheWrite: 0,
+			cost: 0,
+		});
+	}
+	assert.equal(sessions, 0);
+});
+
+test("runVerifier interface:quick-ai 与 spike 身份固定且不能由调用者指定", async () => {
+	const quick: VerifierSubject = {
+		kind: "quick-ai",
+		goal: "修复按钮",
+		taskId: "quick-task",
+		criterion: "点击后提示成功",
+		changes: { diff: "+ fixed", files: ["src/button.ts"] },
+	};
+	const wrongQuick = await exerciseSubject(quick, () => [{ acId: "other", result: "pass", rationale: "x" }]);
+	assert.match(wrongQuick.prompt, /- quick: 点击后提示成功/);
+	assert.equal(wrongQuick.result.status, "failed");
+	if (wrongQuick.result.status === "failed") assert.match(wrongQuick.result.message, /未知 AC:other/);
+	const quickPass = await runVerifier(
+		{ ...options, subject: quick },
+		submitVerdicts([{ acId: "quick", result: "pass", rationale: "ok" }]),
+	);
+	assert.equal(quickPass.status, "completed");
+
+	const spike: VerifierSubject = {
+		kind: "spike",
+		goal: "定位瓶颈",
+		taskId: "S1",
+		question: "瓶颈在哪一层?",
+		report: "采样表明瓶颈在存储层。",
 		diff: "",
-		changedFiles: [],
-	});
-	assert.ok(text.includes("第一条要求 / 第二条要求"));
-	assert.equal((text.match(/^- copy/gm) ?? []).length, 1);
+	};
+	const wrongSpike = await exerciseSubject(spike, () => [{ acId: "other", result: "pass", rationale: "x" }]);
+	assert.match(wrongSpike.prompt, /acId 用 "spike"/);
+	assert.equal(wrongSpike.result.status, "failed");
+	if (wrongSpike.result.status === "failed") assert.match(wrongSpike.result.message, /未知 AC:other/);
+	const spikePass = await runVerifier(
+		{ ...options, subject: spike },
+		submitVerdicts([{ acId: "spike", result: "pass", rationale: "ok" }]),
+	);
+	assert.equal(spikePass.status, "completed");
 });
 
 // ─────────────── provider 报错(真实事故:400 伪装成"没提交 verdict") ───────────────
@@ -380,14 +484,39 @@ test("runVerifier:provider 报错的原文必须进 message —— 报'未提交
 
 test("runVerifier:模型强制开思考时,thinking=off 自动降档重试一次", async () => {
 	const levels: string[] = [];
+	const prompts: string[] = [];
 	const r = await runVerifier(options, async (input) => {
 		levels.push(input.options.thinkingLevel);
-		if (input.options.thinkingLevel === "off") {
-			return providerRejects('400 (glm-5.3-flash always reasons; thinking.type must be "enabled")')();
-		}
-		return submitVerdicts([{ acId: "AC1", result: "pass", rationale: "ok" }])(input);
+		let listener: ((event: any) => void) | null = null;
+		return {
+			subscribe: (fn: (event: any) => void) => {
+				listener = fn;
+				return () => {};
+			},
+			prompt: async (prompt: string) => {
+				prompts.push(prompt);
+				if (input.options.thinkingLevel === "off") {
+					listener?.({
+						type: "message_end",
+						message: {
+							role: "assistant",
+							content: [],
+							stopReason: "error",
+							errorMessage: '400 (glm-5.3-flash always reasons; thinking.type must be "enabled")',
+						},
+					});
+					return;
+				}
+				input.onVerdict([{ acId: "AC1", result: "pass", rationale: "ok" }]);
+			},
+			steer: async () => {},
+			abort: async () => {},
+			dispose: () => {},
+		};
 	});
 	assert.deepEqual(levels, ["off", "low"]);
+	assert.equal(prompts.length, 2);
+	assert.equal(prompts[1], prompts[0], "thinking 重试必须复用同一份 compiled brief");
 	assert.equal(r.status, "completed");
 	assert.ok(r.trace.some((line) => line.includes("thinking=off 被 provider 拒绝")));
 });
@@ -439,33 +568,20 @@ test("runVerifier:降档重试后仍失败时,两轮的 usage 都要记账", asy
 
 // diff 会被截断(DIFF_TAIL = 12000),文件清单不会 —— 这正是清单存在的理由。
 // 真机上 diff 被截断的那一次,恰好是验证者调用最多、唯一超时的一次。
-test("简报:diff 再长,文件清单也要完整,并且明说清单没被截断", () => {
-	const text = renderVerifierBrief({
-		goal: "g",
-		taskId: "T1",
-		taskTitle: "t",
-		acceptanceCriteria: [{ id: "AC1", text: "a", verify: "ac1" }],
-		expectedAcIds: ["ac1"],
-		hardResults: [],
+test("runVerifier interface:diff 截断时仍给完整文件清单与说明", async () => {
+	const subject = frozenSubject(["ac1"]);
+	subject.changes = {
 		diff: "（此处 diff 已被截断）",
-		changedFiles: ["新增 internal/schema/envelope.go", "修改 internal/storage/storage.go"],
-	});
-	assert.match(text, /internal\/schema\/envelope\.go/);
-	assert.match(text, /internal\/storage\/storage\.go/);
-	assert.match(text, /完整清单/, "要让验证者知道这份清单可以直接照着读");
-	assert.match(text, /可能因过长被截断/, "也要让它知道 diff 不可信,清单才可信");
+		files: ["新增 internal/schema/envelope.go", "修改 internal/storage/storage.go"],
+	};
+	const { prompt } = await exerciseSubject(subject);
+	assert.match(prompt, /internal\/schema\/envelope\.go/);
+	assert.match(prompt, /internal\/storage\/storage\.go/);
+	assert.match(prompt, /完整清单/, "要让验证者知道这份清单可以直接照着读");
+	assert.match(prompt, /可能因过长被截断/, "也要让它知道 diff 不可信,清单才可信");
 });
 
-test("简报:没有文件改动时不留空段", () => {
-	const text = renderVerifierBrief({
-		goal: "g",
-		taskId: "T1",
-		taskTitle: "t",
-		acceptanceCriteria: [],
-		expectedAcIds: ["ac1"],
-		hardResults: [],
-		diff: "",
-		changedFiles: [],
-	});
-	assert.match(text, /git 报告没有文件改动/, "空清单要说出来,空标题会被读成'系统没查'");
+test("runVerifier interface:没有文件改动时不留空段", async () => {
+	const { prompt } = await exerciseSubject(frozenSubject(["ac1"]));
+	assert.match(prompt, /git 报告没有文件改动/, "空清单要说出来,空标题会被读成'系统没查'");
 });

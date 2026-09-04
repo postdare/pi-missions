@@ -26,11 +26,10 @@ import { saveEvidence } from "./store/evidence.ts";
 import { saveCheckState, type CheckState } from "./store/check.ts";
 import { DEFAULT_THINKING } from "./roles/models.ts";
 import {
-	renderSpikeVerifierBrief,
-	renderVerifierBrief,
 	runVerifier,
 	type VerifierControl,
 	type VerifierProgress,
+	type VerifierSubject,
 } from "./roles/verifier.ts";
 import { renderActBrief, renderDoBrief } from "./briefs.ts";
 import { openHumanReview } from "./ui/human-review.ts";
@@ -167,7 +166,7 @@ export class CheckRunner {
 			persistCheck({ currentBranch: undefined });
 		};
 
-		const runIndependentVerifier = async (renderBrief: () => Promise<string>): Promise<void> => {
+		const runIndependentVerifier = async (subject: VerifierSubject): Promise<void> => {
 			if (!isCurrent()) return;
 			if (!a.git) {
 				judgeUnavailable = "独立 Verifier 未启动:目标目录不是 git 仓库";
@@ -241,8 +240,7 @@ export class CheckRunner {
 				model,
 				thinkingLevel: verifierConfig?.thinking ?? DEFAULT_THINKING.verifier,
 				budget,
-				expectedAcIds: requiredAcIds,
-				brief: await renderBrief(),
+				subject,
 				onProgress: updateVerifierProgress,
 				onControl: (control) => {
 					if (control) {
@@ -371,15 +369,15 @@ export class CheckRunner {
 				persistCheck({ currentBranch: undefined });
 				if (substantive) {
 					if (!isCurrent()) return;
-					await runIndependentVerifier(async () =>
-						renderSpikeVerifierBrief({
-							goal: a.plan.goal,
-							taskId: task?.id ?? "",
-							question: task?.question ?? "",
-							report: tail(report!, EVIDENCE_TAIL),
-							diff: (await this.gitChanges()).diff,
-						}),
-					);
+					const spikeChanges = await this.gitChanges();
+					await runIndependentVerifier({
+						kind: "spike",
+						goal: a.plan.goal,
+						taskId: task?.id ?? "",
+						question: task?.question ?? "",
+						report: tail(report!, EVIDENCE_TAIL),
+						diff: spikeChanges.diff,
+					});
 				} else {
 					persistCheck({
 						verifier: { status: "skipped", message: "探针结论未通过机械检查" },
@@ -400,18 +398,13 @@ export class CheckRunner {
 					});
 				} else if (criterion?.judge === "ai") {
 					const quickChanges = await this.gitChanges();
-					await runIndependentVerifier(async () =>
-						renderVerifierBrief({
-							goal: a.plan.goal,
-							taskId: task?.id ?? "",
-							taskTitle: a.plan.goal,
-							acceptanceCriteria: [{ id: "quick", text: criterion.text, verify: "quick" }],
-							expectedAcIds: requiredAcIds,
-							hardResults,
-							diff: quickChanges.diff,
-							changedFiles: quickChanges.files,
-						}),
-					);
+					await runIndependentVerifier({
+						kind: "quick-ai",
+						goal: a.plan.goal,
+						taskId: task?.id ?? "",
+						criterion: criterion.text,
+						changes: quickChanges,
+					});
 				} else if (criterion?.judge === "human") {
 					judgeUnavailable = await this.collectHumanVerdict(
 						ctx,
@@ -445,20 +438,16 @@ export class CheckRunner {
 					if (!isCurrent()) return;
 				}
 				const changes = await this.gitChanges();
-				await runIndependentVerifier(async () =>
-					renderVerifierBrief({
-						goal: a.plan.goal,
-						taskId: task?.id ?? "",
-						taskTitle: task?.title ?? "",
-						acceptanceCriteria: a.plan.acceptanceCriteria,
-						// 与 runVerifier 的 expectedAcIds 同一个数组:简报和校验必须同源,
-						// 各自取数就会漂,而漂了是静默降级 hard-only(见 renderVerifierBrief)
-						expectedAcIds: requiredAcIds,
-						hardResults,
-						diff: changes.diff,
-						changedFiles: changes.files,
-					}),
-				);
+				await runIndependentVerifier({
+					kind: "frozen-ac",
+					goal: a.plan.goal,
+					task: { id: task?.id ?? "", title: task?.title ?? "" },
+					// requiredAcIds 只在这个 seam 跨一次。Verifier 内部同时生成简报与校验集合。
+					verifyBranches: requiredAcIds,
+					acceptanceCriteria: a.plan.acceptanceCriteria,
+					hardResults,
+					changes,
+				});
 			}
 
 			if (!isCurrent()) return;
