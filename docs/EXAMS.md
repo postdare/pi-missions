@@ -215,10 +215,10 @@ AC 写松时它指出覆盖缺口而不是跟着盖章。
 
 | 题 | 日期 | 判分 | 结论 | 改动 |
 |---|---|---|---|---|
-| E2 scout | | | | |
+| E2 scout | 09-04 | **哑火** | 三条告知渠道全到位仍 0 轮。真因不是没看见:planner 是**先写计划、被打回了才去查**(PLAN 里 5 次 write_plan,10 次 read/grep 全在打回之后),而 scout 是前置工具,在这个行为模式下没有触发的时刻 | 待定 —— 见下 |
 | E1 quick | | | | |
-| E3 verifier | | | | |
-| E4 基线 | | | | |
+| E3 verifier | 09-04 | **过** | 换 deepseek 后 `status=completed`、6 轮 8 次工具调用,真去核了 DW6(浏览 tui/static 目录)与 DW5(grep 原测试函数名)。对照:glm 自核时 4 次全是 `degraded`、`toolCalls: 0`、从没提交过 verdict | 无需改;models.json 异源配置生效 |
+| E4 基线 | 09-04(顺带) | **过** | 在 E2 里触发:AC3 声明 green 实际红,连拦 3 次直到改对。判定完全正确 | `4a1e83d` 打回带上分支输出 |
 | E7 DEFINE | | | | |
 | E6 spike | | | | |
 | E5 熔断 | | | | |

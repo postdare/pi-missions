@@ -76,3 +76,48 @@ test("基线只在首次冻结跑 —— 重规划时世界已被改过", () => 
 	assert.equal(shouldProbeBaseline(1), false, "L2 之后不能再拿冻结时刻的红绿说事");
 	assert.equal(shouldProbeBaseline(2), false);
 });
+
+// 真机代价:E2 那轮里同一条「AC3 声明 green 但现在是红的」原样重复三次,
+// planner 只能猜着改 verify.sh,中间还去 read/grep 了一轮。输出系统本来就抓着。
+test("基线打回带上失败分支的输出 —— 只说『它红了』说不出为什么红", () => {
+	const [err] = evaluateBaseline([
+		{ acId: "AC1", verify: "impl", expected: "red", exitCode: 1 },
+		{
+			acId: "AC3",
+			verify: "regression",
+			expected: "green",
+			exitCode: 1,
+			output: "# todo-list/internal/api\nhandler.go:42:9: undefined: parseLimit\nFAIL\ttodo-list/internal/api [build failed]",
+		},
+	]);
+	assert.match(err, /AC3 声明了 baseline/);
+	assert.match(err, /undefined: parseLimit/, "定位得靠这一行,不能丢");
+	assert.match(err, /分支输出/);
+});
+
+test("基线打回:符合预期的分支不印输出 —— 红得对的那些全是噪音", () => {
+	const errors = evaluateBaseline([
+		{ acId: "AC1", verify: "impl", expected: "red", exitCode: 1, output: "一大段预期之内的报错" },
+		{ acId: "AC2", verify: "green-but-red", expected: "green", exitCode: 1, output: "真正要看的那段" },
+	]);
+	assert.equal(errors.length, 1);
+	assert.doesNotMatch(errors[0], /一大段预期之内的报错/);
+	assert.match(errors[0], /真正要看的那段/);
+});
+
+test("基线打回:输出过长时取尾巴 —— 报错在最后", () => {
+	const long = `${"噪音\n".repeat(500)}undefined: parseLimit`;
+	const [err] = evaluateBaseline([
+		{ acId: "AC1", verify: "v", expected: "green", exitCode: 1, output: long },
+	]);
+	assert.match(err, /undefined: parseLimit/);
+	assert.match(err, /前面省略/);
+	assert.ok(err.length < 1200, `打回信息不该灌满上下文,实际 ${err.length}`);
+});
+
+test("基线打回:分支没有输出时不留空段", () => {
+	const [err] = evaluateBaseline([
+		{ acId: "AC1", verify: "v", expected: "green", exitCode: 1, output: "   " },
+	]);
+	assert.doesNotMatch(err, /分支输出/);
+});

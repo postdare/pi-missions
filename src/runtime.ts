@@ -1331,7 +1331,9 @@ export class Runtime {
 		const probes: BaselineProbe[] = [];
 		for (const ac of plan.acceptanceCriteria) {
 			const r = await this.exec("bash", [script, ac.verify], { timeout: BASELINE_TIMEOUT_MS });
-			probes.push({ acId: ac.id, verify: ac.verify, expected: ac.baseline ?? "red", exitCode: r.code });
+			// stderr 优先:报错在那儿。两个都留,有些脚本把失败打在 stdout
+			const output = [r.stderr, r.stdout].filter((x) => x?.trim()).join("\n");
+			probes.push({ acId: ac.id, verify: ac.verify, expected: ac.baseline ?? "red", exitCode: r.code, output });
 		}
 		return probes;
 	}

@@ -39,6 +39,25 @@ export interface BaselineProbe {
 	expected: Baseline;
 	/** 实际退出码 */
 	exitCode: number;
+	/**
+	 * 分支的输出尾巴(stderr 优先)。**只有判定不符预期时才会被印出来。**
+	 *
+	 * 这里原来什么都不带,于是打回信息只说得出"AC3 声明 green 但它现在是红的",
+	 * 说不出**为什么**红 —— 而那份输出系统跑分支时本来就抓在手里,顺手丢掉了。
+	 * 真机代价:同一条打回原样重复三次,planner 只能猜着改 verify.sh,
+	 * 中间还去 read/grep 了一轮。给它看一眼报错,这是一次就能定位的事。
+	 */
+	output?: string;
+}
+
+/** 打回信息里带多少输出。够定位一个编译错或一条测试失败,又不至于灌满上下文 */
+export const BASELINE_OUTPUT_TAIL = 600;
+
+/** 取输出尾巴 —— 报错通常在最后(编译错、go test 的 FAIL 汇总、断言 diff) */
+export function tailOutput(text: string, limit = BASELINE_OUTPUT_TAIL): string {
+	const t = text.trimEnd();
+	if (t.length <= limit) return t;
+	return `…(前面省略)\n${t.slice(-limit)}`;
 }
 
 /** 退出码 → 基线色。非零即红 */
@@ -68,17 +87,21 @@ export function evaluateBaseline(probes: BaselineProbe[]): string[] {
 		}
 		const actual = baselineOf(p.exitCode);
 		if (actual === p.expected) continue;
+		// 符合预期的分支不印输出:红得对的那些每条都会有一大段报错,那是噪音不是线索
+		const detail = p.output?.trim() ? `\n分支输出:\n${tailOutput(p.output)}` : "";
 
 		if (p.expected === "red") {
 			errors.push(
 				`${p.acId} 的分支 "${p.verify}" 在动手之前就已经通过(exit=0)。` +
 					"要么这条 AC 是空壳(如 `exit 0`),要么它已经满足、不该进这个 mission;" +
-					'确实是回归项就显式声明 baseline: "green"',
+					'确实是回归项就显式声明 baseline: "green"' +
+					detail,
 			);
 		} else {
 			errors.push(
 				`${p.acId} 声明了 baseline: "green"(回归项),但它现在就是红的(exit=${p.exitCode})。` +
-					"基线已经坏了,先修好再冻结,否则无法区分是你改坏的还是本来就坏的",
+					"基线已经坏了,先修好再冻结,否则无法区分是你改坏的还是本来就坏的" +
+					detail,
 			);
 		}
 	}
