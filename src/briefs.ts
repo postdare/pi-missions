@@ -117,7 +117,12 @@ export function renderStateCard(
 	if (state.phase === "plan") {
 		const used = state.scoutRounds;
 		const scap = scoutRoundCapFor(state.tier);
-		if (scap > 0 && used > 0) {
+		// 额度行**没用过也要印**,和 DEFINE 的提问轮次同一个口径。
+		// 这里原来是 `used > 0`,理由写的是"空段是纯开销" —— 那句话把额度行
+		// 和结论段当成了一回事。结论段没扇出时确实是空的(下面那两个循环自然不出),
+		// 但额度行在 used=0 时不是空段,它就是"你有几路侦查"这条信息本身,
+		// 而 planner 最需要知道这件事的那一刻,正好就是它还没用过的那一刻。
+		if (scap > 0) {
 			lines.push(`侦查轮次:已用 ${used}/${scap}(闸门细则见 mission_scout 的工具说明)。`);
 		}
 		const findings = state.scoutFindings;

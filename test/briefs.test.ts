@@ -166,9 +166,13 @@ test("State Card:查明与未查明分开印,未查明的那条明说它不是�
 	assert.match(card, /侦查轮次:已用 1\/1/);
 });
 
-test("State Card:没扇出过就不印侦查段 —— 每轮都注入,空段是纯开销", () => {
+// 这条断言原来是反的(没用过就不印额度行,理由写的是"空段是纯开销")。
+// 那把额度行和结论段当成了一回事:结论段没扇出时确实空,额度行不空 ——
+// 它就是"你有几路侦查"这条信息,而 planner 最需要它的那一刻正是还没用过的那一刻。
+test("State Card:一路都没扇出时,额度行照印、结论段不印", () => {
 	const card = renderStateCard(planOf("standard", false), stateOf("standard", { phase: "plan", currentTask: null }));
-	assert.doesNotMatch(card, /侦查轮次/);
+	assert.match(card, /侦查轮次:已用 0\/1/, "planner 得先知道自己有这个额度");
+	assert.doesNotMatch(card, /已查明|未查明/, "结论段没内容就别占行");
 });
 
 test("State Card:侦查段只在 PLAN 出现 —— 计划冻结之后它再没有决策价值", () => {
