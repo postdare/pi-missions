@@ -9,6 +9,7 @@
 import type { Tier } from "../core/types.ts";
 import type { Baseline } from "../core/baseline.ts";
 import type { TaskKind } from "../core/spike.ts";
+import { formatVerifyScriptIssues, inspectVerifyScript } from "../core/verify-script.ts";
 
 export interface AcceptanceCriterion {
 	id: string;
@@ -213,6 +214,11 @@ export function validatePlan(plan: MissionPlan): string[] {
 			errors.push(`AC 引用的 verify.sh 分支 "${v}" 在脚本里不存在(case 分支或函数)`);
 		}
 	}
+
+	// 分支存在 ≠ 分支跑得到源码。三个真实 mission 连着栽在"脚本自己把 cwd 切走"上,
+	// 而这个坑要跑完整轮基线(每条 AC 各跑一遍测试)才暴露,报出来的还是隔了一层的
+	// 症状(某条声明 green 的 AC 却是红的)。在这里拦掉,代价是零。
+	errors.push(...formatVerifyScriptIssues(inspectVerifyScript(plan.verifyScript)));
 	return errors;
 }
 
