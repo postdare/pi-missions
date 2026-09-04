@@ -463,6 +463,15 @@ test("计划不合法时被 writePlan 拒绝", async () => {
 	assert.ok("error" in r);
 	assert.match((r as any).error, /missing-branch/);
 	assert.equal(rt.active!.state.phase, "plan");
+
+	// 拦截必须进 LOG。只活在工具返回值里的话,事后完全查不出 L0 有没有动过手 ——
+	// verify.sh 的 cwd 检查上线后跑完一整轮 mission,就是因为这个说不出它命中没有。
+	const log = fs.readFileSync(
+		path.join(tmp, "missions", "state", rt.active!.state.missionId, "LOG.md"),
+		"utf8",
+	);
+	assert.match(log, /PLAN 校验拦截/);
+	assert.match(log, /missing-branch/, "拦截的理由要留在 LOG 里,不能只留一个计数");
 });
 
 test("闸门:do 相位写冻结件被拦,pendingHandoff 硬阻断", async () => {

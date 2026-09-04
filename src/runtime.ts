@@ -1305,7 +1305,18 @@ export class Runtime {
 				alreadyRanSpike: a.state.spikesRun > 0,
 			}),
 		);
-		if (errors.length > 0) return { error: `计划不合法:\n${errors.map((e) => `- ${e}`).join("\n")}` };
+		if (errors.length > 0) {
+			// 校验拦截原来只活在工具返回值里,不进 LOG —— 于是"L0 到底拦没拦住"
+			// 在事后完全查不到(真实事故:verify.sh 的 cwd 检查上线后,一整轮
+			// mission 跑完也说不出它有没有命中过)。判定装置的每一次动作都该留痕,
+			// 否则它是不是在工作只能靠猜。
+			if (!a.inMemory) {
+				const log = statePaths(this.layout, a.state.missionId).logMd;
+				appendLog(log, `PLAN 校验拦截(${errors.length} 条,计划未冻结)`);
+				for (const e of errors) appendLog(log, `  · ${e.replace(/\s+/g, " ")}`);
+			}
+			return { error: `计划不合法:\n${errors.map((e) => `- ${e}`).join("\n")}` };
+		}
 
 		// PLAN 冻结前人工确认 —— 最重要的一次介入(§7.4)。
 		// 摊开整份计划(含 verify.sh 全文),打回时收一段意见回传给 planner:
