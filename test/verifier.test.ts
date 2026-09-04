@@ -295,6 +295,7 @@ const brief = (expectedAcIds: string[]) =>
 		expectedAcIds,
 		hardResults: [],
 		diff: "",
+		changedFiles: [],
 	});
 
 test("简报里要提交的 id 就是 expectedAcIds,不是计划里的 AC 编号", () => {
@@ -335,6 +336,7 @@ test("一个分支被多条 AC 覆盖时,正文合并,id 仍只有一个", () =>
 		expectedAcIds: ["copy"],
 		hardResults: [],
 		diff: "",
+		changedFiles: [],
 	});
 	assert.ok(text.includes("第一条要求 / 第二条要求"));
 	assert.equal((text.match(/^- copy/gm) ?? []).length, 1);
@@ -433,4 +435,37 @@ test("runVerifier:降档重试后仍失败时,两轮的 usage 都要记账", asy
 	assert.equal(r.status, "failed");
 	assert.equal(r.usage.input, 20);
 	assert.equal(r.usage.output, 12);
+});
+
+// diff 会被截断(DIFF_TAIL = 12000),文件清单不会 —— 这正是清单存在的理由。
+// 真机上 diff 被截断的那一次,恰好是验证者调用最多、唯一超时的一次。
+test("简报:diff 再长,文件清单也要完整,并且明说清单没被截断", () => {
+	const text = renderVerifierBrief({
+		goal: "g",
+		taskId: "T1",
+		taskTitle: "t",
+		acceptanceCriteria: [{ id: "AC1", text: "a", verify: "ac1" }],
+		expectedAcIds: ["ac1"],
+		hardResults: [],
+		diff: "（此处 diff 已被截断）",
+		changedFiles: ["新增 internal/schema/envelope.go", "修改 internal/storage/storage.go"],
+	});
+	assert.match(text, /internal\/schema\/envelope\.go/);
+	assert.match(text, /internal\/storage\/storage\.go/);
+	assert.match(text, /完整清单/, "要让验证者知道这份清单可以直接照着读");
+	assert.match(text, /可能因过长被截断/, "也要让它知道 diff 不可信,清单才可信");
+});
+
+test("简报:没有文件改动时不留空段", () => {
+	const text = renderVerifierBrief({
+		goal: "g",
+		taskId: "T1",
+		taskTitle: "t",
+		acceptanceCriteria: [],
+		expectedAcIds: ["ac1"],
+		hardResults: [],
+		diff: "",
+		changedFiles: [],
+	});
+	assert.match(text, /git 报告没有文件改动/, "空清单要说出来,空标题会被读成'系统没查'");
 });

@@ -497,6 +497,18 @@ export function renderVerifierBrief(input: {
 	expectedAcIds: string[];
 	hardResults: Array<{ acId: string; pass: boolean; outputTail: string }>;
 	diff: string;
+	/**
+	 * 本轮改动涉及的文件全名单(`git diff --name-status` 的产物)。
+	 *
+	 * 它存在的唯一理由是 diff 会被截断:`DIFF_TAIL` 是 12000 字符,一次动了
+	 * 十来个文件、新建几个包就超了。截断之后验证者只能靠 `浏览/查找` 自己重新
+	 * 发现改了哪些文件 —— 真机上那一次(11 个文件、四个新包)正是调用最多、
+	 * 唯一超时的一次。清单不截断:几十个文件也就几百字符,比让它重新摸一遍便宜得多。
+	 *
+	 * **不要拿 state.metrics.touchedFiles 来填这里** —— 那个是整个 mission 累计的、
+	 * 任务切换不清零,塞进来会把前几个任务的文件一起混进"本轮改动"。
+	 */
+	changedFiles: string[];
 }): string {
 	const acs = input.expectedAcIds
 		.map((acId) => {
@@ -534,8 +546,14 @@ ${acs}
 # 自动化验证结果(hard 证据,已由系统执行)
 ${hard}
 
+# 本轮改动涉及的文件(完整清单,未截断)
+${input.changedFiles.length > 0 ? input.changedFiles.map((f) => `- ${f}`).join("\n") : "(git 报告没有文件改动)"}
+
 # 当前改动(git diff)
 ${input.diff}
+
+（上面这段 diff 可能因过长被截断,**但文件清单是完整的** —— 清单里出现、diff 里没有的
+文件,直接读它,不必先去搜索有哪些文件被改过。)
 
 # 规则
 - 逐条 AC 给出 pass / fail / inconclusive(证据不足就 inconclusive,不要猜)

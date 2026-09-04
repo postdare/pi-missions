@@ -67,3 +67,50 @@ export async function computeGitTreeFingerprint(
 		return null;
 	}
 }
+
+/**
+ * 解析 `git diff --name-status` 的输出,产出「状态 + 路径」的可读清单。
+ *
+ * 这份清单喂给独立验证者,理由是 diff 正文会被截断而它不会 —— 验证者照着清单
+ * 直接去读文件,省掉"先搜一遍哪些文件被改过"的那几轮。所以格式上优先可读性:
+ * 状态用中文写出来,而不是原样抛一个 `M` / `A` / `R100` 给模型去猜。
+ *
+ * 重命名/复制那两行的格式和其余不同(`R100\told\tnew`,三列),这也是这个函数
+ * 必须存在、不能用一句 split 糊过去的原因。
+ */
+export function parseNameStatus(stdout: string): string[] {
+	const out: string[] = [];
+	for (const raw of stdout.split("\n")) {
+		const line = raw.trimEnd();
+		if (!line) continue;
+		const cols = line.split("\t");
+		const code = cols[0]?.trim();
+		if (!code || cols.length < 2) continue;
+		const letter = code[0];
+		// R/C 带相似度百分比(R100),且是三列:旧路径 + 新路径
+		if ((letter === "R" || letter === "C") && cols.length >= 3) {
+			const verb = letter === "R" ? "重命名" : "复制";
+			out.push(`${verb} ${cols[1]} → ${cols[2]}`);
+			continue;
+		}
+		out.push(`${nameStatusVerb(letter)} ${cols[1]}`);
+	}
+	return out;
+}
+
+function nameStatusVerb(letter: string | undefined): string {
+	switch (letter) {
+		case "A":
+			return "新增";
+		case "M":
+			return "修改";
+		case "D":
+			return "删除";
+		case "T":
+			return "类型变更";
+		default:
+			// 认不出的状态码原样带出去,别吞掉 —— 吞掉等于清单少一个文件,
+			// 而清单"完整"正是它存在的全部理由。
+			return letter ?? "?";
+	}
+}

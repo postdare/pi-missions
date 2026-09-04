@@ -36,6 +36,7 @@ import { renderActBrief, renderDoBrief } from "./briefs.ts";
 import { openHumanReview } from "./ui/human-review.ts";
 import type { ActiveMission, Runtime } from "./runtime.ts";
 import { DEFAULT_VERIFIER_CEILING_MS, DEFAULT_VERIFIER_IDLE_MS } from "./core/verifier-budget.ts";
+import { parseNameStatus } from "./store/git.ts";
 
 const EVIDENCE_TAIL = 4000;
 const DIFF_TAIL = 12000;
@@ -376,7 +377,7 @@ export class CheckRunner {
 							taskId: task?.id ?? "",
 							question: task?.question ?? "",
 							report: tail(report!, EVIDENCE_TAIL),
-							diff: await this.gitDiff(),
+							diff: (await this.gitChanges()).diff,
 						}),
 					);
 				} else {
@@ -398,6 +399,7 @@ export class CheckRunner {
 						verifier: { status: "skipped", message: "quick 命令判据:hard 证据已足够" },
 					});
 				} else if (criterion?.judge === "ai") {
+					const quickChanges = await this.gitChanges();
 					await runIndependentVerifier(async () =>
 						renderVerifierBrief({
 							goal: a.plan.goal,
@@ -406,7 +408,8 @@ export class CheckRunner {
 							acceptanceCriteria: [{ id: "quick", text: criterion.text, verify: "quick" }],
 							expectedAcIds: requiredAcIds,
 							hardResults,
-							diff: await this.gitDiff(),
+							diff: quickChanges.diff,
+							changedFiles: quickChanges.files,
 						}),
 					);
 				} else if (criterion?.judge === "human") {
@@ -441,6 +444,7 @@ export class CheckRunner {
 					);
 					if (!isCurrent()) return;
 				}
+				const changes = await this.gitChanges();
 				await runIndependentVerifier(async () =>
 					renderVerifierBrief({
 						goal: a.plan.goal,
@@ -451,7 +455,8 @@ export class CheckRunner {
 						// 各自取数就会漂,而漂了是静默降级 hard-only(见 renderVerifierBrief)
 						expectedAcIds: requiredAcIds,
 						hardResults,
-						diff: await this.gitDiff(),
+						diff: changes.diff,
+						changedFiles: changes.files,
 					}),
 				);
 			}
@@ -545,13 +550,25 @@ export class CheckRunner {
 		);
 	}
 
-	private async gitDiff(): Promise<string> {
+	/**
+	 * 本轮改动:截断过的 diff 正文 + **完整**的文件清单。
+	 *
+	 * 两者分开返回是因为它们的截断策略必须不同。diff 正文超过 DIFF_TAIL 就砍尾,
+	 * 而清单永远给全 —— 验证者可以照着清单直接去读文件,不必先花几轮搜索
+	 * "到底哪些文件被改过"。真机上 diff 被截断的那一次,恰好是它调用最多、
+	 * 唯一超时的一次。
+	 */
+	private async gitChanges(): Promise<{ diff: string; files: string[] }> {
 		// 用冻结时的 baseCommit 做 diff 基准(如果有的话),
 		// 否则退化为 HEAD —— 后者会把冻结前的工作也混进 verdict 证据。
 		const base = this.rt.active?.state.baseCommit ?? "HEAD";
 		const r = await this.rt.exec("git", ["-c", "core.pager=cat", "diff", base, "--stat"], { timeout: 30_000 });
 		const d = await this.rt.exec("git", ["-c", "core.pager=cat", "diff", base], { timeout: 30_000 });
-		return tail(`${r.stdout}\n\n${d.stdout}`, DIFF_TAIL);
+		const n = await this.rt.exec("git", ["-c", "core.pager=cat", "diff", base, "--name-status"], { timeout: 30_000 });
+		return {
+			diff: tail(`${r.stdout}\n\n${d.stdout}`, DIFF_TAIL),
+			files: parseNameStatus(n.stdout),
+		};
 	}
 
 	/**
