@@ -453,9 +453,14 @@ export async function openMissionsPanel(ctx: any, l: RepoLayout, cb: PanelCallba
 			ctx.ui.notify("没有历史 mission。/mission new <目标> 新建", "info");
 			return;
 		}
+		// goal 必须在这一行里。TUI 那条路显示的是 goal(见 missionRow),只有这条兜底
+		// 印的是 id —— 而中文目标的 id 是 `mission-<哈希>`,一串纯编号,
+		// 人对着它认不出哪个是哪个。goal 排在最后:前面几列宽度固定,它可以随便长。
 		const lines = missions.map((m) => {
 			const s = m.state;
-			return `${s.missionId}  ${s.tier}  ${s.phase}  updated=${new Date(s.updatedAt).toISOString().slice(0, 16)}`;
+			const when = new Date(s.updatedAt).toISOString().slice(0, 16);
+			const goal = m.plan?.goal?.replace(/\s+/g, " ").trim();
+			return `${s.missionId}  ${s.tier}  ${s.phase}  updated=${when}  ${goal || "(计划损坏或缺失)"}`;
 		});
 		ctx.ui.notify(lines.join("\n"), "info");
 		return;

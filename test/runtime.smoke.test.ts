@@ -14,7 +14,9 @@ import { execFile } from "node:child_process";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import { Runtime } from "../src/runtime.ts";
+import { Runtime, slugify, uniqueMissionId } from "../src/runtime.ts";
+import { openMissionsPanel } from "../src/ui/panel.ts";
+import { layout } from "../src/store/paths.ts";
 import { renderStateCard, renderDoBrief } from "../src/briefs.ts";
 import { parseMissionMd } from "../src/store/mission.ts";
 import { BUILTIN_ALL, MISSION_TOOLS, toolsForPhase } from "../src/hooks/gate.ts";
@@ -2157,4 +2159,87 @@ test("相位停滞:相位推进之后重新给一次推动机会", async () => {
 	assert.equal(pushed.length, 1, "换了相位就是有进展,该重新给一次机会");
 	assert.match(pushed[0], /PLAN 相位/);
 	assert.match(pushed[0], /mission_write_plan/, "standard 的终结动作不是 mission_criterion");
+});
+
+// ── mission id:中文目标一个 ASCII 字符都留不下 ──────────────────────────────
+//
+// 这个仓库的目标基本都是中文(CLAUDE.md 第一行),所以兜底不是边角情况,是主路径:
+// 五个真实目标里三个整条 slug 为空。原来的兜底是 Date.now().toString(36)。
+
+test("slugify:纯中文目标的兜底 id 可复现 —— 同目标同 id,abort 重开认得出是同一件事", () => {
+	const goal = "重构导出模块的错误处理";
+	const a = slugify(goal);
+	const b = slugify(goal);
+	assert.equal(a, b, "时间戳兜底做不到这条:同一个目标重开一次就换一个 id");
+	assert.match(a, /^mission-[0-9a-f]{8}$/);
+});
+
+test("slugify:不同的中文目标给出不同的 id —— 时间戳兜底会让它们撞在同一毫秒", () => {
+	const ids = ["重构导出模块的错误处理", "修复列表页在窄屏下的换行", "给待办加提醒功能。"].map(slugify);
+	assert.equal(new Set(ids).size, 3, `三个目标该有三个 id,实际:${ids.join(" / ")}`);
+});
+
+test("slugify:目标里有 ASCII 就用 ASCII,不走兜底", () => {
+	assert.equal(slugify("把登录鉴权从 session 迁移到 JWT"), "session-jwt");
+	assert.equal(slugify("给 REST API 加上分页"), "rest-api");
+});
+
+test("slugify:id 始终是纯 ASCII —— 它就是目录名,macOS 会对中文文件名做 Unicode 规范化", () => {
+	for (const goal of ["重构导出模块", "混合 mixed 目标", "全 ASCII goal"]) {
+		assert.match(slugify(goal), /^[a-z0-9][a-z0-9-]*$/, goal);
+	}
+});
+
+test("uniqueMissionId:撞了就加序号,从 -2 开始", () => {
+	const taken = new Set(["2026-09-04-fix-login"]);
+	assert.equal(uniqueMissionId("2026-09-04-fix-login", (id) => taken.has(id)), "2026-09-04-fix-login-2");
+
+	taken.add("2026-09-04-fix-login-2");
+	assert.equal(uniqueMissionId("2026-09-04-fix-login", (id) => taken.has(id)), "2026-09-04-fix-login-3");
+});
+
+test("uniqueMissionId:没撞就原样返回 —— 绝大多数 mission 不该被加上后缀", () => {
+	assert.equal(uniqueMissionId("2026-09-04-fix-login", () => false), "2026-09-04-fix-login");
+});
+
+test("同一天原样重开同一个目标不再直接抛「mission 已存在」", async () => {
+	const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "pi-missions-dupid-"));
+	const pi = mockPi();
+	const ctx = mockCtx(tmp);
+
+	const rt1 = new Runtime(pi, tmp);
+	const first = await rt1.startNew(ctx, "重构导出模块的错误处理", "standard");
+	assert.ok("id" in first, JSON.stringify(first));
+
+	// 换一个 Runtime 实例模拟 abort 之后重来(busy 守卫是按实例算的)
+	const rt2 = new Runtime(mockPi(), tmp);
+	const second = await rt2.startNew(mockCtx(tmp), "重构导出模块的错误处理", "standard");
+	assert.ok("id" in second, `第二次开同一个目标不该失败:${JSON.stringify(second)}`);
+	assert.notEqual(second.id, first.id, "两个 mission 必须是两个 id");
+	assert.equal(second.id, `${first.id}-2`);
+});
+
+test("/missions 的纯文本兜底列表带上 goal —— 中文 mission 的 id 是一串纯编号", async () => {
+	const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "pi-missions-list-"));
+	const rt = new Runtime(mockPi(), tmp);
+	const ctx = mockCtx(tmp); // 没传 human ⇒ hasUI: false,走兜底那条路
+	assert.equal(ctx.hasUI, false);
+
+	const goal = "重构导出模块的错误处理";
+	await rt.startNew(ctx, goal, "standard");
+
+	ctx.notifications.length = 0;
+	await openMissionsPanel(ctx, layout(tmp, "missions"), {
+		onDetail: () => {},
+		onSelectTier: () => {},
+		models: {
+			getData: () => ({ config: {}, models: [], sessionLabel: "", cost: {}, tokens: {}, activeRole: null, dirName: "missions" }),
+			setModel: () => {},
+			setThinking: () => {},
+		},
+	});
+
+	const listing = ctx.notifications.join("\n");
+	assert.match(listing, /mission-[0-9a-f]{8}/, "前提:中文目标的 id 确实是纯编号");
+	assert.ok(listing.includes(goal), `列表里必须认得出是哪个 mission:\n${listing}`);
 });

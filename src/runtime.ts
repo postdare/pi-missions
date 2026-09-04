@@ -188,7 +188,10 @@ export class Runtime {
 		if (git) this.ensureStateExcludes();
 
 		goal = sanitizeGoal(goal);
-		const id = `${new Date().toISOString().slice(0, 10)}-${slugify(goal)}`;
+		const id = uniqueMissionId(
+			`${new Date().toISOString().slice(0, 10)}-${slugify(goal)}`,
+			(candidate) => fs.existsSync(statePaths(l, candidate).dir),
+		);
 		const plan: MissionPlan = {
 			missionId: id,
 			tier,
@@ -1651,13 +1654,46 @@ export function sanitizeGoal(goal: string): string {
 		.trim();
 }
 
-function slugify(goal: string): string {
+export function slugify(goal: string): string {
 	const ascii = goal
 		.toLowerCase()
 		.replace(/[^a-z0-9]+/g, "-")
 		.replace(/^-+|-+$/g, "")
 		.slice(0, 40);
-	return ascii || `mission-${Date.now().toString(36)}`;
+	// 兜底原来是 `mission-${Date.now().toString(36)}`。这个仓库的目标基本都是中文
+	// (CLAUDE.md 第一行:README、注释、commit 全是中文),纯中文目标一个 ASCII 字符
+	// 都留不下,于是**大多数 mission 的 id 都走这条兜底** —— 五个真实目标里三个。
+	// 时间戳的问题不是不好看,是**同一个目标重开一次就换一个 id**,
+	// abort 之后重来看不出是同一件事;而两个不同目标落在同一毫秒反而会撞。
+	// 换成目标文本的短哈希:同目标同 id(可复现),不同目标不同 id。
+	// 撞了怎么办交给 uniqueMissionId —— 那是它的活。
+	//
+	// 为什么不干脆让中文进 id:id 就是目录名,而 macOS 会把文件名做 Unicode 规范化
+	// (NFC 写进去、readdir 读出来可能是 NFD)。listMissions 拿目录名当 key 去 load,
+	// load 又拿它和 SNAPSHOT.json 里存的字符串比 —— 规范化形式一错,
+	// 每个中文 mission 都会被报成"损坏"。ASCII id 对这件事免疫。
+	// 何况 MISSION_ID_RE 是防路径穿越的那道线,不该为可读性让路。
+	// id 的可读性问题其实是"列表不显示 goal"的替身,那一半单独修了。
+	return ascii || `mission-${crypto.createHash("sha256").update(goal).digest("hex").slice(0, 8)}`;
+}
+
+/**
+ * 撞了就加序号。**同一天里 slug 相同的目标不是极端情况** ——
+ * abort 之后原样重开、两个目标 slug 到同一串(大小写不同、只差标点),都会撞上;
+ * 而 repository.create 撞上就直接抛 "mission 已存在",人得自己改目标措辞才能继续。
+ *
+ * 取 exists 谓词而不是自己读盘,是为了让它能被单测钉住 —— 这段逻辑的边界
+ * (从 -2 开始而不是 -1、上限之后放弃)在真实文件系统上很难摆出来。
+ */
+export function uniqueMissionId(base: string, exists: (id: string) => boolean): string {
+	if (!exists(base)) return base;
+	// 上限只是防死循环。真到 99 个同名目标,再编号也没有意义了,
+	// 让 create 抛出去比无声地造第 100 个更好。
+	for (let n = 2; n <= 99; n++) {
+		const candidate = `${base}-${n}`;
+		if (!exists(candidate)) return candidate;
+	}
+	return base;
 }
 
 function safeSessionFile(ctx: any): string {
