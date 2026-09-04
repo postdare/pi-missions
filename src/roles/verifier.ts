@@ -17,6 +17,7 @@ import {
 } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
 import type { Evidence, FailureCategory } from "../core/types.ts";
+import { budgetReason, checkVerifierBudget, type VerifierBudget } from "../core/verifier-budget.ts";
 
 /** 只读工具白名单:没有 edit/write/bash,Verifier 无法修改工作区。导出供测试锁定。 */
 export const VERIFIER_TOOLS = ["read", "grep", "find", "ls", "mission_verdict"] as const;
@@ -30,7 +31,8 @@ export interface VerifierOptions {
 	model: any;
 	thinkingLevel: string;
 	brief: string;
-	timeoutMs: number;
+	/** 静默/总时长两条预算,判定在 core/verifier-budget.ts */
+	budget: VerifierBudget;
 	signal?: AbortSignal;
 	/** 本轮必须逐条提交且只能提交这些 AC */
 	expectedAcIds: string[];
@@ -238,6 +240,9 @@ async function runVerifierOnce(
 			trace.push(activity);
 			if (trace.length > 30) trace.shift();
 		}
+		// 有动静就把静默计时归零。这一行是整套机制的支点:干活的核验
+		// 每次工具调用都会走到这里,于是永远不会被静默判定掐掉。
+		lastActivityAt = Date.now();
 		opts.onProgress?.({ ...usage, activity, trace: [...trace] });
 	};
 	const abort = async () => {
@@ -246,10 +251,22 @@ async function runVerifierOnce(
 	const onExternalAbort = () => {
 		void abort();
 	};
-	const timer = setTimeout(() => {
+	// 按**静默**掐,不按总时长 —— 理由见 core/verifier-budget.ts 的文件头。
+	// 轮询间隔跟着静默口径走:生产上(120s)就是 5 秒一查,足够细又不空转;
+	// 测试里把口径调到毫秒级时它也跟着变细,不必为了等一个固定间隔而让用例跑满 5 秒。
+	let lastActivityAt = Date.now();
+	let timedOutReason: string | null = null;
+	const startedAt = lastActivityAt;
+	const timer = setInterval(() => {
+		const verdict = checkVerifierBudget(
+			{ startedAt, lastActivityAt, now: Date.now() },
+			opts.budget,
+		);
+		if (verdict === "running") return;
 		timedOut = true;
+		timedOutReason = budgetReason(verdict, opts.budget);
 		void abort();
-	}, opts.timeoutMs);
+	}, Math.min(5_000, Math.max(50, Math.floor(opts.budget.idleMs / 4))));
 	timer.unref();
 
 	try {
@@ -296,7 +313,7 @@ async function runVerifierOnce(
 			providerError,
 		};
 	} finally {
-		clearTimeout(timer);
+		clearInterval(timer);
 		opts.signal?.removeEventListener("abort", onExternalAbort);
 		opts.onControl?.(null);
 		unsubscribe?.();
@@ -307,7 +324,7 @@ async function runVerifierOnce(
 		return {
 			status: "timeout",
 			evidences: null,
-			message: `超过 ${opts.timeoutMs}ms 或被中止`,
+			message: timedOutReason ?? "被中止",
 			usage,
 			trace,
 			providerError,

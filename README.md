@@ -502,7 +502,8 @@ mission 结束(done / halted)时按开工那一刻记下的现场还原,包括�
   "missionsDir": "missions",          // 目录名冲突时改
   "incrementalCheck": "npx tsc --noEmit",  // 编辑级反馈(§8.2),未配置则关闭
   "publicApiGlobs": ["src/api/**"],   // 升档判据
-  "verifierTimeoutMs": 300000,
+  "verifierIdleMs": 120000,
+  "verifierCeilingMs": 900000,
   "scoutTimeoutMs": 180000,           // 单路 scout;扇出是并行的,这也是整轮上限
   "contextWatermark": 0.5             // 超过即主动换脑
 }

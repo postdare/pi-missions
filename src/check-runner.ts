@@ -35,6 +35,7 @@ import {
 import { renderActBrief, renderDoBrief } from "./briefs.ts";
 import { openHumanReview } from "./ui/human-review.ts";
 import type { ActiveMission, Runtime } from "./runtime.ts";
+import { DEFAULT_VERIFIER_CEILING_MS, DEFAULT_VERIFIER_IDLE_MS } from "./core/verifier-budget.ts";
 
 const EVIDENCE_TAIL = 4000;
 const DIFF_TAIL = 12000;
@@ -175,7 +176,10 @@ export class CheckRunner {
 				return;
 			}
 			const startedAt = Date.now();
-			const timeoutMs = rt.config.verifierTimeoutMs ?? 300_000;
+			const budget = {
+				idleMs: rt.config.verifierIdleMs ?? DEFAULT_VERIFIER_IDLE_MS,
+				ceilingMs: rt.config.verifierCeilingMs ?? DEFAULT_VERIFIER_CEILING_MS,
+			};
 			persistCheck({
 				stage: "running_verifier",
 				verifier: { status: "running", startedAt, activity: "初始化独立 AgentSession", trace: [] },
@@ -235,7 +239,7 @@ export class CheckRunner {
 				cwd: rt.cwd,
 				model,
 				thinkingLevel: verifierConfig?.thinking ?? DEFAULT_THINKING.verifier,
-				timeoutMs,
+				budget,
 				expectedAcIds: requiredAcIds,
 				brief: await renderBrief(),
 				onProgress: updateVerifierProgress,

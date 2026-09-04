@@ -13,7 +13,7 @@ const options = {
 	model: { provider: "test", id: "verifier" },
 	thinkingLevel: "off",
 	brief: "verify",
-	timeoutMs: 1000,
+	budget: { idleMs: 1000, ceilingMs: 10_000 },
 	expectedAcIds: ["AC1"],
 };
 
@@ -196,7 +196,7 @@ test("runVerifier:区分超时与未提交 verdict,并始终清理 session", asy
 	let aborted = false;
 	let disposed = false;
 	const timeout = await runVerifier(
-		{ ...options, timeoutMs: 5 },
+		{ ...options, budget: { idleMs: 5, ceilingMs: 50 } },
 		async () => ({
 			subscribe: () => () => {},
 			prompt: () =>

@@ -15,8 +15,15 @@ export interface MissionsConfig {
 	incrementalCheck?: string;
 	/** 公开 API 文件 glob(升档判据),如 ["src/api/**", "*.proto"] */
 	publicApiGlobs?: string[];
-	/** 独立 Verifier AgentSession 超时毫秒,默认 300000 */
-	verifierTimeoutMs?: number;
+	/**
+	 * 独立 Verifier 的**静默**上限毫秒,默认 120000。
+	 * 掐的是"多久没有任何动静",不是"总共跑了多久" —— 真机实测每轮间隔
+	 * 11–16 秒,而一次实质核验要 225–236 秒。按总时长掐会把干活的误杀
+	 * (真实事故),按静默掐反而能更早发现卡住的。判定见 core/verifier-budget.ts。
+	 */
+	verifierIdleMs?: number;
+	/** 独立 Verifier 的总时长兜底毫秒,默认 900000。常规路径靠静默判定,这条只防"一直有动静但不收敛" */
+	verifierCeilingMs?: number;
 	/**
 	 * 单路 scout 超时毫秒,默认 180000。
 	 * 扇出是并行的,所以这也是整轮侦查的墙钟上限,不是 N 倍。
