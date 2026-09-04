@@ -24,6 +24,8 @@ import { renderPlanReview, SECTION_IDS, type ReviewSection } from "../src/ui/pla
 import { renderAskReview } from "../src/ui/ask-review.ts";
 import { renderHumanReview } from "../src/ui/human-review.ts";
 import type { ModelsPageData } from "../src/ui/models-page.ts";
+import { renderWidgetCard } from "../src/ui/dashboard.ts";
+import { CURSOR } from "../src/ui/chrome.ts";
 
 const theme = {
 	fg: (_c: string, s: string) => `\x1b[31m${s}\x1b[0m`,
@@ -714,4 +716,23 @@ test("renderHumanReview:两态 × 各宽度 × 各选中态都恰好铺满,且�
 			}
 		}
 	}
+});
+
+// ▸ 在 chrome.ts 是 CURSOR —— panel / ask-review / human-review 用它标「这一行被选中」。
+// 而常驻卡收不了任何按键(setWidget 的组件从不进 pi-tui 的 focus 链),
+// 用它去标当前任务就是在邀请人按上下键。真机上有人这么试过。
+test("常驻卡不使用选中光标的字形 —— 它不可选中,别给假信号", () => {
+	const st = initialState({ missionId: "m", tier: "standard", taskOrder: ["T1", "T2"] });
+	st.phase = "do" as never;
+	st.currentTask = "T1";
+	for (const width of WIDTHS) {
+		const lines = renderWidgetCard(theme as never, REVIEW_PLAN, st, NOW, width).join("\n");
+		assert.ok(!lines.includes(CURSOR), `宽度 ${width}:常驻卡出现了 CURSOR(${CURSOR})`);
+	}
+	// 计划与 state 漂移的那条分支(plan 里查不到 currentTask)走的是另一段代码
+	const drift = { ...st, currentTask: "T-ghost" };
+	assert.ok(
+		!renderWidgetCard(theme as never, REVIEW_PLAN, drift, NOW, 80).join("\n").includes(CURSOR),
+		"漂移分支也不能用 CURSOR",
+	);
 });

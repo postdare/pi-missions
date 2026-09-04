@@ -131,8 +131,9 @@ test("widget:任务标题按宽度折行(截断 bug 回归),attempt 1/N 收起",
 	const joined = lines.join("");
 	for (const ch of longTitle) assert.ok(joined.includes(ch), `标题全文可见,不截断:${ch}`);
 	assert.ok(!lines.some((l) => l.includes("attempt 1/3")), "attempt 1/N 收起,训练不出选择性失明");
-	// 续行必须悬挂到标题列:"  " + "▸ T2 " = 7 列。差一列不报错,只会看着像另起一段
-	assert.ok(lines[1].startsWith("  ▸ T2 "), `前缀不带分隔点:${lines[1]}`);
+	// 续行必须悬挂到标题列:"  " + "· T2 " = 7 列。差一列不报错,只会看着像另起一段。
+	// 前缀用中点而不是 ▸ —— 后者是可选中行的光标,而常驻卡收不了按键(见 render.test.ts)
+	assert.ok(lines[1].startsWith("  · T2 "), `前缀不带分隔点:${lines[1]}`);
 	const titleCol = lines[1].indexOf("FirstScreen");
 	assert.equal(titleCol, 7, "标题起于第 7 列");
 	assert.equal(
@@ -263,6 +264,8 @@ test("dashboard:任务清单 + AC 证据状态 + 成本分账 + 日志", () => {
 	);
 	assert.ok(out.includes("迁移登录鉴权到 JWT"));
 	assert.ok(out.includes("✓ T1"));
+	// 状态页的任务行用的是**状态图标**(STATUS_ICON 里 running = ▸),
+	// 和常驻卡那个"可选中光标"是两回事 —— 状态页的任务行确实可以上下选中。
 	assert.ok(out.includes("▸ T2"));
 	assert.ok(out.includes("上次失败: AuthIntegrationTest#refreshToken"));
 	assert.ok(out.includes("✗ AC1"), "AC1 有失败证据应标 ✗");

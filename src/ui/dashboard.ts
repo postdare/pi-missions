@@ -328,11 +328,16 @@ export function renderWidgetCard(
 	const tail = tailBits.join(sep);
 	const tailW = tail ? visibleWidth(tail) + visibleWidth(sep) : 0;
 
-	// 行 2:▸ T2 任务标题。标题按实际剩余宽度折行(CLAUDE.md:任务标题属于
+	// 行 2:· T2 任务标题。标题按实际剩余宽度折行(CLAUDE.md:任务标题属于
 	// "一律折行"那一档),续行悬挂到标题列 —— 悬挂量必须等于 "  " + 前缀的实际宽度,
 	// 差一列不会报错,只会看着像另起了一段。
+	//
+	// **这里刻意不用 chrome.ts 的 CURSOR(▸)**:那个字形在 panel / ask-review /
+	// human-review 里的含义是"这一行被选中了",而常驻卡收不了任何按键
+	// (setWidget 的组件从不进 pi-tui 的 focus 链)。用它去标当前任务,就是在
+	// 邀请人去按上下键 —— 真机上有人这么试过,那是界面在骗人。
 	if (task) {
-		const prefix = `${theme.fg("accent", "▸")} ${task.id} `;
+		const prefix = `${theme.fg("accent", "·")} ${task.id} `;
 		const prefixW = visibleWidth(prefix);
 		const titleBudget = Math.max(12, width - 2 - prefixW - tailW);
 		// 折两行封顶。标题该折不该截(CLAUDE.md),但这张卡的高度是永久成本:
@@ -344,7 +349,7 @@ export function renderWidgetCard(
 		for (const part of titleParts.slice(1)) lines.push(clip(hang + part, width));
 	} else if (state.currentTask) {
 		// 计划里查不到这个任务(plan 与 state 漂移):id 照显,别把整行吞掉
-		lines.push(clip(`  ${theme.fg("accent", "▸")} ${state.currentTask}${tail ? sep + tail : ""}`, width));
+		lines.push(clip(`  ${theme.fg("accent", "·")} ${state.currentTask}${tail ? sep + tail : ""}`, width));
 	} else if (tail) {
 		lines.push(clip(`  ${tail}`, width));
 	}
