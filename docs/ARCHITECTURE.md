@@ -58,7 +58,7 @@ pi-missions 是跑在 [pi](https://github.com/earendil-works/pi-coding-agent) �
 │  │  src/store/   仓库读写(计划/状态/日志/证据/路径)   │   │
 │  │  src/hooks/   闸门 + 编辑级增量反馈                  │   │
 │  │  src/roles/   角色模型映射 + 进程内 Verifier / Scout      │   │
-│  │  src/ui/      主面板 / 状态条 / 卡片                 │   │
+│  │  src/ui/      主面板 / 状态条 / 卡片 / 工具块渲染器  │   │
 │  └─────────────────────────────────────────────────────┘   │
 └────────────────────────────────────────────────────────────┘
          │ 落盘
@@ -534,6 +534,19 @@ mission 一旦会话重建就永久失联。
 理由与 `defineAnswers` 逐字相同 —— 换脑之后 planner 照它写计划,只活在上下文里就等于白烧。
 三者都**不进** `isState()` 的结构校验(与 `defineAnswers`、`tokens` 一样),
 否则升级前留下的 in-flight snapshot 会整份加载失败。
+
+**进度有两个出口**,谁也替代不了谁:
+
+- **工具调用块**(`src/ui/scout-view.ts`)—— 逐路一行,谁回来了、谁还在跑、在读哪个文件。
+  自绘的理由是兜底渲染会把 `JSON.stringify(args, null, 2)`(4 题 ≈ 30 行)压在进度上面。
+  `renderCall` / `renderResult` 返回的 `Component` 只需要 `render(width): string[]`,
+  所以壳是三行,真正的渲染仍是纯函数,能单测(`test/scout-view.test.ts`)也能离线预览
+  (`scripts/preview-scout.ts`)。`content` 给模型读,`details` 给这里渲染,两者刻意不同。
+- **常驻状态卡**(`renderWidgetCard` 的 `scout` 参数)—— **只占一行**:`1/4 · 1m12s · S2 读 …`。
+  卡的高度是永久成本,逐路明细归工具块。进度只在内存(`Runtime.liveScout`),
+  不像 CHECK 那样落盘:scout 的整个生命周期都在一次阻塞的工具调用里,
+  进程一死这一轮本来就没了(额度已在 `SCOUT_DISPATCHED` 记过账),
+  为它开状态文件是在给一个不存在的恢复路径铺路。
 
 **成本**:`scout` 是独立角色(`missions/models.json`),默认 thinking `low`。
 未配置时回退会话模型并**告警** —— 会话模型通常是最贵的那个,而这是并行 N 路,

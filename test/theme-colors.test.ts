@@ -19,6 +19,8 @@ import { renderStatus } from "../src/ui/status-view.ts";
 import { renderPlanReview, SECTION_IDS, type ReviewSection } from "../src/ui/plan-review.ts";
 import { renderAskReview } from "../src/ui/ask-review.ts";
 import { renderHumanReview } from "../src/ui/human-review.ts";
+import { renderScoutCall, renderScoutResult } from "../src/ui/scout-view.ts";
+import type { ScoutFinding } from "../src/core/scout.ts";
 
 /** docs/themes.md 的前景色名(仅列本项目可能用到的部分) */
 const FG = new Set([
@@ -98,6 +100,14 @@ test("状态面板与 widget 的颜色名都合法(含 spike / define 相位)", 
 		s.currentTask = phase === "done" ? null : "T2";
 		s.tasks.T2 = { ...s.tasks.T2, kind: "spike", status: "running", attempts: 1 };
 		assert.doesNotThrow(() => renderWidgetCard(strictTheme, plan, s, Date.now(), 100), `widget @${phase}`);
+		assert.doesNotThrow(
+			() =>
+				renderWidgetCard(strictTheme, plan, s, Date.now(), 100, null, {
+					startedAt: Date.now() - 5000,
+					progress: { done: 1, total: 3, activity: { S1: "已交回结论", S2: "读 a.ts", S3: "排队中" }, running: ["S2", "S3"] },
+				}),
+			`widget+scout @${phase}`,
+		);
 		assert.doesNotThrow(() => overviewLines(plan, s), `overview @${phase}`);
 		assert.doesNotThrow(() => taskLines(plan, s), `tasks @${phase}`);
 		assert.doesNotThrow(() => taskBlocks(plan, s, strictTheme, 100), `taskBlocks @${phase}`);
@@ -320,4 +330,33 @@ test("人工终审页在 strictTheme 下颜色名均合法", () => {
 			}
 		}
 	}
+});
+
+// ─────────────────────────── 侦查扇出的工具块 ───────────────────────────
+
+const FINDINGS: ScoutFinding[] = [
+	{ id: "S1", question: "q1", assume: "3 处", answer: "11 处", status: "answered", citations: ["a.ts:1"], surprised: true },
+	{ id: "S2", question: "q2", assume: "有", answer: "有,test/orm/*", status: "answered", citations: ["test/orm/x.ts"], surprised: false },
+	{ id: "S3", question: "q3", assume: "x", answer: "未查明(超时)。沿用假设:x", status: "unanswered", citations: [], surprised: false },
+];
+
+test("mission_scout 的工具块在 strictTheme 下颜色名均合法", () => {
+	// 这一页是新渲染路径,而且它跑在 TUI 主循环里:编一个颜色名就是整个 pi 崩掉
+	assert.doesNotThrow(() =>
+		renderScoutCall({ theme: strictTheme, width: 90, questions: [{ id: "S1", text: "旧 ORM 用在几处?" }] }),
+	);
+	for (const expanded of [false, true]) {
+		assert.doesNotThrow(
+			() => renderScoutResult({ theme: strictTheme, width: 90, expanded, details: { kind: "done", round: 1, findings: FINDINGS } }),
+			`done expanded=${expanded}`,
+		);
+	}
+	assert.doesNotThrow(() =>
+		renderScoutResult({
+			theme: strictTheme,
+			width: 90,
+			expanded: false,
+			details: { kind: "progress", progress: { done: 1, total: 3, activity: { S1: "已交回结论", S2: "读 a.ts", S3: "排队中" }, running: ["S2", "S3"] } },
+		}),
+	);
 });

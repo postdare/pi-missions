@@ -392,3 +392,59 @@ test("widget:等人终审时说'等待你终审',不许说成'独立核验'", ()
 	assert.ok(!widget.includes("独立核验"), "等人的时候不许说模型在跑");
 	assert.ok(widget.includes("15s"), "计时要走 —— 人得知道自己晾了多久");
 });
+
+// ─────────────────────────── 侦查扇出的常驻行 ───────────────────────────
+
+const SCOUT_LIVE = {
+	startedAt: 0,
+	progress: {
+		done: 1,
+		total: 4,
+		activity: { S1: "已交回结论", S2: "读 src/repo/user.ts", S3: "搜 privateApi", S4: "排队中" },
+		running: ["S2", "S3", "S4"],
+	},
+};
+
+function planningState(): ReturnType<typeof initialState> {
+	const s = initialState({ missionId: "auth-refactor", tier: "standard", taskOrder: ["T1", "T2"] });
+	s.phase = "plan";
+	s.currentTask = null;
+	return s;
+}
+
+test("widget:扇出时要能看出跑到哪了,而且只占一行", () => {
+	// 每路一行的话 4 路就是 4 行常驻,而这张卡的高度是永久成本;
+	// 逐路明细在工具调用块里(ui/scout-view.ts),那儿的高度是临时的
+	const now = 75_000;
+	const lines = renderWidgetCard(mockTheme, plan, planningState(), now, 120, null, SCOUT_LIVE);
+	const scoutLines = lines.filter((l) => l.includes("侦查扇出"));
+	assert.equal(scoutLines.length, 1, "只许一行");
+	assert.ok(scoutLines[0].includes("1/4"), "要报进度");
+	assert.ok(scoutLines[0].includes("S2"), "要点名一路还在跑的 —— 只报 x/y 的话卡住了看不出卡在哪");
+	assert.ok(scoutLines[0].includes("读 src/repo/user.ts"), "以及它在干什么");
+});
+
+test("widget:没在扇出就不占那一行", () => {
+	const lines = renderWidgetCard(mockTheme, plan, planningState(), Date.now(), 120, null, null);
+	assert.ok(!lines.some((l) => l.includes("侦查扇出")));
+});
+
+test("widget:扇出行在任何宽度下都不越界", () => {
+	for (const width of [40, 56, 72, 100, 120]) {
+		for (const line of renderWidgetCard(mockTheme, plan, planningState(), 75_000, width, null, SCOUT_LIVE)) {
+			assert.ok(visibleWidth(line) <= width, `w=${width} 越界:${JSON.stringify(line)}`);
+		}
+	}
+});
+
+test("widget:全部回来之后不再点名,只剩 4/4", () => {
+	const all = {
+		startedAt: 0,
+		progress: { done: 4, total: 4, activity: { S1: "已交回结论" }, running: [] },
+	};
+	const line = renderWidgetCard(mockTheme, plan, planningState(), 75_000, 120, null, all).find((l) =>
+		l.includes("侦查扇出"),
+	)!;
+	assert.ok(line.includes("4/4"));
+	assert.ok(!line.includes("S1"), "没有还在跑的就别点名");
+});

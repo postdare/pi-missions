@@ -9,6 +9,7 @@
 
 import { visibleWidth } from "@earendil-works/pi-tui";
 import type { InconclusiveCause, MissionState } from "../core/types.ts";
+import type { LiveScoutState } from "../core/scout.ts";
 import { ROLE_OF } from "../core/machine.ts";
 import { nearThreshold, thresholdFor } from "../core/breaker.ts";
 import type { EvidenceRecord } from "../store/evidence.ts";
@@ -231,6 +232,7 @@ export function renderWidgetCard(
 	now = Date.now(),
 	width = 120,
 	checkState?: CheckState | null,
+	scout?: LiveScoutState | null,
 ): string[] {
 	const task = state.currentTask ? findTask(plan, state.currentTask) : undefined;
 	const t = state.currentTask ? state.tasks[state.currentTask] : undefined;
@@ -315,6 +317,21 @@ export function renderWidgetCard(
 		const completed = doneCount > 0 ? ` · 脚本 ${doneCount} 项` : "";
 		lines.push(
 			clip(`    ${theme.fg("accent", stage)} ${theme.fg("dim", `${elapsed}${completed}${current}`)}`, width),
+		);
+	}
+
+	// 侦查扇出进度:与判定进度同一个位置、同一个形状(缩进 4、无图标)。
+	// **只占一行** —— 每路一行的话 4 路就是 4 行常驻,而这张卡的高度是永久成本;
+	// 逐路的明细在工具调用块里(ui/scout-view.ts),那儿的高度是临时的。
+	if (scout && scout.progress.total > 0) {
+		const p = scout.progress;
+		const bar = miniBar(theme, p.done, p.total, 8);
+		const el = fmtCheckDuration(now - scout.startedAt);
+		// 点名一路仍在跑的 —— 只报 x/y 的话,卡住的时候看不出卡在哪
+		const first = p.running[0];
+		const who = first ? ` · ${first} ${p.activity[first] ?? ""}`.trimEnd() : "";
+		lines.push(
+			clip(`    ${theme.fg("accent", "侦查扇出")} ${bar} ${theme.fg("dim", `${p.done}/${p.total} · ${el}${who}`)}`, width),
 		);
 	}
 

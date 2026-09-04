@@ -16,13 +16,18 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ## 命令
 
 ```bash
-npm test                                           # 全部:core 单测 + runtime/UI 冒烟(411 个)
+npm test                                           # 全部:core 单测 + runtime/UI 冒烟(424 个)
 node --test src/core/__tests__/breaker.test.ts     # 单个文件
 node --test --test-name-pattern="熔断" src/core/__tests__/breaker.test.ts   # 单个用例(名字是中文)
 npx tsc --noEmit                                   # 类型检查(tsconfig 只 include src/)
 ```
 
 无构建、无 lint 配置。Node ≥ 22.6(`node --test` 直接跑 `.ts` 靠 type stripping)。
+
+**没有构建步骤 = 不能用需要代码生成的 TS 语法。** 最容易踩的是**构造函数参数属性**
+(`constructor(private readonly x: T) {}`)—— `tsc --noEmit` 完全不报,加载时才抛
+`ERR_UNSUPPORTED_TYPESCRIPT_SYNTAX`,而那时已经在 pi 的主循环里了。写成显式字段 + 赋值。
+同类的还有 `enum`(用 union 字面量)与 `namespace`。
 
 ## 调试
 
@@ -40,6 +45,9 @@ COLUMNS=56 node --experimental-strip-types scripts/preview-widget.ts warn
 
 # 人工终审页(quick 档 judge=human):empty(未选)/ pass / reason
 node --experimental-strip-types scripts/preview-human-review.ts reason
+
+# mission_scout 的工具块 + 常驻卡扇出行:call / running / done / expanded / widget
+COLUMNS=56 node --experimental-strip-types scripts/preview-scout.ts all
 
 # 样式快照:观感变了(标签/间距/缩进)就红;确认是想要的改动后重新冻结
 UPDATE_SNAPSHOTS=1 node --test test/plan-review.snapshot.test.ts
@@ -79,6 +87,7 @@ src/store/      v2 Repository、generation 投影、log/evidence/git/scaffold
 src/roles/      models.json 角色模型 + 进程内 Verifier / Scout AgentSession(都是只读,见下)
 src/hooks/      tool_call 闸门 + 编辑级增量反馈
 src/ui/         chrome(圆角盒框架)/ panel(/missions)/ plan-review(冻结前评审)/ ask-review(DEFINE 问答)/
+                scout-view(mission_scout 的工具块)/
                 human-review(quick 人工终审)/ status-view / dashboard / models-page
 templates/      scaffold 铺进目标仓库的工作流文件(standard/complex 的相位提示词、脚本)
 skills/         随包分发的 pi skill(入场导览:该不该开 mission、选哪档)

@@ -16,7 +16,7 @@ import { evaluateCriterion } from "./core/criterion.ts";
 import { evaluatePromotion } from "./core/tier.ts";
 import { evaluateBaseline, shouldProbeBaseline, type BaselineProbe } from "./core/baseline.ts";
 import { evaluateAsk, needsScopeConfirm, normalizeAskAnswers, roundCapFor, type AskQuestion } from "./core/define.ts";
-import { evaluateScout, type ScoutQuestion } from "./core/scout.ts";
+import { evaluateScout, type ScoutFanoutProgress, type ScoutFinding, type ScoutQuestion } from "./core/scout.ts";
 import { evaluateCoverage } from "./core/coverage.ts";
 import { openPlanReview } from "./ui/plan-review.ts";
 import { openDefineReview } from "./ui/define-review.ts";
@@ -36,13 +36,13 @@ import { appendLog } from "./store/log.ts";
 import { computeGitTreeFingerprint, ensureInfoExclude, isGitRepo } from "./store/git.ts";
 import { loadCheckState, removeCheckState, type CheckState } from "./store/check.ts";
 import { renderWidgetCard } from "./ui/dashboard.ts";
+import type { LiveScoutState } from "./core/scout.ts";
 import {
 	renderStateCard,
 	renderDoBrief,
 	renderActBrief,
 	renderHandoffBrief,
 	renderScoutEnvelope,
-	renderScoutProgress,
 } from "./briefs.ts";
 import { CheckRunner } from "./check-runner.ts";
 import {
@@ -124,6 +124,14 @@ export class Runtime {
 	// internal:以下两个成员开放给 CheckRunner(src/check-runner.ts)读写,
 	// 其余代码不应触碰。开放原因是 CHECK 编排要跨 await 读写进度与控制句柄。
 	liveCheckState: CheckState | null = null;
+	/**
+	 * 扇出进行中的进度。**只在内存里,不落盘** —— 与 CHECK.json 的差别是有意的:
+	 * CHECK 会被进程退出打断、要靠 CHECK.json 恢复(RECOVER_INTERRUPTED_CHECK);
+	 * scout 的全部生命周期都在一次阻塞的工具调用里,进程一死这一轮本来就没了
+	 * (额度已在 SCOUT_DISPATCHED 记过账)。为它开一个状态文件是在给一个不存在的
+	 * 恢复路径铺路。
+	 */
+	liveScout: LiveScoutState | null = null;
 	activeVerifierControl: VerifierControl | null = null;
 	private checkPromises = new WeakMap<ActiveMission, Promise<void>>();
 	private stagedPlan: StagedPlan | null = null;
@@ -964,8 +972,8 @@ export class Runtime {
 	async scout(
 		ctx: any,
 		questions: ScoutQuestion[],
-		onProgress?: (text: string) => void,
-	): Promise<{ ok: true; round: number; envelope: string } | { error: string }> {
+		onProgress?: (p: ScoutFanoutProgress) => void,
+	): Promise<{ ok: true; round: number; envelope: string; findings: ScoutFinding[] } | { error: string }> {
 		const a = this.active;
 		if (!a) return { error: "无活动 mission" };
 		if (a.state.phase !== "plan") {
@@ -1021,15 +1029,30 @@ export class Runtime {
 			);
 		}
 
-		const result = await runScouts({
-			cwd: this.cwd,
-			model: configured ?? ctx.model,
-			thinkingLevel: cfg?.thinking ?? DEFAULT_THINKING.scout,
-			timeoutMs: this.config.scoutTimeoutMs ?? 180_000,
-			goal: a.plan.goal,
-			questions: verdict.questions,
-			onProgress: onProgress ? (p) => onProgress(renderScoutProgress(p)) : undefined,
-		});
+		// 进度有两个出口,谁也替代不了谁:工具调用块里逐路的明细(onProgress),
+		// 和输入框上方常驻卡里的一行(liveScout)。后者在 finally 里清,
+		// 抛异常也不能把一张"永远在扇出"的卡留在屏幕上。
+		this.liveScout = { startedAt: Date.now(), progress: { done: 0, total: verdict.questions.length, activity: {}, running: [] } };
+		this.refreshWidget(ctx);
+		let result;
+		try {
+			result = await runScouts({
+				cwd: this.cwd,
+				model: configured ?? ctx.model,
+				thinkingLevel: cfg?.thinking ?? DEFAULT_THINKING.scout,
+				timeoutMs: this.config.scoutTimeoutMs ?? 180_000,
+				goal: a.plan.goal,
+				questions: verdict.questions,
+				onProgress: (p) => {
+					if (this.liveScout) this.liveScout.progress = p;
+					this.refreshWidget(ctx);
+					onProgress?.(p);
+				},
+			});
+		} finally {
+			this.liveScout = null;
+			this.refreshWidget(ctx);
+		}
 
 		// 无条件记账(同 verifier):网关不报价时 cost=0,但 token 必须落盘,
 		// 否则扇出的消耗在账上隐形 —— 而"扇出到底值不值"只能看这笔账
@@ -1062,7 +1085,13 @@ export class Runtime {
 			}
 		}
 
-		return { ok: true, round, envelope: renderScoutEnvelope(round, result.findings, result.failures) };
+		return {
+			ok: true,
+			round,
+			envelope: renderScoutEnvelope(round, result.findings, result.failures),
+			// 结论原样带出来:信封是给模型读的自然语言,工具块要按结构渲染(ui/scout-view.ts)
+			findings: result.findings,
+		};
 	}
 
 	/**
@@ -1536,7 +1565,7 @@ export class Runtime {
 			timer?.unref();
 			return {
 				render: (width: number) =>
-					renderWidgetCard(theme, a.plan, a.state, Date.now(), Math.min(width, 120), checkState),
+					renderWidgetCard(theme, a.plan, a.state, Date.now(), Math.min(width, 120), checkState, this.liveScout),
 				invalidate: () => {},
 				dispose: () => {
 					if (timer) clearInterval(timer);

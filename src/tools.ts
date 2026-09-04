@@ -11,6 +11,8 @@
 
 import { Type } from "typebox";
 import type { Runtime } from "./runtime.ts";
+import { renderScoutProgress } from "./briefs.ts";
+import { scoutCallComponent, scoutResultComponent, type ScoutToolDetails } from "./ui/scout-view.ts";
 
 type GetRuntime = (ctx: any) => Runtime;
 
@@ -303,19 +305,37 @@ export function registerMissionTools(pi: any, getRuntime: GetRuntime): void {
 			// 节流:4 路子 agent 的每一次工具调用都会推一帧,不掐着会把 TUI 刷爆
 			// (pi 自己的 bash 工具同样节流,见 core/tools/bash.js 的 BASH_UPDATE_THROTTLE_MS)
 			let lastAt = 0;
-			const r = await getRuntime(ctx).scout(ctx, params.questions ?? [], (text) => {
+			const r = await getRuntime(ctx).scout(ctx, params.questions ?? [], (progress) => {
 				const now = Date.now();
 				if (now - lastAt < 300) return;
 				lastAt = now;
+				// content 是兜底(没有渲染器 / 非 TUI 时按纯文本印),details 给 renderResult。
+				// 两份都给 —— 与 pi 自己的 bash 工具同一个做法。
 				// 进度回显是锦上添花:onUpdate 的形状由宿主定,炸了也不能让整轮侦查失败
 				try {
-					onUpdate?.({ content: [{ type: "text", text }], details: undefined });
+					onUpdate?.({
+						content: [{ type: "text", text: renderScoutProgress(progress) }],
+						details: { kind: "progress", progress } satisfies ScoutToolDetails,
+					});
 				} catch {
 					/* 忽略 */
 				}
 			});
 			if ("error" in r) return toolError(r.error);
-			return { content: [{ type: "text", text: r.envelope }], details: { ok: true, round: r.round } };
+			return {
+				content: [{ type: "text", text: r.envelope }],
+				details: { kind: "done", round: r.round, findings: r.findings } satisfies ScoutToolDetails,
+			};
+		},
+		renderCall(args: any, theme: any) {
+			return scoutCallComponent(args, theme);
+		},
+		renderResult(result: any, options: any, theme: any) {
+			const text = (result?.content ?? [])
+				.filter((c: any) => c?.type === "text")
+				.map((c: any) => String(c.text ?? ""))
+				.join("\n");
+			return scoutResultComponent(result?.details, text, !!options?.expanded, theme);
 		},
 	});
 

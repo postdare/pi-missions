@@ -10,8 +10,7 @@ import type { MissionPlan } from "./store/mission.ts";
 import { findTask } from "./store/mission.ts";
 import type { MissionState } from "./core/types.ts";
 import { roundCapFor } from "./core/define.ts";
-import { scoutRoundCapFor, type ScoutFinding } from "./core/scout.ts";
-import type { ScoutFanoutProgress } from "./roles/scout.ts";
+import { scoutRoundCapFor, type ScoutFanoutProgress, type ScoutFinding } from "./core/scout.ts";
 import type { QuickCriterion } from "./runtime.ts";
 
 export const QUICK_JUDGE_LABEL: Record<QuickCriterion["judge"], string> = {

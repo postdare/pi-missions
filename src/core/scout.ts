@@ -109,6 +109,31 @@ export interface ScoutFinding {
 	surprised: boolean;
 }
 
+/**
+ * 扇出整体进度。**放在 core 而不是 roles**:它是纯数据形状,而 UI(widget 与工具
+ * 渲染器)要拿它渲染 —— 让 ui/ 去 import roles/ 等于把 pi SDK 拖进渲染层的依赖图。
+ */
+export interface ScoutFanoutProgress {
+	/** 已完成路数(含失败) */
+	done: number;
+	total: number;
+	/** 每一路当前在干什么,按问题 id。插入顺序 = 提问顺序 */
+	activity: Record<string, string>;
+	/**
+	 * 仍在跑的问题 id,按提问顺序。
+	 *
+	 * 显式给出而不是让 UI 去认 activity 的文案 —— 靠"这条文案是不是终态"来判断,
+	 * 等于把渲染层钉死在执行层的措辞上,改一个字就漏判(而漏判是静默的)。
+	 */
+	running: string[];
+}
+
+/** widget 要渲染扇出进度所需的全部东西。startedAt 用来算已耗时 */
+export interface LiveScoutState {
+	startedAt: number;
+	progress: ScoutFanoutProgress;
+}
+
 export interface ScoutInput {
 	tier: Tier;
 	/** 本 mission 已经扇出过几轮 */

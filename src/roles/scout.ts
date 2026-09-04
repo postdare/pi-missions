@@ -31,7 +31,13 @@ import {
 	SettingsManager,
 } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
-import { interpretFinding, unansweredFinding, type ScoutFinding, type ScoutQuestion } from "../core/scout.ts";
+import {
+	interpretFinding,
+	unansweredFinding,
+	type ScoutFanoutProgress,
+	type ScoutFinding,
+	type ScoutQuestion,
+} from "../core/scout.ts";
 
 /** 只读工具白名单。与 VERIFIER_TOOLS 同源:没有 bash、没有 edit/write。导出供测试锁定 */
 export const SCOUT_TOOLS = ["read", "grep", "find", "ls", "mission_finding"] as const;
@@ -67,17 +73,8 @@ export interface ScoutOptions {
 	/** mission 目标,给子 agent 一点上下文 —— 但它只回答自己那一个问题 */
 	goal: string;
 	questions: ScoutQuestion[];
+	/** 进度回调。usage 不进 ScoutFanoutProgress —— 那是账,不是进度 */
 	onProgress?: (p: ScoutFanoutProgress) => void;
-}
-
-/** 扇出整体进度。按路汇报 —— 谁在跑、谁回来了 */
-export interface ScoutFanoutProgress {
-	/** 已完成路数(含失败) */
-	done: number;
-	total: number;
-	/** 每一路当前在干什么,按问题 id */
-	activity: Record<string, string>;
-	usage: ScoutUsage;
 }
 
 export interface ScoutFanoutResult {
@@ -208,8 +205,17 @@ export async function runScouts(
 	const total = opts.questions.length;
 	const activity: Record<string, string> = {};
 	const usage: ScoutUsage = { ...ZERO_USAGE };
+	const running = new Set(opts.questions.map((q) => q.id));
 	let done = 0;
-	const report = () => opts.onProgress?.({ done, total, activity: { ...activity }, usage: { ...usage } });
+	const report = () =>
+		opts.onProgress?.({
+			done,
+			total,
+			activity: { ...activity },
+			// 按提问顺序过滤,不用 [...running] —— Set 的顺序是插入序,
+			// 一旦将来改成动态增删就会和界面上的排列错位
+			running: opts.questions.map((q) => q.id).filter((id) => running.has(id)),
+		});
 
 	for (const q of opts.questions) activity[q.id] = "排队中";
 	report();
@@ -221,6 +227,7 @@ export async function runScouts(
 				report();
 			}, usage);
 			done += 1;
+			running.delete(q.id);
 			activity[q.id] = r.finding.status === "answered" ? "已交回结论" : "未查明";
 			report();
 			return r;
