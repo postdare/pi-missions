@@ -467,7 +467,7 @@ export class CheckRunner {
 				requiredAcIds,
 				judgeUnavailable,
 			});
-			if (!a.inMemory) saveEvidence(sp.evidenceDir, taskId, attempt, evidences);
+			if (!a.inMemory) saveEvidence(sp.evidenceDir, taskId, attempt, evidences, a.generation);
 			persistCheck({
 				stage: "completed",
 				outcome: verdict.outcome,
@@ -520,7 +520,7 @@ export class CheckRunner {
 				};
 				evidences.push(errorEvidence);
 				try {
-					if (!a.inMemory) saveEvidence(sp.evidenceDir, taskId, attempt, evidences);
+					if (!a.inMemory) saveEvidence(sp.evidenceDir, taskId, attempt, evidences, a.generation);
 				} catch {
 					/* CHECK.json 与 LOG.md 已保留异常,归档失败不阻断状态恢复 */
 				}

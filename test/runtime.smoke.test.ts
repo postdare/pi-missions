@@ -231,7 +231,11 @@ test("完整闭环:fail → act → adjust → pass → done", async () => {
 		"state",
 		rt.active!.state.missionId,
 		"evidence",
-		"T1-attempt1.json",
+		// 文件名带 generation(同一个 attempt 号可能提交两次 —— 见 store/evidence.ts),
+		// 所以按前缀找,别把命名规则再抄一遍到断言里
+		fs
+			.readdirSync(path.join(tmp, "missions", "state", rt.active!.state.missionId, "evidence"))
+			.find((f) => f.startsWith("T1-"))!,
 	);
 	const firstEvidence = JSON.parse(fs.readFileSync(firstEvidenceFile, "utf8")).evidences[0];
 	assert.match(firstEvidence.command, /verify\.sh hello-exists/);
@@ -1106,7 +1110,11 @@ test("L2 重规划不被基线锁死:已经做完的部分变绿也能重新冻�
 	await rt.applyEvent({ type: "ADJUST_DONE", at: Date.now() }, ctx);
 	await rt.applyEvent({ type: "SUBMIT", at: Date.now() }, ctx);
 	await rt.runCheck(ctx);
+	assert.equal(rt.active!.state.tasks.T1.attempts, 2);
 	assert.equal(rt.active!.state.tasks.T1.sameSignatureCount, 2, "前置条件:同签名撞够两次");
+	const evidenceDir = path.join(tmp, "missions", "state", rt.active!.state.missionId, "evidence");
+	const before = fs.readdirSync(evidenceDir).filter((f) => f.startsWith("T1-"));
+	assert.equal(before.length, 2, `两轮两份:${before.join(", ")}`);
 
 	// 执行者已经把 AC1 做绿了(T1 完成),但 mission 因为别的原因走到 L2
 	fs.writeFileSync(path.join(tmp, "hello.txt"), "hello\n");
@@ -1126,6 +1134,16 @@ test("L2 重规划不被基线锁死:已经做完的部分变绿也能重新冻�
 	assert.equal(rt.active!.state.phase, "do");
 	const log = fs.readFileSync(path.join(tmp, "missions", "state", rt.active!.state.missionId, "LOG.md"), "utf8");
 	assert.ok(log.includes("baseline skipped"));
+
+	// attempts 只在 ACT 的 ADJUST_DONE 自增,而 L2 是从 ACT 直接走掉的 ——
+	// 重规划后 PLAN_FROZEN 用 Math.max(1, attempts) 保留原值,于是这一轮**还是 attempt=2**。
+	// 文件名只带 attempt 的话,它会盖掉上面那份失败证据;而失败的证据比成功的值钱。
+	assert.equal(rt.active!.state.tasks.T1.attempts, 2, "前置条件:L2 没有推进 attempt 号");
+	await rt.applyEvent({ type: "SUBMIT", at: Date.now() }, ctx);
+	await rt.runCheck(ctx);
+	assert.equal(rt.active!.state.phase, "done");
+	const after = fs.readdirSync(evidenceDir).filter((f) => f.startsWith("T1-"));
+	assert.equal(after.length, 3, `同为 attempt=2 的两轮不能互相覆盖:${after.join(", ")}`);
 });
 
 test("被基线拒掉的计划不会污染 State Card(a.plan 不提前认账)", async () => {

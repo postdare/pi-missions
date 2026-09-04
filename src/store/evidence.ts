@@ -10,11 +10,38 @@ import { statePaths } from "./paths.ts";
 import type { MissionPlan } from "./mission.ts";
 import { MissionRepository } from "./repository.ts";
 
-/** 证据快照归档:missions/state/<id>/evidence/<task>-attempt<n>.json */
-export function saveEvidence(evidenceDir: string, taskId: string, attempt: number, evidences: Evidence[]): string {
+/**
+ * 证据快照归档:missions/state/<id>/evidence/<task>-a<attempt>-g<generation>.json
+ *
+ * **文件名里必须有 generation。** 原来是 `<task>-attempt<n>.json`,而 attempts
+ * **不是每轮提交都会涨**:自增发生在 ACT 的 `ADJUST_DONE`,而 L2 升级是从 ACT
+ * 直接走掉的,跳过了那一步;重规划后 `PLAN_FROZEN` 又用 `Math.max(1, attempts)`
+ * 保留原值。于是同一个任务会用**同一个 attempt 号**提交两次,归档原样覆盖。
+ * 真实事故(E7,09-04):T5 第一轮被独立核验判 FAIL,
+ * 那份 253 秒的核验结论(hard 绿 / verifier 红,点名某条测试的断言被抽空)
+ * 被后来通过的那一轮盖掉了,事后只剩 LOG 里一行截断的摘要。
+ *
+ * **失败的证据比成功的证据值钱** —— 判定装置到底抓住过什么、凭什么抓住的,
+ * 事后全靠这份归档;而恰恰是"被抓住然后修好"的那一次会被修好的那一次覆盖。
+ * generation 单调递增,天然不重。
+ *
+ * 读侧不受影响:readTaskEvidenceHistory / latestEvidenceResults 都从 JSON **内容**
+ * 里取 taskId/attempt/at,不解析文件名,旧命名的历史归档照样读得出来。
+ */
+export function saveEvidence(
+	evidenceDir: string,
+	taskId: string,
+	attempt: number,
+	evidences: Evidence[],
+	generation: number,
+): string {
 	fs.mkdirSync(evidenceDir, { recursive: true });
-	const file = path.join(evidenceDir, `${taskId}-attempt${attempt}.json`);
-	fs.writeFileSync(file, `${JSON.stringify({ taskId, attempt, at: Date.now(), evidences }, null, 2)}\n`, "utf8");
+	const file = path.join(evidenceDir, `${taskId}-a${attempt}-g${generation}.json`);
+	fs.writeFileSync(
+		file,
+		`${JSON.stringify({ taskId, attempt, generation, at: Date.now(), evidences }, null, 2)}\n`,
+		"utf8",
+	);
 	return file;
 }
 

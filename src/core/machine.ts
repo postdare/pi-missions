@@ -713,7 +713,10 @@ function failTransition(
 	counted.lastFailureReason = failureReason(verdict.reason);
 
 	const action = decide({ tier: state.tier, task: base, signature: sig, level: state.escalation.level });
-	const header = `${taskId} a=${base.attempts} verdict=FAIL sig=${sig} ev=${compact(verdict.reason)}`;
+	// ev= 用比 compact 更宽的预算:LOG 里这一行有时是失败证据仅存的线索 ——
+	// 证据归档曾经会被同名覆盖(见 store/evidence.ts),而 120 字符连测试名都拼不全
+	// (真机上截出过 "但 TestEditKeepsColum")。act=/why= 仍走 compact,它们是定长套话。
+	const header = `${taskId} a=${base.attempts} verdict=FAIL sig=${sig} ev=${failureReason(verdict.reason)}`;
 
 	if (action.action === "halt") {
 		return ok(
@@ -904,6 +907,8 @@ function compact(s: string): string {
  * 有 bash 可以重跑 hard 证据,但 escalator 在 ACT 相位只有只读工具,
  * 这段文字是它对失败原因的全部认知。120 字符放不下两条 AC 的理由,
  * 截断等于扔掉不可重放的诊断信息。
+ *
+ * LOG 的 FAIL 表头也用它,同一个理由的另一面:那一行有时是事后仅存的线索。
  */
 function failureReason(s: string): string {
 	return s.replace(/\s+/g, " ").trim().slice(0, 500);
