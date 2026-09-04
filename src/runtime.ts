@@ -19,6 +19,7 @@ import { evaluateAsk, needsScopeConfirm, normalizeAskAnswers, roundCapFor, type 
 import { evaluateScout, type ScoutFanoutProgress, type ScoutFinding, type ScoutQuestion } from "./core/scout.ts";
 import { nextStall, type StallState } from "./core/stall.ts";
 import { evaluateCoverage } from "./core/coverage.ts";
+import { evaluateAcImmutability } from "./core/replan.ts";
 import { openPlanReview } from "./ui/plan-review.ts";
 import { openDefineReview } from "./ui/define-review.ts";
 import { openAskReview } from "./ui/ask-review.ts";
@@ -1310,6 +1311,17 @@ export class Runtime {
 		if (plan.definition) {
 			errors.push(...evaluateCoverage({ doneWhen: plan.definition.doneWhen, acs: plan.acceptanceCriteria }));
 		}
+
+		// AC 不可变:L2 的定义就是"改方案、AC 不变",而在此之前没有任何代码守这条 ——
+		// 被判定方升 L2 之后可以重写判它失败的那条 AC(真机实证见 core/replan.ts 文件头)。
+		// 比对基准是 a.plan(此刻还是上一次冻结的那份),不是刚合并出来的 plan。
+		errors.push(
+			...evaluateAcImmutability({
+				escalationLevel: a.state.escalation.level,
+				frozen: a.plan.acceptanceCriteria,
+				submitted: plan.acceptanceCriteria,
+			}),
+		);
 		// 探针的额度是 mission 级的,validatePlan(纯函数、只看计划)判不了,放在这里
 		errors.push(
 			...validateSpikePlan({

@@ -184,7 +184,7 @@ transition(state: MissionState, event: MissionEvent): { state, effects, error? }
 | 级别 | 含义 | 改什么 | 落点 |
 |---|---|---|---|
 | L1 | 改实现 | 代码 | ACT → DO(默认级别,`escalation.level` 初值 1) |
-| L2 | 改方案 | 任务分解,**AC 不变** | 回 PLAN,强制换脑 |
+| L2 | 改方案 | 任务分解,**AC 不变**(`core/replan.ts` 逐条比对,改了就退回) | 回 PLAN,强制换脑 |
 | L3 | 改问题定义 | **可改 AC**,需人工确认 | 回 **DEFINE**,归档旧计划 + 换脑 + 重置提问预算 |
 
 `escalation.level` 是 **mission 级**的单调递增值,`ESCALATE` 的 handler(`src/core/machine.ts`)拒绝降级。
@@ -412,6 +412,13 @@ revision 绑定。磁盘写入顺序固定:
 先前的红可能因为部分任务做完而变绿;此时仍要求"red AC 必须红"会把重规划直接锁死 ——
 而 L2 的定义就是 AC 不变、只改方案,planner 连改 AC 脱身的余地都没有。
 冻结时刻的红绿只在干净基线上是可判定的信号。
+
+上面那句"连改 AC 脱身的余地都没有"曾经**只是一句话**:`writePlan()` 把提交上来的
+`acceptanceCriteria` 直接合并,没有任何东西比对新旧。真机上被兑现过一次
+(E7,09-04):L2 重规划把 AC 里"无需修改现有测试断言"删掉了 —— 正是独立核验判它
+FAIL 时援引的那一句。现在由 `core/replan.ts` 的 `evaluateAcImmutability()` 守着,
+和 `evaluateCoverage()` 在同一个 `errors` 数组里。**这两件事是绑在一起的**:
+跳过基线的前提就是 AC 没动过,少了守卫,L2 上改完的 AC 会永远不过红绿校验。
 
 冻结后 AC 只读,由三道锁保护:
 

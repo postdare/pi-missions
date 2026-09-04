@@ -82,7 +82,7 @@ PI_TUI_WRITE_LOG=/tmp/tui.log pi -e .          # 捕获写往 stdout 的原始 A
 src/index.ts    装配:挂 pi 事件、注册工具与命令、entry renderer
 src/runtime.ts  哑管道:采证据 → judge() → 喂事件给 machine → 翻译 Effect[] 成 pi 调用
 src/phase-prompts.ts  相位提示词的选取(按判定装置分流:standard 读盘,quick 走内联)
-src/core/       纯函数,唯一裁判(machine/breaker/verdict/baseline/tier/define/spike/scout/coverage/review)
+src/core/       纯函数,唯一裁判(machine/breaker/verdict/baseline/tier/define/spike/scout/coverage/review/replan)
 src/store/      v2 Repository、generation 投影、log/evidence/git/scaffold
 src/roles/      models.json 角色模型 + 进程内 Verifier / Scout AgentSession(都是只读,见下)
 src/hooks/      tool_call 闸门 + 编辑级增量反馈
