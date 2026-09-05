@@ -237,6 +237,33 @@ export function contentBudget(terminalRows: number): number {
 	return Math.max(10, Math.min(30, terminalRows - 9));
 }
 
+/**
+ * 这一页之外,终端里最坏还要占几行。`contentBudget` 的减数就是它加上 3
+ * (盒顶/页签 + 盒底 + 提示条)。改这个数之前先读 contentBudget 那段账。
+ */
+export const OUTSIDE_ROWS = 6;
+
+/**
+ * 正文能有多高。**页面一律用这个,不要自己 `Math.max(N, contentBudget(...) - …)`。**
+ *
+ * 各页原来都写成 `Math.max(6, contentBudget(rows) - (chrome - 1))`,那个下限 6
+ * 是为了"盒子别塌成一条缝"。但它同时把 contentBudget 的让步顶了回去:终端一矮,
+ * 下限赢,页面重新长过屏幕高度,被挤掉的还是最后一行 —— 提示条,也就是这一页的
+ * 操作按钮。真机报过(09-05),当时只修了 contentBudget,没修这些下限,矮终端上照旧。
+ *
+ * 所以下限本身也要被"放得下"夹住:宁可让正文只剩 1 行(还能滚),
+ * 也不能让按钮跑到屏幕外(那一页就没有出口了)。
+ *
+ * @param chromeLines 正文之前已经产出的行数(盒顶、页签、打回意见……)
+ * @param preferredMin 空间够时希望保底的正文高度
+ */
+export function bodyHeight(terminalRows: number, chromeLines: number, preferredMin: number): number {
+	const fit = contentBudget(terminalRows) - (chromeLines - 1);
+	// 盒底 + 提示条各一行,加上这一页之外的占用,剩下的才是正文能用的
+	const room = terminalRows - OUTSIDE_ROWS - 2 - chromeLines;
+	return Math.max(1, Math.min(Math.max(preferredMin, fit), room));
+}
+
 export interface WindowResult {
 	lines: string[];
 	/** 实际使用的起始偏移(可能因选中项可见性被调整) */

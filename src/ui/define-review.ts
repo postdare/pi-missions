@@ -26,7 +26,7 @@ import {
 	boxSep,
 	boxTop,
 	clip,
-	contentBudget,
+	bodyHeight,
 	hintBar,
 	ruleLabel,
 	windowLines,
@@ -114,7 +114,7 @@ export function renderDefineReview(view: DefineReviewView): DefineReviewRender {
 	}
 	const bodyStart = lines.length;
 
-	const height = Math.max(6, contentBudget(view.rows) - (lines.length - 1));
+	const height = bodyHeight(view.rows, lines.length, 6);
 	const range = sectionRanges[Math.min(view.focus, sectionRanges.length - 1)];
 	const win = windowLines(body, view.scroll, height, { start: bodyStart + range.start, end: bodyStart + range.end });
 	for (const l of win.lines) lines.push(boxRow(t as never, width, clip(l, inner)));

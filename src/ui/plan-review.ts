@@ -25,7 +25,7 @@ import {
 	boxSep,
 	boxTop,
 	clip,
-	contentBudget,
+	bodyHeight,
 	hintBar,
 	pad,
 	ruleLabel,
@@ -242,7 +242,7 @@ export function renderPlanReview(view: PlanReviewView): PlanReviewRender {
 	}
 
 	const body = sectionLines(view, inner);
-	const height = Math.max(6, contentBudget(view.rows) - (lines.length - 1));
+	const height = bodyHeight(view.rows, lines.length, 6);
 	const win = windowLines(body, view.scroll, height, null);
 	for (const l of win.lines) lines.push(boxRow(t as never, width, clip(l, inner)));
 	// 段落短于窗口时补空行,盒高不随页签跳动

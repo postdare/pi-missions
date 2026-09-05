@@ -31,7 +31,7 @@ import {
 	boxRow,
 	boxTop,
 	clip,
-	contentBudget,
+	bodyHeight,
 	hintBar,
 	ruleLabel,
 	windowLines,
@@ -110,7 +110,7 @@ export function renderHumanReview(view: HumanReviewView): HumanReviewRender {
 
 	// 高度按内容收,不铺满 contentBudget —— 这一页内容短且固定,
 	// 铺满会留出十几行空白,看着像渲染坏了(plan-review 那种长列表才需要铺满)
-	const height = Math.max(4, Math.min(contentBudget(view.rows) - (lines.length - 1), body.length));
+	const height = Math.min(bodyHeight(view.rows, lines.length, 4), Math.max(1, body.length));
 	const win = windowLines(
 		body,
 		view.scroll,

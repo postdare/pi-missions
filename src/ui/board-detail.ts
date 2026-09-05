@@ -5,7 +5,7 @@
  * 这一页把完整一行折开展示,不截断。
  */
 import { Key, matchesKey } from "@earendil-works/pi-tui";
-import { boxBot, boxRow, boxTop, contentBudget, hintBar, windowLines, wrap } from "./chrome.ts";
+import { bodyHeight, boxBot, boxRow, boxTop, hintBar, windowLines, wrap } from "./chrome.ts";
 import type { LineTheme } from "./dashboard.ts";
 
 export interface BoardDetailView {
@@ -25,7 +25,7 @@ export function renderBoardDetail(v: BoardDetailView): BoardDetailRender {
 	const width = Math.max(40, v.width);
 	const inner = width - 4;
 	const body = wrap(v.line, inner);
-	const height = Math.max(1, contentBudget(v.rows) - 3);
+	const height = bodyHeight(v.rows, 4, 1);
 	const win = windowLines(body, v.scroll ?? 0, height, null);
 	const pos = body.length > height ? `${win.start + 1}-${win.end} of ${body.length}` : undefined;
 	return {

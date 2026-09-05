@@ -2,6 +2,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { visibleWidth } from "@earendil-works/pi-tui";
 import {
+	bodyHeight,
 	boxBot,
 	boxRow,
 	boxSep,
@@ -10,6 +11,7 @@ import {
 	contentBudget,
 	hintBar,
 	miniBar,
+	OUTSIDE_ROWS,
 	wrap,
 	ruleLabel,
 	tabs,
@@ -156,6 +158,32 @@ test("contentBudget:夹在 [10,30],预留聊天区", () => {
 	assert.equal(contentBudget(5), 10);
 	assert.equal(contentBudget(24), 15);
 	assert.equal(contentBudget(60), 30);
+});
+
+test("bodyHeight:下限也被'放得下'夹住 —— 矮终端上宁可正文一行,也不丢提示条", () => {
+	// 各页原来写的是 Math.max(6, contentBudget(rows) - (chrome - 1)),那个下限 6
+	// 会把 contentBudget 的让步顶回去:终端一矮,页面重新长过屏幕,被挤掉的是
+	// 最后一行 —— 提示条,也就是这一页的操作按钮。
+	for (let rows = 8; rows <= 60; rows++) {
+		for (const chrome of [3, 5, 8]) {
+			const h = bodyHeight(rows, chrome, 6);
+			assert.ok(h >= 1, `rows=${rows} chrome=${chrome}:正文不能是 0 行`);
+			// 页面总行数 = chrome + 正文 + 盒底 + 提示条
+			const emitted = chrome + h + 2;
+			assert.ok(
+				emitted <= Math.max(rows - OUTSIDE_ROWS, chrome + 3),
+				`rows=${rows} chrome=${chrome}:页面 ${emitted} 行,超出可用高度`,
+			);
+		}
+	}
+});
+
+test("bodyHeight:空间够时按 contentBudget 铺满,并尊重 preferredMin", () => {
+	assert.equal(bodyHeight(40, 5, 6), contentBudget(40) - 4, "空间够就按 contentBudget 铺满");
+	// chrome 很厚把 fit 压到 4,但终端够高(room=25)—— 这时下限 6 该顶上来
+	assert.equal(bodyHeight(60, 27, 6), 6);
+	// 同样厚的 chrome,终端不够高(room=2)—— 下限让位于"放得下",这不是 bug
+	assert.equal(bodyHeight(30, 20, 6), 2);
 });
 
 test("contentBudget 留的行数够放 statusline + 常驻卡 + 看板", () => {

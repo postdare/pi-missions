@@ -26,7 +26,7 @@ import {
 	boxSep,
 	boxTop,
 	clip,
-	contentBudget,
+	bodyHeight,
 	CURSOR,
 	tabs,
 	hintBar,
@@ -152,8 +152,7 @@ export function renderStatus(v: StatusView): string[] {
 	const t = v.theme;
 	const width = Math.max(56, v.width);
 	const inner = width - 4;
-	const budget = contentBudget(v.rows);
-	const bodyH = Math.max(6, budget - 3); // 盒顶 / 头行 / 分隔 / 盒底 / 提示条
+	const bodyH = bodyHeight(v.rows, 4, 6); // 盒顶 / 头行 / 分隔 / 盒底 / 提示条
 
 	if (!v.data) {
 		const out = [boxTop(t, width, "mission")];

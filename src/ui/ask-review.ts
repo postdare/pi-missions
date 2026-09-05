@@ -43,7 +43,7 @@ import {
 	boxSep,
 	boxTop,
 	clip,
-	contentBudget,
+	bodyHeight,
 	hintBar,
 	pad,
 	ruleLabel,
@@ -209,7 +209,7 @@ export function renderAskReview(view: AskView): AskRender {
 		ruleLabel(t as never, inner, `已确认 ${done}/${view.questions.length}`),
 		...(confirmed.length > 0 ? confirmed : [t.fg("dim", "  (还没确认任何一题)")]),
 	];
-	const height = Math.max(6, contentBudget(view.rows) - (lines.length - 1));
+	const height = bodyHeight(view.rows, lines.length, 6);
 	const anchorStart = bodyStart + q.selStart;
 	const anchorEnd = bodyStart + q.selEnd;
 	const win = windowLines(body, view.scroll, height, {
