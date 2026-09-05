@@ -265,6 +265,42 @@ test("verify.sh 里的 cd 被 L0 剥掉,计划照常冻结,而且留了痕", asy
 	assert.match(log, /第 2 行/);
 });
 
+test("pi 自己弹的 confirm 关掉之后,焦点也要从常驻卡收回输入框", async () => {
+	// afterOverlay 只接得到 widget 自己开的那两个页。pi 弹的 confirm/select/input
+	// 关闭时没有任何 promise 回到 runtime 手上 —— 只有 custom-depth 的深度归零看得见。
+	// 不收的话卡继续反白、↑↓ 继续归 widget 管,失灵的是输入框的 ↑ 历史回溯。
+	const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "pi-missions-smoke-"));
+	const { ctx, rt } = await newMission(tmp);
+	let listener: ((data: string) => { consume: true } | undefined) | undefined;
+	(ctx.ui as any).getEditorText = () => "";
+	(ctx.ui as any).onTerminalInput = (fn: typeof listener) => {
+		listener = fn;
+		return () => {
+			listener = undefined;
+		};
+	};
+	(ctx.ui as any).confirm = async () => true;
+
+	rt.refreshWidget(ctx);
+	assert.ok(listener, "有活跃 mission 就要挂按键监听");
+	assert.deepEqual(listener!("\x1b[B"), { consume: true });
+	assert.equal((rt as any).widgetNav.focus, "card", "前置条件:焦点在常驻卡上");
+
+	// 走 pi 的 confirm —— 这一路 runtime 完全不知情,全靠 custom-depth 的归零信号
+	await ctx.ui.confirm("要继续吗", "");
+	assert.equal((rt as any).widgetNav.focus, "none", "confirm 关掉之后焦点必须回输入框");
+
+	// 焦点本来就在输入框时不该白刷 widget
+	let renders = 0;
+	const setWidget = (ctx.ui as any).setWidget;
+	(ctx.ui as any).setWidget = (...args: unknown[]) => {
+		renders += 1;
+		return setWidget?.(...args);
+	};
+	await ctx.ui.confirm("再来一次", "");
+	assert.equal(renders, 0, "焦点已经在输入框,归零回调不该再重画一次");
+});
+
 test("完整闭环:fail → act → adjust → pass → done", async () => {
 	const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "pi-missions-smoke-"));
 	const { pi, ctx, rt } = await newMission(tmp);

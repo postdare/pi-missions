@@ -42,7 +42,7 @@ import { renderWidgetCard } from "./ui/dashboard.ts";
 import { boardActive, boardTrace, renderBoard } from "./ui/board.ts";
 import { WIDGET_NAV_IDLE, classifyWidgetKey, decideWidgetNav, type WidgetNavState } from "./ui/widget-keys.ts";
 import { openBoardDetail } from "./ui/board-detail.ts";
-import { customUiOpen, wrapUiForBoard } from "./ui/custom-depth.ts";
+import { customUiOpen, onCustomUiClosed, wrapUiForBoard } from "./ui/custom-depth.ts";
 import type { LiveScoutState } from "./core/scout.ts";
 import {
 	renderStateCard,
@@ -182,6 +182,8 @@ export class Runtime {
 	private checkPromises = new WeakMap<ActiveMission, Promise<void>>();
 	private stagedPlan: StagedPlan | null = null;
 	private widgetUnsub: (() => void) | null = null;
+	/** custom-depth 的"弹出层全关了"订阅;与 widgetUnsub 同生共死 */
+	private customUiUnsub: (() => void) | null = null;
 	private widgetNav: WidgetNavState = WIDGET_NAV_IDLE;
 	private widgetCtx: any = null;
 	/**
@@ -1783,12 +1785,33 @@ export class Runtime {
 	private unbindWidgetKeys(): void {
 		this.widgetUnsub?.();
 		this.widgetUnsub = null;
+		this.customUiUnsub?.();
+		this.customUiUnsub = null;
 		this.widgetCtx = null;
 		this.widgetNav = WIDGET_NAV_IDLE;
 	}
 
 	/**
-	 * 弹出层关闭之后把焦点收回输入框(这条链的出口承诺:任何一层 Esc 都一路收回)。
+	 * 把焦点从常驻卡/看板收回输入框,并重画。
+	 *
+	 * 焦点已经在输入框时直接返回 —— 这个回调在**每个**弹出层关闭时都会响,
+	 * 而绝大多数时候焦点根本不在卡上,不该白刷一次 widget。
+	 */
+	private releaseWidgetFocus(): void {
+		if (this.widgetNav.focus === "none") return;
+		this.widgetNav = WIDGET_NAV_IDLE;
+		const uiCtx = this.widgetCtx;
+		if (uiCtx) this.refreshWidget(uiCtx);
+	}
+
+	/**
+	 * widget 自己开的那两个页关闭之后收焦点。
+	 *
+	 * **和 onCustomUiClosed 那条不是重复的**:openStatus 有提前 return 的路径
+	 * (mission 找不到时压根不开弹出层),那时 depth 从没变过、归零回调不会响,
+	 * 焦点就永远留在卡上了。这条管"没开起来",那条管"pi 自己弹的"。
+	 * 两条都只是把焦点设回 IDLE,重复触发无害。
+	 *
 	 * openStatus 的类型是 void | Promise<void>,所以必须过 Promise.resolve。
 	 */
 	private afterOverlay(uiCtx: any, opened: unknown): void {
@@ -1809,6 +1832,10 @@ export class Runtime {
 		this.widgetCtx = ctx;
 		wrapUiForBoard(ctx.ui);
 		if (this.widgetUnsub) return;
+		// pi 自己弹的 confirm / select / input / editor 关掉时,没有任何 promise 回到我们手上,
+		// 只有 custom-depth 的深度计数看得见。焦点若正好落在常驻卡上就会僵住 ——
+		// 和 afterOverlay 修的是同一个病,入口不同(BACKLOG 里那条)。
+		this.customUiUnsub = onCustomUiClosed(() => this.releaseWidgetFocus());
 		this.widgetUnsub = ctx.ui.onTerminalInput((data: string) => {
 			if (isKeyRelease(data)) return;
 			const uiCtx = this.widgetCtx;

@@ -8,7 +8,7 @@ import {
 	type WidgetNavInput,
 	type WidgetNavState,
 } from "../src/ui/widget-keys.ts";
-import { customUiOpen, wrapUiForBoard } from "../src/ui/custom-depth.ts";
+import { customUiOpen, onCustomUiClosed, wrapUiForBoard } from "../src/ui/custom-depth.ts";
 
 const down = "\x1b[B";
 const up = "\x1b[A";
@@ -185,4 +185,43 @@ test("wrapUiForBoard 用深度计数标出 custom UI 是否开着", async () => 
 	assert.equal(customUiOpen(), false, "结束必须归零,包两次也不能泄漏");
 	await ui.select();
 	assert.equal(customUiOpen(), false);
+});
+
+test("onCustomUiClosed:只在最后一层关掉时响,嵌套的里层不算", async () => {
+	const fired: string[] = [];
+	const off = onCustomUiClosed(() => fired.push("closed"));
+	const ui: any = {
+		custom: async (inner?: () => Promise<unknown>) => {
+			if (inner) await inner();
+		},
+		confirm: async () => true,
+	};
+	wrapUiForBoard(ui);
+
+	// 嵌套:状态页里再弹一个 confirm —— 里层关掉时焦点还该留在外层手里
+	await ui.custom(async () => {
+		await ui.confirm();
+		assert.deepEqual(fired, [], "里层关掉不算,外层还开着");
+	});
+	assert.deepEqual(fired, ["closed"], "外层关掉才响,而且只响一次");
+
+	// pi 自己弹的 confirm —— 没有任何 promise 回到 runtime 手上,只有这条信号
+	await ui.confirm();
+	assert.deepEqual(fired, ["closed", "closed"]);
+
+	off();
+	await ui.confirm();
+	assert.deepEqual(fired, ["closed", "closed"], "退订之后不该再响");
+});
+
+test("onCustomUiClosed:订阅者抛异常不能打断弹出层收尾", async () => {
+	const off = onCustomUiClosed(() => {
+		throw new Error("收焦点炸了");
+	});
+	const ui: any = { confirm: async () => true };
+	wrapUiForBoard(ui);
+	// 这里是 promise 的 finally,抛出去就是 unhandled rejection
+	assert.equal(await ui.confirm(), true);
+	assert.equal(customUiOpen(), false, "深度照样归零");
+	off();
 });
