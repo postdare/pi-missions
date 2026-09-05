@@ -216,10 +216,25 @@ export function hintBar(
 
 /**
  * 内联页的内容高度上限:组件占了编辑器区域,渲染太高会把聊天区挤没。
- * 预留 ~6 行给聊天/footer,夹在 [10, 30] 之间。
+ *
+ * 页面最终吐出的行数是 `contentBudget + 3`(盒顶/页签 + 盒底 + 提示条),
+ * 所以这里每减 1,留给终端里其余东西的就多 1 行。**留少了不会报错,
+ * 只会把提示条挤出屏幕** —— 而提示条就是那一页的操作按钮
+ * (「Enter 批准冻结 / R 打回」),看不见就等于这页没法用。真机报过(09-05):
+ * 计划评审只剩内容,盒底和按钮条都被顶掉了。
+ *
+ * 减 9 是按最坏情况算出来的,不是拍的:
+ *   pi 自己的 statusline 2 行
+ * + 常驻状态卡 1–3 行(`renderWidgetCard`:DO 1 行,CHECK 2 行,带告警 3 行)
+ * + 子 agent 看板 0–1 行(评审页开着时 `customUiOpen()` 挡住方向键,
+ *   看板展不开,所以只可能是收起态那一行)
+ * = 最坏 6 行,再留 3 行余量。
+ *
+ * 终端矮于 19 行时下限 10 仍会溢出 —— 那时按钮还是会被挤掉。没修是因为
+ * 内容压到 10 行以下的页面本来也读不了,真遇到再说。
  */
 export function contentBudget(terminalRows: number): number {
-	return Math.max(10, Math.min(30, terminalRows - 6));
+	return Math.max(10, Math.min(30, terminalRows - 9));
 }
 
 export interface WindowResult {

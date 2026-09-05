@@ -154,8 +154,23 @@ test("tabs:活动项是背景色药丸,非活动项同宽 dim 文字", () => {
 
 test("contentBudget:夹在 [10,30],预留聊天区", () => {
 	assert.equal(contentBudget(5), 10);
-	assert.equal(contentBudget(24), 18);
+	assert.equal(contentBudget(24), 15);
 	assert.equal(contentBudget(60), 30);
+});
+
+test("contentBudget 留的行数够放 statusline + 常驻卡 + 看板", () => {
+	// 页面最终吐 contentBudget + 3 行(盒顶/页签 + 盒底 + 提示条)。
+	// 留少了不报错,只会把提示条挤出屏幕 —— 那是这一页的操作按钮,
+	// 看不见等于这页没法用(真机报过,09-05)。
+	// 最坏占用:pi statusline 2 + 常驻卡 3(带告警)+ 看板 1(收起态)= 6。
+	const WORST_OUTSIDE = 6;
+	for (let rows = 19; rows <= 60; rows++) {
+		const emitted = contentBudget(rows) + 3;
+		assert.ok(
+			emitted + WORST_OUTSIDE <= rows,
+			`rows=${rows}:页面吐 ${emitted} 行,加上外面最坏 ${WORST_OUTSIDE} 行就是 ${emitted + WORST_OUTSIDE},超过终端高度`,
+		);
+	}
 });
 
 test("windowLines:内容不超窗口时原样返回,offset 归零", () => {
