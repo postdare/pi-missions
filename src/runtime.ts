@@ -78,6 +78,20 @@ import {
 } from "./store/repository.ts";
 
 /**
+ * 常驻卡与看板都挂在输入框**下方**,五个 setWidget 调用点共用这一个常量。
+ *
+ * pi 的默认值是 `"aboveEditor"`(`placement = options?.placement ?? "aboveEditor"`),
+ * 而这两块的整套设计前提是"在输入框下方":CLAUDE.md 那条"输入框下方那几行不是消息、
+ * 是永久占位,一律单行密排"说的就是它们,`ui/widget-keys.ts` 的焦点链
+ * (输入框 → 常驻卡 → 看板)也是按"从输入框往下走"画的。
+ *
+ * 提成常量是因为它**漏过**:挂卡的两处写了字面量,摘卡的三处没写,两边不一致。
+ * 位置这种东西不该在五个地方各写一遍 —— 写漏一处不会报错,只会让 widget 飘上去,
+ * 而没有任何测试会红(现在有了,见 runtime.smoke 那条)。
+ */
+const WIDGET_PLACEMENT = { placement: "belowEditor" } as const;
+
+/**
  * quick 档的判定依据。必须先于执行冻结(I2/I3),但**不必是一条命令**:
  * I3 要的是判定权在执行者之外,而独立 verifier 和人都在执行者之外。
  *
@@ -1681,8 +1695,8 @@ export class Runtime {
 	private refreshWidgetUnsafe(ctx: any): void {
 		const a = this.active;
 		if (!a || a.state.phase === "done" || a.state.phase === "halted") {
-			ctx.ui.setWidget("missions", undefined);
-			ctx.ui.setWidget("missions-board", undefined);
+			ctx.ui.setWidget("missions", undefined, WIDGET_PLACEMENT);
+			ctx.ui.setWidget("missions-board", undefined, WIDGET_PLACEMENT);
 			this.unbindWidgetKeys();
 			return;
 		}
@@ -1717,7 +1731,7 @@ export class Runtime {
 					},
 				};
 			},
-			{ placement: "belowEditor" },
+			WIDGET_PLACEMENT,
 		);
 		this.refreshBoardWidget(ctx, checkState);
 	}
@@ -1725,7 +1739,7 @@ export class Runtime {
 	private refreshBoardWidget(ctx: any, checkState: CheckState | null): void {
 		const view = { check: checkState, scout: this.liveScout };
 		if (!boardActive(view)) {
-			ctx.ui.setWidget("missions-board", undefined);
+			ctx.ui.setWidget("missions-board", undefined, WIDGET_PLACEMENT);
 			return;
 		}
 		ctx.ui.setWidget(
@@ -1751,7 +1765,7 @@ export class Runtime {
 					dispose: () => clearInterval(timer),
 				};
 			},
-			{ placement: "belowEditor" },
+			WIDGET_PLACEMENT,
 		);
 	}
 

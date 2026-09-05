@@ -203,6 +203,35 @@ function verifyShOf(rt: Runtime): string {
 	return rt.repository.generationVerifySh(snapshotOf(rt));
 }
 
+test("常驻卡与看板必须显式挂在输入框下方 —— pi 的默认值是上方", async () => {
+	// 这两块的设计前提是"在输入框下方":单行密排、焦点链从输入框往下走。
+	// pi 的 setWidget 默认 aboveEditor,漏传 options 不会报错,只会让 widget 飘上去。
+	// 真机踩过(09-05):挂卡的两处写了字面量,摘卡的三处没写。
+	const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "pi-missions-smoke-"));
+	const { ctx, rt } = await newMission(tmp);
+
+	const seen: { key: string; placement?: string }[] = [];
+	(ctx.ui as any).setWidget = (key: string, _content: unknown, options?: { placement?: string }) => {
+		seen.push({ key, placement: options?.placement });
+	};
+
+	// 挂卡
+	rt.refreshWidget(ctx);
+	assert.ok(seen.length > 0, "没挂上 widget,这条测试什么也没测到");
+
+	// 摘卡:done 相位走的是另一条分支,它同样要带上位置 ——
+	// 挂与摘用两个位置的话,摘不掉的那个会一直留在屏幕上
+	rt.active!.state.phase = "done";
+	rt.refreshWidget(ctx);
+
+	const missed = seen.filter((w) => w.placement !== "belowEditor");
+	assert.deepEqual(missed, [], `这些 setWidget 没写位置:${JSON.stringify(missed)}`);
+	assert.ok(
+		seen.some((w) => w.key === "missions") && seen.some((w) => w.key === "missions-board"),
+		`两块都要覆盖到,实际只碰了:${JSON.stringify(seen.map((w) => w.key))}`,
+	);
+});
+
 test("完整闭环:fail → act → adjust → pass → done", async () => {
 	const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "pi-missions-smoke-"));
 	const { pi, ctx, rt } = await newMission(tmp);
