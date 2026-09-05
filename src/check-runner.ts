@@ -89,7 +89,7 @@ export class CheckRunner {
 	async run(ctx: any): Promise<void> {
 		const rt = this.rt;
 		const a = rt.active;
-		if (!a || a.state.phase !== "check" || !a.state.currentTask) return;
+		if (!rt.sessionActive || !a || a.state.phase !== "check" || !a.state.currentTask) return;
 		const taskId = a.state.currentTask;
 		const task = findTask(a.plan, taskId);
 		const attempt = a.state.tasks[taskId]?.attempts ?? 1;
@@ -235,6 +235,8 @@ export class CheckRunner {
 				});
 				rt.refreshWidget(ctx);
 			};
+			// 起子 agent 之前再确认一次:上面几段 await 里会话可能已经销毁或换了任务
+			if (!isCurrent()) return;
 			const verifierResult = await runVerifier({
 				cwd: rt.cwd,
 				model,
@@ -246,11 +248,13 @@ export class CheckRunner {
 					if (control) {
 						ownedControl = control;
 						if (isCurrent()) rt.activeVerifierControl = control;
+						else void control.abort().catch(() => {});
 					} else if (rt.activeVerifierControl === ownedControl) {
 						rt.activeVerifierControl = null;
 					}
 				},
 			});
+			if (!isCurrent()) return;
 			const durationMs = Date.now() - startedAt;
 			// 无条件记账:网关不报价时 cost=0,但 token 用量必须落盘,否则 verifier 的消耗在账上隐形
 			const vu = verifierResult.usage;
@@ -478,7 +482,7 @@ export class CheckRunner {
 				})),
 			});
 			const result = await rt.applyEvent({ type: "VERDICT", at: Date.now(), verdict }, ctx);
-			if (result.error) return;
+			if (result.error || !rt.sessionActive) return;
 
 			const state = rt.active!.state;
 			if (state.pendingHandoff) return;
@@ -532,6 +536,7 @@ export class CheckRunner {
 	/** 当前 CHECK 是否仍属于发起时的那个 mission 附着实例(同任务同 attempt) */
 	private isCurrent(active: ActiveMission, taskId: string, attempt: number): boolean {
 		return (
+			this.rt.sessionActive &&
 			this.rt.active === active &&
 			active.state.phase === "check" &&
 			active.state.currentTask === taskId &&

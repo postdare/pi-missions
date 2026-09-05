@@ -1,11 +1,28 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { isDrivenPhase, nextStall, stallKey, type StallState } from "../stall.ts";
+import { agentBlockReason, isDrivenPhase, nextStall, stallKey, stallProgress, type StallState } from "../stall.ts";
+import { initialState, transition } from "../machine.ts";
 
-const at = (phase: Parameters<typeof stallKey>[0], revision = 1, pendingHandoff = false) => ({
+const at = (phase: Parameters<typeof stallKey>[0], progress = 1, pendingHandoff = false) => ({
 	phase,
-	revision,
+	progress: String(progress),
 	pendingHandoff,
+});
+
+test("进展标识:费用与时间变化不重置,提问决策会重置", () => {
+	const state = initialState({ missionId: "m1", tier: "standard", taskOrder: [] });
+	const billed = transition(state, { type: "RECORD_ROLE_COST", role: "planner", amount: 1, at: 2 }).state;
+	assert.equal(stallProgress(billed), stallProgress(state));
+	const asked = transition(billed, { type: "DEFINE_ASKED", settled: [], at: 3 }).state;
+	assert.notEqual(stallProgress(asked), stallProgress(state));
+});
+
+test("模型异常与中止需要人恢复,正常回复和工具调用不阻断", () => {
+	assert.match(agentBlockReason({ stopReason: "error", errorMessage: "402 budget_exceeded" })!, /402 budget_exceeded/);
+	assert.match(agentBlockReason({ stopReason: "error" })!, /未返回错误详情/);
+	assert.match(agentBlockReason({ stopReason: "aborted" })!, /中止.*继续/);
+	assert.equal(agentBlockReason({ stopReason: "stop" }), null);
+	assert.equal(agentBlockReason({ stopReason: "toolUse" }), null);
 });
 
 test("第一次 settle 就推 —— DEFINE→PLAN 那次事故正发生在进入相位后的第一次 settle", () => {
@@ -30,16 +47,16 @@ test("推过一次还是不动:报给人,不再推 —— 一直推会在模型�
 });
 
 test("相位推进了就重新开始计数 —— 那不是停滞", () => {
-	const stalled: StallState = { key: stallKey("define", 3), nudges: 2 };
+	const stalled: StallState = { key: stallKey("define", "3"), nudges: 2 };
 	const r = nextStall(stalled, at("plan", 3));
 	assert.equal(r.action, "nudge", "换了相位是有进展,新相位重新给一次推动机会");
 	assert.equal(r.state.key, "plan:3");
 	assert.equal(r.state.nudges, 1);
 });
 
-test("revision 前进了就重新开始计数 —— 有东西落了盘就算有进展", () => {
-	const stalled: StallState = { key: stallKey("plan", 7), nudges: 2 };
-	// PLAN 里交了一版计划被打回:相位没变,但 planReview 落了盘,revision 前进
+test("业务进展变化后重新开始计数", () => {
+	const stalled: StallState = { key: stallKey("plan", "7"), nudges: 2 };
+	// PLAN 里交了一版计划被人工打回:相位没变,但评审记录有了变化。
 	const r = nextStall(stalled, at("plan", 8));
 	assert.equal(r.action, "nudge");
 	assert.equal(r.state.nudges, 1);
@@ -67,7 +84,7 @@ test("define / plan / do 三个相位都推 —— 同一个形状:终结动作�
 	}
 });
 
-test("quick 的 revision 恒为 0,只靠相位变化归零", () => {
+test("业务进展未变化时,仍能靠相位变化归零", () => {
 	const first = nextStall(null, at("plan", 0));
 	const second = nextStall(first.state, at("plan", 0));
 	assert.equal(second.action, "warn");

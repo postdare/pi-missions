@@ -723,6 +723,16 @@ PREV FAILURE: <上一轮失败原因>
 对话的推进靠 `sendUserMessage(..., { deliverAs: "followUp" })`:判定完给 LLM 发一条
 DO brief 或 ACT brief,循环自己转起来。
 
+`core/stall.ts` 的 `stallProgress()` 只把任务、尝试与决策变化算作进展,
+不使用 snapshot revision(每次模型回复的费用记账也会推进 revision)。无进展时
+推动一次,再次停滞则告警交给人。`agentBlockReason()` 将模型服务错误与人工中止
+视为暂停自动推动,不算任务失败;处理额度/连接/模型配置后输入「继续」,
+成功回复会解除暂停。CHECK 已提交时仍可完成独立取证。
+
+宿主的 `session_shutdown` 调用 `Runtime.onSessionShutdown()` 使旧实例失效,
+中止独立核验,阻止旧 CHECK 结果提交和 UI 收尾。磁盘上的接力或中断状态保留,
+由新实例按原恢复协议处理;不把会话销毁误判成任务失败。
+
 ### 4.15 两层循环
 
 README 标题里的"双层循环":

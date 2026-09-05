@@ -17,7 +17,7 @@ import { evaluatePromotion } from "./core/tier.ts";
 import { evaluateBaseline, shouldProbeBaseline, type BaselineProbe } from "./core/baseline.ts";
 import { evaluateAsk, needsScopeConfirm, normalizeAskAnswers, roundCapFor, type AskQuestion } from "./core/define.ts";
 import { evaluateScout, type ScoutFanoutProgress, type ScoutFinding, type ScoutQuestion } from "./core/scout.ts";
-import { nextStall, type StallState } from "./core/stall.ts";
+import { agentBlockReason, nextStall, stallProgress, type StallState } from "./core/stall.ts";
 import { evaluateCoverage } from "./core/coverage.ts";
 import { evaluateAcImmutability } from "./core/replan.ts";
 import { openPlanReview } from "./ui/plan-review.ts";
@@ -114,6 +114,8 @@ export interface ActiveMission {
 	 * 新会话该重新给一次推动机会,而不是继承上一个会话的沉默。
 	 */
 	stall: StallState | null;
+	/** 当前会话的模型失败/中止;成功回复解除,不改变任务判定或重试次数。 */
+	agentBlock?: string | null;
 }
 
 /** 换脑后给新会话的第一句推动语。按落点相位分流 —— 换脑不只发生在 DO */
@@ -129,6 +131,21 @@ const HANDOFF_NUDGE: Record<string, string> = {
 const BASELINE_TIMEOUT_MS = 600_000;
 
 export class Runtime {
+	private closed = false;
+
+	/** 宿主已销毁的扩展不能再提交异步结果或访问旧 pi/ctx。 */
+	get sessionActive(): boolean {
+		return !this.closed;
+	}
+
+	onSessionShutdown(): void {
+		this.closed = true;
+		this.diagnostics?.dispose();
+		this.diagnostics = null;
+		// 不等待核验结束:它的 finally 可能正在等待本次会话替换完成。
+		void this.activeVerifierControl?.abort().catch(() => {});
+	}
+
 	active: ActiveMission | null = null;
 	/** 面板/命令选定的待用档位;下一次 /mission new 消费掉 */
 	pendingTier: Tier | null = null;
@@ -182,8 +199,10 @@ export class Runtime {
 	}
 
 	get exec() {
-		return (cmd: string, args: string[], opts?: { cwd?: string; timeout?: number; signal?: AbortSignal }) =>
-			this.pi.exec(cmd, args, { cwd: this.cwd, ...opts });
+		return (cmd: string, args: string[], opts?: { cwd?: string; timeout?: number; signal?: AbortSignal }) => {
+			if (this.closed) throw new Error("会话已结束,不能启动命令");
+			return this.pi.exec(cmd, args, { cwd: this.cwd, ...opts });
+		};
 	}
 
 	// ─────────────────────────── 生命周期 ───────────────────────────
@@ -490,6 +509,8 @@ export class Runtime {
 
 	async applyEvent(ev: MissionEvent, ctx: any): Promise<TransitionResult> {
 		if (!this.active) return { state: null as never, effects: [], error: "无活动 mission" };
+		if (this.closed) return { state: this.active.state, effects: [], error: "会话已结束,异步结果已丢弃" };
+		const attached = this.active;
 		if (ev.type === "ABORT") void this.activeVerifierControl?.abort();
 		if (ev.type === "SUBMIT" && ev.treeFp === undefined) {
 			// 排掉自家状态件:指纹判的是产出变没变,不是工作区变没变(见 computeGitTreeFingerprint)
@@ -497,6 +518,9 @@ export class Runtime {
 				? await computeGitTreeFingerprint(this.exec, this.cwd, [`${this.config.missionsDir}/state`])
 				: null;
 			ev = { ...ev, treeFp };
+		}
+		if (this.closed || this.active !== attached) {
+			return { state: attached.state, effects: [], error: "会话已结束或 mission 已切换,异步结果已丢弃" };
 		}
 		const r = transition(this.active.state, ev);
 		if (r.error) {
@@ -546,6 +570,7 @@ export class Runtime {
 
 	private async translateEffects(effects: Effect[], ctx: any): Promise<void> {
 		for (const e of effects) {
+			if (this.closed) return;
 			switch (e.type) {
 				case "SET_TOOLS":
 					this.pi.setActiveTools(toolsForPhase(e.phase, this.active?.state.tier));
@@ -655,11 +680,12 @@ export class Runtime {
 	 */
 	startCheck(ctx: any): Promise<void> {
 		const active = this.active;
-		if (!active) return Promise.resolve();
+		if (!active || this.closed) return Promise.resolve();
 		const current = this.checkPromises.get(active);
 		if (current) return current;
 		const guarded = this.runCheck(ctx)
 			.catch((error: unknown) => {
+				if (this.closed) return;
 				const message = error instanceof Error ? error.message : String(error);
 				try {
 					if (!active.inMemory) {
@@ -697,12 +723,13 @@ export class Runtime {
 
 	async onAgentSettled(ctx: any): Promise<void> {
 		const a = this.active;
-		if (!a) return;
+		if (!a || this.closed) return;
 
 		if (a.state.phase === "check") {
 			await this.startCheck(ctx);
 			return;
 		}
+		if (a.agentBlock) return;
 
 		if (a.state.phase === "act") {
 			// ACT = 一轮诊断对话,结束后自动回 DO(L1 改实现)
@@ -746,7 +773,7 @@ export class Runtime {
 		if (!a) return;
 		const r = nextStall(a.stall, {
 			phase: a.state.phase,
-			revision: a.revision,
+			progress: stallProgress(a.state),
 			pendingHandoff: !!a.state.pendingHandoff,
 		});
 		a.stall = r.state;
@@ -813,9 +840,13 @@ export class Runtime {
 	 * 美元与 token 分开记:自建网关常不报价(cost.total = 0),token 才是真实消耗。 */
 	async onMessageEnd(message: any, ctx: any): Promise<void> {
 		const a = this.active;
-		if (!a || message?.role !== "assistant") return;
+		if (!a || this.closed || message?.role !== "assistant") return;
 		const role = ROLE_OF[a.state.phase];
 		if (!role) return;
+		const block = agentBlockReason(message);
+		if (block && block !== a.agentBlock) this.warn(ctx, block);
+		if (a.agentBlock && !block) a.stall = null;
+		a.agentBlock = block;
 		const u = message?.usage;
 		const total = typeof u?.cost?.total === "number" ? u.cost.total : 0;
 		const tk = {
@@ -1631,6 +1662,7 @@ export class Runtime {
 	}
 
 	refreshWidget(ctx: any): void {
+		if (this.closed) return;
 		// 整段吞异常。刷 widget 从来不是关键路径,而它的调用点里有一个是
 		// check-runner 的 finally —— 那里 ctx 可能刚被换脑作废(pi 会抛
 		// "extension ctx is stale after session replacement")。真机实证(E6,09-04):

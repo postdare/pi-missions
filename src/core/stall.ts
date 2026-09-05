@@ -20,7 +20,7 @@
  * 所以是**推一次,再停就交给人**。第三次起彻底沉默 —— 报过一次的事再报是刷屏。
  */
 
-import type { Phase } from "./types.ts";
+import type { MissionState, Phase } from "./types.ts";
 
 /** 这一次 settle 该做什么 */
 export type StallAction =
@@ -49,9 +49,21 @@ export function isDrivenPhase(phase: Phase): boolean {
 	return DRIVEN.includes(phase);
 }
 
+/** 服务失败和用户中止都不是业务失败;由人恢复,不催模型、不进入 ACT 重试。 */
+export function agentBlockReason(message: { stopReason?: string; errorMessage?: string }): string | null {
+	if (message.stopReason === "aborted") {
+		return "模型回合已中止,自动推动已暂停。准备好后输入「继续」恢复。";
+	}
+	if (message.stopReason === "error") {
+		const reason = message.errorMessage?.trim() || "模型服务未返回错误详情";
+		return `模型服务异常,自动推动已暂停:${reason}\n处理额度、连接或模型配置后,输入「继续」恢复。`;
+	}
+	return null;
+}
+
 /** 停滞计数。key 变了就说明有进展,计数归零 */
 export interface StallState {
-	/** `${phase}:${revision}` —— 两者任一变化都算"上一次 settle 之后有东西落了盘" */
+	/** 相位与业务进展标识;费用、token 和落盘版本不代表推进 */
 	key: string;
 	/** 本 key 下已经推过几次 */
 	nudges: number;
@@ -59,14 +71,28 @@ export interface StallState {
 
 export interface StallInput {
 	phase: Phase;
-	/** v2 snapshot 的 CAS revision;quick 内存任务恒为 0(那时只靠相位变化归零) */
-	revision: number;
+	/** 当前任务、尝试与决策进展,不使用 snapshot revision */
+	progress: string;
 	/** 换脑挂起中:HANDOFF 自己会推 /mission next,这里不能抢 */
 	pendingHandoff: boolean;
 }
 
-export function stallKey(phase: Phase, revision: number): string {
-	return `${phase}:${revision}`;
+export function stallKey(phase: Phase, progress: string): string {
+	return `${phase}:${progress}`;
+}
+
+/** 只有任务或决策推进才重置推动额度;记账、编辑统计与更新时间均不参与。 */
+export function stallProgress(state: MissionState): string {
+	return JSON.stringify([
+		state.currentTask,
+		state.currentTask ? state.tasks[state.currentTask]?.attempts : null,
+		state.defineAsks,
+		state.defineAnswers.length,
+		state.planReview.rejections,
+		state.scoutRounds,
+		state.scoutFindings.length,
+		state.spikesRun,
+	]);
 }
 
 /**
@@ -77,8 +103,8 @@ export function stallKey(phase: Phase, revision: number): string {
  * 进入 PLAN 后的第一次 settle。
  */
 export function nextStall(prev: StallState | null, now: StallInput): { state: StallState; action: StallAction } {
-	const key = stallKey(now.phase, now.revision);
-	// key 变了 = 相位推进了或有东西落了盘,不算停滞。计数跟着新 key 从 0 开始。
+	const key = stallKey(now.phase, now.progress);
+	// key 变了 = 相位、任务或决策推进,计数跟着新 key 从 0 开始。
 	const nudges = prev && prev.key === key ? prev.nudges : 0;
 
 	if (!isDrivenPhase(now.phase) || now.pendingHandoff) {

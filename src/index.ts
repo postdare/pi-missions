@@ -41,6 +41,9 @@ export default function (pi: any) {
 	pi.on("session_start", async (event: any, ctx: any) => {
 		await runtime(ctx.cwd).onSessionStart(event, ctx);
 	});
+	pi.on("session_shutdown", () => {
+		rt?.onSessionShutdown();
+	});
 
 	// 注入 State Card + 相位提示词(I8:走到哪一步读哪一层)
 	pi.on("before_agent_start", async (event: any, ctx: any) => {

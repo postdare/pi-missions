@@ -1530,6 +1530,64 @@ test("spike:没写结论就提交 → 判 fail,但同样回 PLAN 不重试", asy
 	assert.equal(rt.active!.state.tasks.T1.sameSignatureCount, 0, "不进熔断计数");
 });
 
+test("CHECK 换会话:宿主销毁后不再调用旧工具集或 UI", async (t) => {
+	const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "pi-missions-check-shutdown-"));
+	t.after(() => fs.rmSync(tmp, { recursive: true, force: true }));
+	const { pi, ctx, rt } = await spikeMission(tmp);
+	let stale = false;
+	let staleCalls = 0;
+	const guard = () => {
+		if (stale) {
+			staleCalls++;
+			throw new Error("This extension ctx is stale after session replacement or reload");
+		}
+	};
+	ctx.ui.setWidget = guard;
+	ctx.ui.notify = guard;
+	pi.setActiveTools = guard;
+	pi.sendUserMessage = (message: string) => {
+		guard();
+		if (message === "/mission next") {
+			// 宿主在 replacement 前发 session_shutdown,随后使旧 ctx 失效。
+			rt.onSessionShutdown();
+			stale = true;
+		}
+	};
+	await rt.applyEvent({ type: "SUBMIT", at: Date.now() }, ctx);
+	await assert.doesNotReject(rt.runCheck(ctx));
+	assert.equal(staleCalls, 0, "effects 尾部与 CHECK finally 都不能再碰旧 ctx");
+	const saved = rt.repository.load(rt.active!.state.missionId);
+	assert.ok(saved.ok && saved.snapshot.state.pendingHandoff, "已提交的接力状态必须保留");
+});
+
+test("CHECK 销毁:迟到的脚本结果不提交,新实例仍可恢复", async (t) => {
+	const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "pi-missions-check-late-"));
+	t.after(() => fs.rmSync(tmp, { recursive: true, force: true }));
+	const { pi, ctx, rt } = await newMission(tmp);
+	let release!: () => void;
+	let entered!: () => void;
+	const started = new Promise<void>((resolve) => { entered = resolve; });
+	const held = new Promise<void>((resolve) => { release = resolve; });
+	pi.exec = async () => {
+		entered();
+		await held;
+		return { code: 0, stdout: "通过", stderr: "", killed: false };
+	};
+	await rt.applyEvent({ type: "SUBMIT", at: Date.now() }, ctx);
+	const pending = rt.startCheck(ctx);
+	await started;
+	const revision = rt.active!.revision;
+	rt.onSessionShutdown();
+	ctx.ui.setWidget = () => { assert.fail("旧 UI 已失效"); };
+	release();
+	await pending;
+	assert.equal(rt.active!.revision, revision);
+	assert.equal(pi.calls.entries.filter((e) => e.type === "missions-verdict").length, 0);
+	const fresh = new Runtime(mockPi(), tmp);
+	assert.equal(await fresh.ensureAttached(mockCtx(tmp)), true);
+	assert.equal(fresh.active!.state.phase, "do", "中断 CHECK 由新实例恢复到 DO");
+});
+
 test("spike 的结构约束:必须有 question,不能有 verify 分支", async () => {
 	const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "pi-missions-smoke-"));
 	const pi = mockPi();
@@ -2291,6 +2349,64 @@ test("相位停滞:推过一次仍然不动 → 交给人,不再推(一直推会
 		1,
 		"报过一次的事再报是刷屏",
 	);
+});
+
+test("相位停滞:每轮回复都有用量记账,仍只推动一次", async (t) => {
+	const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "pi-missions-stall-usage-"));
+	t.after(() => fs.rmSync(tmp, { recursive: true, force: true }));
+	const pi = mockPi();
+	const ctx = mockCtx(tmp);
+	const rt = new Runtime(pi, tmp);
+	await rt.startNew(ctx, "给待办加分页", "standard");
+	const before = pi.calls.followUps.length;
+	for (let i = 0; i < 3; i++) {
+		await rt.onMessageEnd({ role: "assistant", usage: { input: 10, output: 10 } }, ctx);
+		await rt.onAgentSettled(ctx);
+	}
+	assert.equal(pi.calls.followUps.length - before, 1, "记账不能冒充业务进展");
+	assert.equal(ctx.notifications.filter((m) => m.includes("相位停在")).length, 1);
+});
+
+test("模型服务故障:402 后停止自动推动,成功回复后可继续", async (t) => {
+	const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "pi-missions-provider-"));
+	t.after(() => fs.rmSync(tmp, { recursive: true, force: true }));
+	const pi = mockPi();
+	const ctx = mockCtx(tmp);
+	const rt = new Runtime(pi, tmp);
+	await rt.startNew(ctx, "给待办加分页", "standard");
+	const before = pi.calls.followUps.length;
+	await rt.onMessageEnd({ role: "assistant", stopReason: "error", errorMessage: "402 budget_exceeded" }, ctx);
+	await rt.onAgentSettled(ctx);
+	await rt.onAgentSettled(ctx);
+	assert.equal(pi.calls.followUps.length, before, "服务不可用时不能继续花费调用");
+	assert.equal(ctx.notifications.filter((m) => m.includes("402 budget_exceeded")).length, 1);
+	assert.ok(ctx.notifications.some((m) => m.includes("继续")), "应提供恢复入口");
+	assert.equal(rt.active!.state.phase, "define");
+	await rt.onMessageEnd({ role: "assistant", stopReason: "stop", usage: { output: 10 } }, ctx);
+	await rt.onAgentSettled(ctx);
+	assert.equal(pi.calls.followUps.length, before + 1, "人工恢复后成功回复可以重新驱动");
+});
+
+test("ACT 模型故障或人工中止:不增加尝试次数、不自动回 DO", async (t) => {
+	const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "pi-missions-act-block-"));
+	t.after(() => fs.rmSync(tmp, { recursive: true, force: true }));
+	const { rt, pi, ctx } = await newMission(tmp);
+	await rt.applyEvent({ type: "SUBMIT", at: Date.now() }, ctx);
+	await rt.runCheck(ctx); // hello.txt 不存在,进入 ACT
+	assert.equal(rt.active!.state.phase, "act");
+	const attempts = rt.active!.state.tasks.T1.attempts;
+	const before = pi.calls.followUps.length;
+	for (const stopReason of ["error", "aborted"]) {
+		await rt.onMessageEnd({ role: "assistant", stopReason, errorMessage: "402 budget_exceeded" }, ctx);
+		await rt.onAgentSettled(ctx);
+		assert.equal(rt.active!.state.phase, "act");
+		assert.equal(rt.active!.state.tasks.T1.attempts, attempts);
+		assert.equal(pi.calls.followUps.length, before);
+	}
+	await rt.onMessageEnd({ role: "assistant", stopReason: "stop" }, ctx);
+	await rt.onAgentSettled(ctx);
+	assert.equal(rt.active!.state.phase, "do");
+	assert.equal(rt.active!.state.tasks.T1.attempts, attempts + 1);
 });
 
 test("相位停滞:相位推进之后重新给一次推动机会", async () => {
