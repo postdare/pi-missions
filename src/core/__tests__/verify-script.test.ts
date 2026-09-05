@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import * as fs from "node:fs";
-import { formatVerifyScriptIssues, inspectVerifyScript } from "../verify-script.ts";
+import { autoFixVerifyScript, formatVerifyScriptIssues, inspectVerifyScript } from "../verify-script.ts";
 
 // ─────────────────────────── 真实事故素材 ───────────────────────────
 //
@@ -268,4 +268,62 @@ test("打回信息三件事齐全:哪一行、为什么、该写成什么", () =
 	assert.match(msg, /dirname/);
 	assert.match(msg, /→ /, "修法要单独起一行,别混在原因里");
 	assert.match(msg, /不是换一种 cd/, "反直觉的那半句必须在");
+});
+
+// ─────────────────────────── 自动剥离 ───────────────────────────
+
+test("autoFix:事故一那行 cd 被删掉,其余一字不动", () => {
+	const r = autoFixVerifyScript(ACCIDENT_1);
+	assert.equal(r.removed.length, 1);
+	assert.equal(r.removed[0].rule, "script-dir");
+	assert.equal(r.removed[0].line, 5);
+	assert.deepEqual(inspectVerifyScript(r.script), [], "剥完之后应该干净");
+	// 只少了那一行,别的都在
+	assert.ok(r.script.includes("go test ./internal/tui -run TestQuitConfirm"));
+	assert.ok(r.script.includes('BRANCH="${1:-}"'));
+	assert.equal(r.script.split("\n").length, ACCIDENT_1.split("\n").length - 1);
+});
+
+test("autoFix:R2 一行都不删 —— 在临时目录里干活可能是正当的", () => {
+	const r = autoFixVerifyScript(ACCIDENT_2);
+	assert.deepEqual(r.removed, [], "temp-dir 不自动改,照旧打回让人来判");
+	assert.equal(r.script, ACCIDENT_2);
+	assert.ok(inspectVerifyScript(r.script).length > 0, "问题还在,还得报");
+});
+
+test("autoFix:cd 和别的命令同一行时不删 —— 删整行会把测试也删了", () => {
+	const script = `#!/usr/bin/env bash
+cd "$(dirname "$0")" && go test ./... -count=1
+`;
+	const issues = inspectVerifyScript(script);
+	assert.equal(issues.length, 1);
+	assert.equal(issues[0].rule, "script-dir");
+	assert.equal(issues[0].autoFixable, false);
+
+	const r = autoFixVerifyScript(script);
+	assert.equal(r.script, script, "一个字都不能动");
+	assert.deepEqual(r.removed, []);
+});
+
+test("autoFix:DIR 变量那一跳也认,删的是 cd 那行不是赋值那行", () => {
+	const script = `#!/usr/bin/env bash
+DIR="$(dirname "$0")"
+cd "$DIR"
+go test ./... -count=1
+`;
+	const r = autoFixVerifyScript(script);
+	assert.equal(r.removed.length, 1);
+	assert.equal(r.removed[0].line, 3);
+	assert.ok(r.script.includes('DIR="$(dirname "$0")"'), "赋值本身无害,留着");
+	assert.ok(!r.script.includes('cd "$DIR"'));
+});
+
+test("autoFix:干净脚本原样返回,不做任何改写", () => {
+	const clean = `#!/usr/bin/env bash
+set -uo pipefail
+go test ./... -count=1
+`;
+	const r = autoFixVerifyScript(clean);
+	assert.equal(r.script, clean);
+	assert.deepEqual(r.removed, []);
 });

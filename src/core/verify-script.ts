@@ -29,6 +29,13 @@
 
 /** 一处会切走工作目录的写法 */
 export interface VerifyScriptIssue {
+	/** 命中的是哪条规则。R1 = 切到脚本自己所在的目录,R2 = 切进临时目录 */
+	rule: "script-dir" | "temp-dir";
+	/**
+	 * 这一行能不能由 L0 直接删掉。
+	 * 只有 R1 且**整行就是这一条 cd** 才为真 —— 见 autoFixVerifyScript 的说明。
+	 */
+	autoFixable: boolean;
 	/** 1 起算的行号 */
 	line: number;
 	/** 该行原文(去掉首尾空白;过长时截断) */
@@ -88,6 +95,10 @@ export function inspectVerifyScript(script: string): VerifyScriptIssue[] {
 			// ── R1:cd 到脚本自己所在的目录 ──
 			if (mentionsScriptPath(target) || referencesVar(target, fromScriptDir)) {
 				issues.push({
+					rule: "script-dir",
+					// 整行只有这一条 cd 时才敢删:`cd … && go test ./...` 删掉整行会把测试也删了,
+					// 而按段删要重新拼装这一行,那就不是"剥掉一行"而是改写脚本了。
+					autoFixable: code.trim() === seg.trim(),
 					line: lineNo,
 					text: excerpt(raw),
 					reason:
@@ -105,6 +116,8 @@ export function inspectVerifyScript(script: string): VerifyScriptIssue[] {
 				const builder = sourceConsumingCommand(seg);
 				if (builder) {
 					issues.push({
+						rule: "temp-dir",
+						autoFixable: false,
 						line: lineNo,
 						text: excerpt(raw),
 						reason:
@@ -128,6 +141,8 @@ export function inspectVerifyScript(script: string): VerifyScriptIssue[] {
 
 	if (strandedAt) {
 		issues.push({
+			rule: "temp-dir",
+			autoFixable: false,
 			line: strandedAt.line,
 			text: excerpt(strandedAt.text),
 			reason:
@@ -366,6 +381,47 @@ function escapeRe(s: string): string {
 }
 
 /** 把问题列表渲染成 validatePlan 用的错误行 */
+/** 剥离结果。`script` 是可以直接冻结的那份,`removed` 用来记账 */
+export interface VerifyScriptFix {
+	script: string;
+	removed: VerifyScriptIssue[];
+}
+
+/**
+ * 把「cd 到脚本自己所在的目录」这类行直接删掉,而不是打回让模型重写。
+ *
+ * ## 为什么是删,不是拦
+ *
+ * 拦了两年也拦不住。`templates/phases/plan.md` 里写了警告,L0 的打回意见里
+ * 把正确答案(什么都不写)明说了两遍 —— 真机上仍然连栽:E7(09-04)、
+ * 以及 09-05 另一个 mission,不同会话、不同题目、同一行 `cd "$(dirname "$0")/.."`。
+ * 说明它不是"没读到",是这个写法在 shell 脚本里的肌肉记忆压过了提示。
+ * 文案再加一遍没有用(同 E8 的教训),那就别再让人去重写。
+ *
+ * ## 为什么只删 R1,而且只删整行
+ *
+ * 这个文件立着一条纪律:**宁可漏判,不可误判** —— 因为误判是把一个正确的计划
+ * 挡在门外,而 planner 无法申辩。自动改脚本会让误判从"能申辩"变成"无声改坏",
+ * 比原来更糟。所以只动**没有任何合法解释**的那一类:
+ *
+ *   - R1(`cd` 到 `$0` 推导出的目录):verify.sh 是冻结件,它所在的
+ *     `generations/<n>/` 里没有源码。切过去在任何情况下都是错的,删掉不会误伤。
+ *   - R2(`cd` 进 mktemp 目录):**不删。** 在临时目录里干活可以是正当的
+ *     (放产物、隔离 HOME),删了就是把一个可能正确的脚本改坏。照旧打回。
+ *
+ * 还要求**整行只有这一条 cd**:`cd … && go test ./...` 删整行会把测试也删掉,
+ * 而按段重拼就不再是"剥掉一行"而是改写脚本 —— 那一步的风险不值得省这一轮打回。
+ *
+ * 剥离必须**留痕**(调用方写 LOG):冻结件被 L0 动过手,事后要查得出来动了什么。
+ */
+export function autoFixVerifyScript(script: string): VerifyScriptFix {
+	const removed = inspectVerifyScript(script).filter((i) => i.autoFixable);
+	if (removed.length === 0) return { script, removed: [] };
+	const drop = new Set(removed.map((i) => i.line));
+	const kept = script.split("\n").filter((_, i) => !drop.has(i + 1));
+	return { script: kept.join("\n"), removed };
+}
+
 export function formatVerifyScriptIssues(issues: VerifyScriptIssue[]): string[] {
 	return issues.map(
 		(i) => `verify.sh 第 ${i.line} 行 \`${i.text}\` 会把工作目录切离仓库根。${i.reason}\n  → ${i.fix}`,

@@ -20,6 +20,7 @@ import { evaluateScout, type ScoutFanoutProgress, type ScoutFinding, type ScoutQ
 import { agentBlockReason, nextStall, stallProgress, type StallState } from "./core/stall.ts";
 import { evaluateCoverage } from "./core/coverage.ts";
 import { evaluateAcImmutability } from "./core/replan.ts";
+import { autoFixVerifyScript } from "./core/verify-script.ts";
 import { openPlanReview } from "./ui/plan-review.ts";
 import { openDefineReview } from "./ui/define-review.ts";
 import { openAskReview } from "./ui/ask-review.ts";
@@ -1348,7 +1349,17 @@ export class Runtime {
 		if (!a) return { error: "无活动 mission" };
 		if (a.state.phase !== "plan") return { error: `当前相位是 ${a.state.phase},只能在 plan 相位写计划` };
 
-		const plan: MissionPlan = { ...a.plan, ...params };
+		// 「cd 到脚本自己所在的目录」直接剥掉,不再打回让模型重写 ——
+		// 提示词写过、打回意见明说过两遍,真机上仍然连栽三次(理由见 core/verify-script.ts
+		// 的 autoFixVerifyScript)。只剥这一类,而且必须留痕:冻结件被 L0 动过手,
+		// 事后要查得出来动了什么。
+		const fixed = autoFixVerifyScript(params.verifyScript);
+		if (fixed.removed.length > 0 && !a.inMemory) {
+			const sp = statePaths(this.layout, a.state.missionId);
+			appendLog(sp.logMd, `verify.sh 自动剥离 ${fixed.removed.length} 行会切走工作目录的 cd:`);
+			for (const r of fixed.removed) appendLog(sp.logMd, `  · 第 ${r.line} 行 \`${r.text}\``);
+		}
+		const plan: MissionPlan = { ...a.plan, ...params, verifyScript: fixed.script };
 		const errors = validatePlan(plan);
 		// 完成条件的覆盖:DEFINE 产出的清单必须被 AC 逐条翻译成退出码。
 		// 独立成模块是因为它判的是两份产物之间的关系,不是计划自身的结构合法性。

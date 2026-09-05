@@ -232,6 +232,39 @@ test("常驻卡与看板必须显式挂在输入框下方 —— pi 的默认值
 	);
 });
 
+test("verify.sh 里的 cd 被 L0 剥掉,计划照常冻结,而且留了痕", async () => {
+	// 提示词写过、打回意见明说过两遍,真机上仍然连栽三次(E7 09-04、另一个 mission 09-05)。
+	// 所以这一类不再打回让模型重写,L0 自己删掉 —— 但必须写进 LOG,冻结件被动过手要查得出来。
+	const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "pi-missions-smoke-"));
+	const pi = mockPi();
+	const ctx = mockCtx(tmp);
+	const rt = new Runtime(pi, tmp);
+	await rt.startNew(ctx, "create hello.txt", "standard");
+	await rt.define(ctx, { goal: "create hello.txt", doneWhen: DW, constraints: [], nonGoals: [] });
+
+	const wp = await rt.writePlan(ctx, {
+		goal: "create hello.txt",
+		acceptanceCriteria: [{ id: "AC1", text: "hello.txt 存在", verify: "hello-exists", covers: ["DW1"] }],
+		milestones: [{ id: "M1", title: "做", tasks: [{ id: "T1", title: "写文件", verify: ["hello-exists"] }] }],
+		verifyScript: `#!/usr/bin/env bash\ncd "$(dirname "$0")"\n${VERIFY_SH.split("\n").slice(1).join("\n")}`,
+	});
+	assert.ok("ok" in wp, `本该冻结成功,却被打回:${JSON.stringify(wp)}`);
+
+	// 冻结下去的那份不能再有 cd
+	assert.ok(!rt.active!.plan.verifyScript.includes("cd "), rt.active!.plan.verifyScript);
+	assert.ok(rt.active!.plan.verifyScript.includes("hello-exists"), "别的内容不能跟着丢");
+
+	// 盘上的冻结件与内存里的计划一致(hash 由 repository 校验,这里再直接看一眼)
+	const gen = path.join(tmp, "missions", "state", rt.active!.state.missionId, "generations");
+	const dirs = fs.readdirSync(gen);
+	const onDisk = fs.readFileSync(path.join(gen, dirs[dirs.length - 1], "verify.sh"), "utf8");
+	assert.ok(!onDisk.includes("cd "), onDisk);
+
+	const log = fs.readFileSync(path.join(tmp, "missions", "state", rt.active!.state.missionId, "LOG.md"), "utf8");
+	assert.match(log, /verify\.sh 自动剥离 1 行/);
+	assert.match(log, /第 2 行/);
+});
+
 test("完整闭环:fail → act → adjust → pass → done", async () => {
 	const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "pi-missions-smoke-"));
 	const { pi, ctx, rt } = await newMission(tmp);
